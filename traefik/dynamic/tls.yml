@@ -2,6 +2,13 @@
 # https://doc.traefik.io/traefik/https/tls/
 
 tls:
+  # Internal-CA wildcard cert for the local admin-UI tier (mkcert-issued,
+  # see docs/HTTPS-LOCAL.md). Files are gitignored, NAS-only - not synced by
+  # git pull, deploy them onto the NAS's traefik/certs/ directory directly.
+  certificates:
+    - certFile: /certs/lan-wildcard.crt
+      keyFile: /certs/lan-wildcard.key
+
   options:
     default:
       minVersion: VersionTLS12
