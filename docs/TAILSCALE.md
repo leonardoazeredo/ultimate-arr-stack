@@ -77,6 +77,70 @@ curl http://sonarr.lan
 
 Both should respond exactly as they do on home WiFi.
 
+## 6. Restrict access with an ACL policy (recommended)
+
+By default, every device you approve on the tailnet gets full access to everything the NAS
+advertises — the whole LAN subnet route and the exit node. Fine for your own devices; not fine for
+a device you don't fully trust with that (a guest, a shared device, a friend's phone you just want
+pointed at Jellyfin). An ACL policy scopes each device class to only what it needs.
+
+> ⚠️ **Order matters — tag your own devices before writing any restrictive rule.** Once a `dst`
+> rule exists, anything not matched by an `accept` rule is denied by default. If your own device
+> isn't tagged `tag:personal-device` yet when you save the policy below, you lock yourself out of
+> the NAS over Tailscale. Do step 2 (tag your devices) for *every* device you use — including
+> whichever one you're reading this on — before trusting the restrictive rules to be in effect.
+
+**1. Set the ACL policy.** Tailscale admin console → *Access controls* → replace the policy (or
+merge into an existing custom one) with:
+
+```json
+{
+  "tagOwners": {
+    "tag:nas-router": ["autogroup:admin"],
+    "tag:personal-device": ["autogroup:admin"],
+    "tag:guest": ["autogroup:admin"]
+  },
+  "acls": [
+    {"action": "accept", "src": ["tag:personal-device"], "dst": ["tag:nas-router:*", "<LAN_SUBNET>:*"]},
+    {"action": "accept", "src": ["tag:guest"], "dst": ["<NAS_LAN_IP>:8096", "<NAS_LAN_IP>:5055"]}
+  ],
+  "autoApprovers": {
+    "routes": {"<LAN_SUBNET>": ["tag:nas-router"]},
+    "exitNode": ["tag:nas-router"]
+  }
+}
+```
+
+Replace `<LAN_SUBNET>` with your actual `.env` `LAN_SUBNET` value (e.g. `192.168.8.0/24`) and
+`<NAS_LAN_IP>` with the NAS's LAN IP. `autoApprovers` means the subnet route and exit node
+auto-approve for anything tagged `tag:nas-router` — no more manual "Edit route settings" clicks
+(steps 3a/3b above become automatic once the NAS is tagged, step 3 below).
+
+**2. Tag every personal device.** *Machines* → (device) → **⋯** → *Edit ACL tags* → add
+`tag:personal-device`. Repeat for **every** device you personally use, before doing anything else
+— this is the step that prevents a lockout.
+
+**3. Recreate the Tailscale container** so the NAS picks up `tag:nas-router` (already wired into
+`docker-compose.tailscale.yml`'s `TS_EXTRA_ARGS`):
+
+```bash
+docker compose -f docker-compose.tailscale.yml up -d --force-recreate
+```
+
+Confirm: `docker exec tailscale tailscale status --json` should show `"Tags":["tag:nas-router"]`
+under `Self`, and the subnet route + exit node should already show approved (via `autoApprovers`)
+without the manual admin-console clicks from step 3 above.
+
+**4. Only after your own devices are confirmed working**, tag any shared/guest device
+`tag:guest` — it's restricted to Jellyfin (`:8096`) and Seerr (`:5055`) only, bypassing Traefik and
+the HTTPS+basicauth layer entirely (both apps have their own login, so this is intentional — a
+guest never needs Sonarr/Radarr/Pi-hole/etc.).
+
+**Rollback**: the admin console keeps ACL policy version history — *Access controls* → *History* →
+revert to the previous version. No NAS-side action needed; the compose change (advertising
+`tag:nas-router`) is harmless even without a matching ACL policy, it just has no effect until
+`tagOwners` grants it.
+
 ## Troubleshooting
 
 **`docker logs tailscale` shows no login URL.**
