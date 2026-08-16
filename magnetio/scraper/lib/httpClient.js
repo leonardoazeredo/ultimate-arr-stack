@@ -12,9 +12,9 @@ const DEFAULT_HEADERS = {
 
 const limiters = new Map();
 
-function getLimiter(key) {
+function getLimiter(key, opts = { minTime: 250, maxConcurrent: 4 }) {
   if (!limiters.has(key)) {
-    limiters.set(key, new Bottleneck({ minTime: 250, maxConcurrent: 4 }));
+    limiters.set(key, new Bottleneck(opts));
   }
   return limiters.get(key);
 }
@@ -61,6 +61,38 @@ export async function get(url, {
       }
     }
     throw lastErr;
+  });
+}
+
+const FLARESOLVERR_URL = process.env.FLARESOLVERR_URL;
+
+// Single shared limiter (maxConcurrent: 1) across every caller regardless of
+// limiterKey - FlareSolverr is one headless-Chrome instance shared with
+// Prowlarr, so requests must be serialized, not parallelized per-provider.
+const flareSolverrLimiter = new Bottleneck({ minTime: 500, maxConcurrent: 1 });
+
+/**
+ * GET a Cloudflare-protected page via FlareSolverr's headless-browser proxy.
+ * Much slower than a plain GET (page render, several seconds+) - only use
+ * this for providers that a plain axios GET can't reach at all.
+ *
+ * @param {string}  url
+ * @param {number}  opts.timeout  FlareSolverr render timeout ms (default 30000)
+ */
+export async function getViaFlareSolverr(url, { timeout = 30000 } = {}) {
+  if (!FLARESOLVERR_URL) throw new Error('FLARESOLVERR_URL not configured');
+
+  return flareSolverrLimiter.schedule(async () => {
+    const res = await axios.post(`${FLARESOLVERR_URL}/v1`, {
+      cmd: 'request.get',
+      url,
+      maxTimeout: timeout,
+    }, { timeout: timeout + 10_000 });
+
+    if (res.data.status !== 'ok') {
+      throw new Error(`FlareSolverr: ${res.data.message ?? 'unknown error'}`);
+    }
+    return { data: res.data.solution.response };
   });
 }
 

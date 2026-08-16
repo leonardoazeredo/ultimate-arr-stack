@@ -104,6 +104,12 @@ services:
       - REDIS_URI=redis://:${MAGNETIO_REDIS_PASSWORD}@magnetio-redis:6379
       - CACHE_TTL_STREAMS=86400
       - LOG_LEVEL=info
+      # magnetio-scraper is deliberately isolated on magnetio-net (see
+      # networks: comment above) so it can't reach flaresolverr by container
+      # name the way Prowlarr does - it goes out via the NAS's LAN IP
+      # instead, since flaresolverr's port is already published on gluetun
+      # (docker-compose.arr-stack.yml). Used only by the 1337x provider.
+      - FLARESOLVERR_URL=http://${NAS_IP}:8191
     depends_on:
       magnetio-redis:
         condition: service_healthy
