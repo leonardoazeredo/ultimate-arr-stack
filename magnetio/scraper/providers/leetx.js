@@ -2,7 +2,7 @@
  * 1337x provider -- scrapes search and detail pages via HTML.
  */
 import * as cheerio from 'cheerio';
-import { getViaFlareSolverr } from '../lib/httpClient.js';
+import { getViaFlareSolverr, createFlareSolverrSession, destroyFlareSolverrSession } from '../lib/httpClient.js';
 import { parseTitle, buildSearchQuery } from '../lib/titleHelper.js';
 import { tryDomains, PROVIDER_DOMAINS } from '../lib/domainRotation.js';
 import { logger } from '../lib/logger.js';
@@ -14,27 +14,32 @@ const DOMAINS = PROVIDER_DOMAINS['1337x'];
 // detail alike, has to go through FlareSolverr's shared headless browser.
 // Capped at 5 detail-page fetches (not the site's full ~20-result page) to
 // bound how much load one 1337x search puts on that shared instance, which
-// Prowlarr also depends on.
+// Prowlarr also depends on. All fetches in one scrape() share a single
+// FlareSolverr session so only the first request pays the ~30s
+// challenge-solve cost - without this, each detail fetch re-solves from
+// scratch (confirmed live 2026-08-16).
 const MAX_DETAIL_FETCHES = 5;
 
 export const id   = '1337x';
 export const name = '1337x';
-// FlareSolverr renders (search + up to MAX_DETAIL_FETCHES serialized detail
-// pages) routinely exceed the orchestrator's default 15s provider budget -
-// index.js reads this to give 1337x specifically more room without changing
-// the timeout for every other (fast, non-Cloudflare) provider.
-export const timeoutMs = 30_000;
+// index.js reads this to give 1337x specifically more room than the default
+// 15s provider budget: one ~30s challenge-solve plus up to MAX_DETAIL_FETCHES
+// session-reused (fast) detail fetches.
+export const timeoutMs = 45_000;
 
 export async function scrape(meta) {
   if (!meta?.name) return [];
 
+  let session;
   try {
+    session = await createFlareSolverrSession();
+
     const query = buildSearchQuery(meta);
     const cat   = meta.type === 'movie' ? 'Movies' : 'TV';
 
     const { data, base } = await tryDomains(DOMAINS, async (base) => {
       const url = `${base}/category-search/${encodeURIComponent(query)}/${cat}/1/`;
-      const res = await getViaFlareSolverr(url);
+      const res = await getViaFlareSolverr(url, { session });
       return { data: res.data, base };
     }, '1337x');
 
@@ -50,7 +55,7 @@ export async function scrape(meta) {
     const batches = chunkArray(detailUrls.slice(0, MAX_DETAIL_FETCHES), 5);
 
     for (const batch of batches) {
-      const settled = await Promise.allSettled(batch.map(u => fetchDetail(u, meta)));
+      const settled = await Promise.allSettled(batch.map(u => fetchDetail(u, meta, session)));
       for (const r of settled) {
         if (r.status === 'fulfilled' && r.value) results.push(r.value);
       }
@@ -60,12 +65,14 @@ export async function scrape(meta) {
   } catch (err) {
     logger.warn(`[1337x] ${err.message}`);
     return [];
+  } finally {
+    if (session) destroyFlareSolverrSession(session);
   }
 }
 
-async function fetchDetail(url, meta) {
+async function fetchDetail(url, meta, session) {
   try {
-    const { data } = await getViaFlareSolverr(url);
+    const { data } = await getViaFlareSolverr(url, { session });
     const $ = cheerio.load(data);
 
     const magnet   = $('a[href^="magnet:"]').first().attr('href') ?? '';
