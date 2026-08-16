@@ -228,7 +228,7 @@ jobs:
               -v /var/run/docker.sock:/var/run/docker.sock \
               -w /repo \
               arr-stack-e2e \
-              bash -c 'npm ci && npx playwright test --config tests/e2e/playwright.config.ts'
+              bash -c 'npm install && npx playwright test --config tests/e2e/playwright.config.ts'
           "
 
       - name: Merge to main
