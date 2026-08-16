@@ -244,11 +244,25 @@ jobs:
           # hand-edit) resolves .lan names the same way any other correctly
           # configured LAN client already does — confirmed live via
           # `dig @<NAS_IP> sonarr.lan` returning Traefik's macvlan IP.
+          #
+          # NODE_OPTIONS=--dns-result-order=ipv4first: dnsmasq (Pi-hole's
+          # backend) answers AAAA queries for A-only .lan records with the
+          # literal address "::" (documented dnsmasq behavior for address=
+          # entries given only an IPv4 target, not a bug). Node's dns.lookup()
+          # defaults to "verbatim" ordering (no IPv4 preference) and returns
+          # both records; Linux's connect() treats a destination of "::" as
+          # ::1 (loopback), which on this NAS lands on UGOS's own admin panel
+          # rather than failing — so the sonarr.lan redirect-follow request
+          # "succeeded" with UGOS's HTML instead of Sonarr's login page,
+          # seen live in run 31968540414. Forcing ipv4first makes Node pick
+          # the correct 192.168.8.250 answer — confirmed live via
+          # `node -e "require('dns').lookup('sonarr.lan',(e,a,f)=>...)"`.
           ssh -o ConnectTimeout=15 "${NAS_USER}@${NAS_HOST}" "
             cd '${NAS_STACK_DIR}' &&
             NAS_IP=\$(grep '^NAS_IP=' .env | cut -d= -f2) &&
             docker build -t arr-stack-e2e -f tests/e2e/Dockerfile . &&
             docker run --rm --network host --dns \"\$NAS_IP\" \
+              -e NODE_OPTIONS=--dns-result-order=ipv4first \
               -v '${NAS_STACK_DIR}:/repo' \
               -v /var/run/docker.sock:/var/run/docker.sock \
               -w /repo \
