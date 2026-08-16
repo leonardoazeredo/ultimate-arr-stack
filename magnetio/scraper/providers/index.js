@@ -102,21 +102,13 @@ export async function scrapeAll(type, meta, providerIds = null, context = {}) {
       }
     }, EARLY_RETURN_MS);
 
-    // Hard deadline: cut off after hardTimeoutMs even if providers are still
-    // pending. Stretched (not shortened) to cover any provider that declares
-    // a longer timeoutMs (e.g. 1337x's FlareSolverr-backed fetch), so a slow
-    // provider still gets its declared budget instead of being cut off by
-    // the default meant for plain HTTP scrapers.
-    const hardTimeoutMs = Math.max(
-      HARD_TIMEOUT_MS,
-      ...providers.map(p => (p.timeoutMs ?? PROVIDER_TIMEOUT_MS) + 2000)
-    );
+    // Hard deadline: cut off after HARD_TIMEOUT_MS even if providers are still pending
     const hardTimer = setTimeout(() => {
       if (!resolved) {
-        logger.info(`Hard timeout: ${collected.length} results from ${completedCount}/${providers.length} providers after ${hardTimeoutMs}ms`);
+        logger.info(`Hard timeout: ${collected.length} results from ${completedCount}/${providers.length} providers after ${HARD_TIMEOUT_MS}ms`);
         finalize();
       }
-    }, hardTimeoutMs);
+    }, HARD_TIMEOUT_MS);
 
     // Launch all providers in parallel (concurrency-limited)
     const tasks = providers.map(p =>
@@ -126,7 +118,7 @@ export async function scrapeAll(type, meta, providerIds = null, context = {}) {
         try {
           const results = await withTimeout(
             p.scrape({ ...meta, ...context, type }),
-            p.timeoutMs ?? PROVIDER_TIMEOUT_MS,
+            PROVIDER_TIMEOUT_MS,
             `${p.name} timed out`
           );
           logger.info(`[${p.name}] ${results.length} results in ${Date.now() - start}ms`);

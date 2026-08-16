@@ -2,44 +2,26 @@
  * 1337x provider -- scrapes search and detail pages via HTML.
  */
 import * as cheerio from 'cheerio';
-import { getViaFlareSolverr, createFlareSolverrSession, destroyFlareSolverrSession } from '../lib/httpClient.js';
+import { get } from '../lib/httpClient.js';
 import { parseTitle, buildSearchQuery } from '../lib/titleHelper.js';
 import { tryDomains, PROVIDER_DOMAINS } from '../lib/domainRotation.js';
 import { logger } from '../lib/logger.js';
 
 const DOMAINS = PROVIDER_DOMAINS['1337x'];
 
-// 1337x is Cloudflare-blocked at the network level (confirmed live
-// 2026-08-16, flat 403 even via plain curl/wget) - every page, search and
-// detail alike, has to go through FlareSolverr's shared headless browser.
-// Capped at 5 detail-page fetches (not the site's full ~20-result page) to
-// bound how much load one 1337x search puts on that shared instance, which
-// Prowlarr also depends on. All fetches in one scrape() share a single
-// FlareSolverr session so only the first request pays the ~30s
-// challenge-solve cost - without this, each detail fetch re-solves from
-// scratch (confirmed live 2026-08-16).
-const MAX_DETAIL_FETCHES = 5;
-
 export const id   = '1337x';
 export const name = '1337x';
-// index.js reads this to give 1337x specifically more room than the default
-// 15s provider budget: one ~30s challenge-solve plus up to MAX_DETAIL_FETCHES
-// session-reused (fast) detail fetches.
-export const timeoutMs = 45_000;
 
 export async function scrape(meta) {
   if (!meta?.name) return [];
 
-  let session;
   try {
-    session = await createFlareSolverrSession();
-
     const query = buildSearchQuery(meta);
     const cat   = meta.type === 'movie' ? 'Movies' : 'TV';
 
     const { data, base } = await tryDomains(DOMAINS, async (base) => {
       const url = `${base}/category-search/${encodeURIComponent(query)}/${cat}/1/`;
-      const res = await getViaFlareSolverr(url, { session });
+      const res = await get(url, { limiterKey: '1337x' });
       return { data: res.data, base };
     }, '1337x');
 
@@ -52,10 +34,10 @@ export async function scrape(meta) {
     });
 
     const results = [];
-    const batches = chunkArray(detailUrls.slice(0, MAX_DETAIL_FETCHES), 5);
+    const batches = chunkArray(detailUrls.slice(0, 20), 5);
 
     for (const batch of batches) {
-      const settled = await Promise.allSettled(batch.map(u => fetchDetail(u, meta, session)));
+      const settled = await Promise.allSettled(batch.map(u => fetchDetail(u, meta)));
       for (const r of settled) {
         if (r.status === 'fulfilled' && r.value) results.push(r.value);
       }
@@ -65,14 +47,12 @@ export async function scrape(meta) {
   } catch (err) {
     logger.warn(`[1337x] ${err.message}`);
     return [];
-  } finally {
-    if (session) destroyFlareSolverrSession(session);
   }
 }
 
-async function fetchDetail(url, meta, session) {
+async function fetchDetail(url, meta) {
   try {
-    const { data } = await getViaFlareSolverr(url, { session });
+    const { data } = await get(url, { limiterKey: '1337x' });
     const $ = cheerio.load(data);
 
     const magnet   = $('a[href^="magnet:"]').first().attr('href') ?? '';

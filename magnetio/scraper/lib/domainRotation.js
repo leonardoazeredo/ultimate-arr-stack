@@ -64,16 +64,10 @@ export const UNBLOCKIT = 'unblockit.download';
 
 export const PROVIDER_DOMAINS = {
   '1337x': [
-    // Fetched exclusively via FlareSolverr (Cloudflare-blocked at the
-    // network level). Confirmed live 2026-08-16: .to and .gd present an
-    // unsolvable challenge (FlareSolverr times out even at 75s), while the
-    // UNBLOCKIT mirror clears it in ~30s - tried first so the common case
-    // doesn't burn ~30-75s per dead domain before reaching the one that
-    // works. .to/.st/.gd kept as fallbacks in case that ever changes.
-    `https://1337x.${UNBLOCKIT}`,
     'https://1337x.to',
     'https://1337x.st',
     'https://1337x.gd',
+    `https://1337x.${UNBLOCKIT}`,
   ],
   eztv: [
     'https://eztv.re',
