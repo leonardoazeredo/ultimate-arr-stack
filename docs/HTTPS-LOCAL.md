@@ -9,21 +9,31 @@ gate they get. Jellyfin and Seerr are untouched: they already have real app-leve
 plain HTTP on `.lan` — Cloudflare Tunnel handles their public HTTPS.
 
 This uses a **locally-trusted internal CA** (via [`mkcert`](https://github.com/FiloSottile/mkcert)),
-not a public CA — `*.lan` isn't a real, publicly-resolvable domain, so Let's Encrypt can't issue for
+not a public CA — `.lan` isn't a real, publicly-resolvable domain, so Let's Encrypt can't issue for
 it, and running a full ACME server (step-ca) for a single-user home setup is unnecessary
 complexity. The tradeoff: every personal device needs the CA's root cert installed once before it
 trusts `https://sonarr.lan` etc. without a browser warning.
 
-**Step 1: Generate the CA + wildcard cert (once, on your own machine — not the NAS)**
+**Step 1: Generate the CA + cert (once, on your own machine — not the NAS)**
 
 ```bash
 brew install mkcert          # macOS; see mkcert's README for other platforms
 mkcert -install               # installs the CA into this machine's trust store
-mkcert -cert-file lan-wildcard.crt -key-file lan-wildcard.key "*.lan"
+mkcert -cert-file lan-admin.crt -key-file lan-admin.key \
+  sonarr.lan radarr.lan prowlarr.lan bazarr.lan qbit.lan sabnzbd.lan \
+  traefik.lan pihole.lan uptime.lan duc.lan beszel.lan
 ```
 
-This creates two files (`lan-wildcard.crt`, `lan-wildcard.key`) signed by a CA whose private key
-never leaves this machine — only the leaf cert/key pair goes to the NAS.
+This creates two files (`lan-admin.crt`, `lan-admin.key`) signed by a CA whose private key never
+leaves this machine — only the leaf cert/key pair goes to the NAS.
+
+**Why an explicit host list instead of a `*.lan` wildcard**: OpenSSL-family TLS stacks (curl, and
+most browsers) refuse wildcard matching against a single-label suffix like `.lan` — they treat it
+like a public-suffix boundary, the same protection that stops a CA from usefully issuing `*.com`.
+mkcert's own README flags this as a known caveat; confirmed here empirically (`curl` failed a
+`*.lan` cert with "subjectAltName does not match host name"). An explicit SAN list sidesteps the
+whole issue — the tradeoff is that **adding a new `.lan` admin host means regenerating this cert**
+with the extra hostname appended and redeploying (Steps 1–2, then Step 4).
 
 **Step 2: Deploy the cert to the NAS**
 
@@ -31,8 +41,14 @@ never leaves this machine — only the leaf cert/key pair goes to the NAS.
 they aren't synced by `git pull`:
 
 ```bash
-scp -O lan-wildcard.crt lan-wildcard.key cloud-nas:/volume1/docker/arr-stack/traefik/certs/
+scp -O lan-admin.crt lan-admin.key cloud-nas:/volume1/docker/arr-stack/traefik/certs/
+ssh cloud-nas 'chmod 644 /volume1/docker/arr-stack/traefik/certs/lan-admin.key'
 ```
+
+The `chmod 644` on the key matters: this NAS's Docker daemon userns-remaps container root to an
+unprivileged host UID, so Traefik (running as container-root) can't read a `600` key owned by a
+different host user — it silently falls back to its own self-signed default cert instead of
+erroring, which looks like "HTTPS works" until a client actually checks the cert chain.
 
 **Step 3: Set the admin-UI password (reuses the Traefik dashboard credential)**
 
