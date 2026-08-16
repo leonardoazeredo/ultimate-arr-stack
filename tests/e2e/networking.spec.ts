@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import * as dns from 'node:dns';
+import * as https from 'node:https';
 import { test, expect } from '@playwright/test';
 import { HOST, DOCKER_AVAILABLE, dockerInspect } from './helpers';
 
@@ -93,30 +93,44 @@ test.describe('Admin-UI HTTPS tier', () => {
     expect(res.headers()['location']).toBe('https://sonarr.lan/');
   });
 
-  test('https sonarr.lan without credentials is rejected', async ({ request }) => {
+  test('https sonarr.lan without credentials is rejected', async () => {
     test.skip(!TRAEFIK_LAN_IP, 'TRAEFIK_LAN_IP not set');
 
-    // Unlike the plain-HTTP tests above, this can't use the "connect by IP,
-    // spoof Host header" trick: Traefik's `sniStrict: true` (tls.yml) rejects
-    // the TLS handshake outright unless the SNI itself is a real `.lan`
-    // hostname (confirmed live - connecting by bare IP gets a TLS
-    // "unrecognized_name" alert before any HTTP response). So this needs
-    // `sonarr.lan` to actually resolve. Playwright's request context
-    // resolves via Node's dns.resolve4/6 (see the long comment above),
-    // which - unlike dns.lookup()/the OS resolver - obeys dns.setServers(),
-    // so pointing it at Pi-hole directly (already proven reachable on
-    // HOST:53 by the "DNS resolution" suite above) gets a real answer
-    // without touching system DNS config.
-    dns.setServers([HOST]);
-    try {
-      await dns.promises.resolve4('sonarr.lan');
-    } catch (err) {
-      test.skip(true, `sonarr.lan did not resolve via Pi-hole (${HOST}): ${err}`);
-      return;
-    }
-
-    const res = await request.get('https://sonarr.lan/', { ignoreHTTPSErrors: true });
-    expect(res.status()).toBe(401);
+    // Unlike the plain-HTTP tests above, this can't use Playwright's
+    // `request` fixture with a spoofed Host header: Traefik's
+    // `sniStrict: true` (tls.yml) rejects the TLS handshake outright unless
+    // the *SNI* itself is a real `.lan` hostname (confirmed live - connecting
+    // by bare IP gets a TLS "unrecognized_name" alert before any HTTP
+    // response), and Playwright's request context has no way to set SNI
+    // independently of the connection address (tried dns.setServers() to
+    // make `sonarr.lan` resolve for real - it doesn't work, Playwright's
+    // fixture resolves through a path that ignores it, unlike the historical
+    // dns.resolve4/6-vs-dns.lookup() distinction the comment above is about).
+    // Node's own `https` module *does* expose SNI (`servername`) separately
+    // from the connection target, exactly like curl's `--resolve` - use it
+    // directly instead.
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = https.request(
+        {
+          host: TRAEFIK_LAN_IP,
+          port: 443,
+          path: '/',
+          method: 'GET',
+          servername: 'sonarr.lan',
+          headers: { Host: 'sonarr.lan' },
+          rejectUnauthorized: false,
+          timeout: 10_000,
+        },
+        (res) => {
+          res.resume();
+          resolve(res.statusCode ?? 0);
+        },
+      );
+      req.on('error', reject);
+      req.on('timeout', () => req.destroy(new Error('request timed out')));
+      req.end();
+    });
+    expect(status).toBe(401);
   });
 });
 
