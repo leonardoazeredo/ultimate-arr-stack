@@ -212,7 +212,24 @@ jobs:
           # Runs ON the NAS (not from this runner) so docker-exec-gated tests
           # (VPN egress/leak/killswitch, zombie-container checks) actually run
           # instead of skipping — see tests/e2e/helpers.ts DOCKER_AVAILABLE.
-          ssh -o ConnectTimeout=15 "${NAS_USER}@${NAS_HOST}" "cd '${NAS_STACK_DIR}' && npm run test:e2e"
+          #
+          # The NAS OS has no npm (only a stripped internal Node.js runtime
+          # for its own admin panel — confirmed 2026-08-16, node v18.20.4 at
+          # /usr/bin/node with no npm anywhere on the system), so the suite
+          # runs inside tests/e2e/Dockerfile's Playwright+docker-cli image
+          # instead, matching this repo's existing containerized-tool pattern
+          # (alpine/git above). --network host so localhost:<port> URLs in
+          # tests/e2e/helpers.ts resolve to the NAS's own published ports.
+          ssh -o ConnectTimeout=15 "${NAS_USER}@${NAS_HOST}" "
+            cd '${NAS_STACK_DIR}' &&
+            docker build -t arr-stack-e2e -f tests/e2e/Dockerfile . &&
+            docker run --rm --network host \
+              -v '${NAS_STACK_DIR}:/repo' \
+              -v /var/run/docker.sock:/var/run/docker.sock \
+              -w /repo \
+              arr-stack-e2e \
+              bash -c 'npm ci && npx playwright test --config tests/e2e/playwright.config.ts'
+          "
 
       - name: Merge to main
         env:
