@@ -220,6 +220,16 @@ jobs:
           # instead, matching this repo's existing containerized-tool pattern
           # (alpine/git above). --network host so localhost:<port> URLs in
           # tests/e2e/helpers.ts resolve to the NAS's own published ports.
+          #
+          # `npx playwright install chromium` runs every time (not baked into
+          # the Dockerfile): package-lock.json is gitignored, so `npm install`
+          # floats @playwright/test to whatever's newest on each run, which
+          # can drift past the browser build baked into the pinned
+          # mcr.microsoft.com/playwright:v1.50.0-noble base image — seen live
+          # in run 31959525960 (npm resolved 1.62.1, image only had 1.50.0's
+          # browser, all UI-screenshot tests failed with "Executable doesn't
+          # exist"). Installing at runtime always matches whatever npm
+          # actually resolved.
           ssh -o ConnectTimeout=15 "${NAS_USER}@${NAS_HOST}" "
             cd '${NAS_STACK_DIR}' &&
             docker build -t arr-stack-e2e -f tests/e2e/Dockerfile . &&
@@ -228,7 +238,7 @@ jobs:
               -v /var/run/docker.sock:/var/run/docker.sock \
               -w /repo \
               arr-stack-e2e \
-              bash -c 'npm install && npx playwright test --config tests/e2e/playwright.config.ts'
+              bash -c 'npm install && npx playwright install chromium && npx playwright test --config tests/e2e/playwright.config.ts'
           "
 
       - name: Merge to main
