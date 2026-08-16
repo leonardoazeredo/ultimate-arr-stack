@@ -48,16 +48,32 @@ http:
       middlewares: [admin-auth@docker, security-headers]
       service: seerr-lan
 
-    # Legacy redirects (jellyseerr/jellyseer → seerr)
+    # Legacy redirects (jellyseerr/jellyseer → seerr). Both entrypoints exist
+    # so a direct https://jellyseerr.lan request (sniStrict requires a
+    # matching cert SAN, see docs/HTTPS-LOCAL.md) still gets a clean redirect
+    # to https://seerr.lan instead of a TLS handshake failure or a 404 with
+    # no matching router.
     jellyseerr-lan:
       rule: "Host(`jellyseerr.lan`)"
       entryPoints: [web]
+      middlewares: [jellyseerr-redirect]
+      service: seerr-lan
+    jellyseerr-lan-secure:
+      rule: "Host(`jellyseerr.lan`)"
+      entryPoints: [websecure]
+      tls: {}
       middlewares: [jellyseerr-redirect]
       service: seerr-lan
 
     jellyseer-lan:
       rule: "Host(`jellyseer.lan`)"
       entryPoints: [web]
+      middlewares: [jellyseerr-redirect]
+      service: seerr-lan
+    jellyseer-lan-secure:
+      rule: "Host(`jellyseer.lan`)"
+      entryPoints: [websecure]
+      tls: {}
       middlewares: [jellyseerr-redirect]
       service: seerr-lan
 
@@ -200,8 +216,8 @@ http:
   middlewares:
     jellyseerr-redirect:
       redirectRegex:
-        regex: "^http://jellyseer{1,2}[.]lan(.*)"
-        replacement: "http://seerr.lan${1}"
+        regex: "^https?://jellyseer{1,2}[.]lan(.*)"
+        replacement: "https://seerr.lan${1}"
         permanent: true
 
   services:

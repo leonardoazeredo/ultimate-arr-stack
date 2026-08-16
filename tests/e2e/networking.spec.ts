@@ -41,6 +41,18 @@ test.describe('Admin-UI HTTPS tier', () => {
   // that's already covered statically. sonarr.lan represents the original
   // admin-tier hosts; jellyfin.lan/seerr.lan cover the newer media-tier
   // hosts, which have their own app-level login in addition to this gate.
+  //
+  // Deliberate coverage gap: these tests only prove the 401-without-creds
+  // gate, not that a *credentialed* request reaches the right backend -
+  // admin-auth short-circuits before Traefik ever forwards the request, so a
+  // dead/misconfigured backend would also return 401 and pass here. Doing
+  // better would mean wiring a dedicated test-only basicauth credential into
+  // .env.e2e (the human admin-auth password isn't available to this suite,
+  // and reusing it would leak into `.env.e2e`, an inappropriate place for a
+  // credential shared with real devices) - out of scope for this change.
+  // Backend health for Jellyfin/Seerr specifically is already covered
+  // independently by ui-screenshots.spec.ts, which logs into both via their
+  // direct LAN-published ports (bypassing Traefik entirely).
   for (const domain of ['sonarr.lan', 'jellyfin.lan', 'seerr.lan'] as const) {
     test(`http ${domain} redirects to https`, async ({ request }) => {
       test.skip(!TRAEFIK_LAN_IP, 'TRAEFIK_LAN_IP not set');
@@ -69,7 +81,15 @@ test.describe('Admin-UI HTTPS tier', () => {
       // history for this file). Node's own `https` module *does* expose SNI
       // (`servername`) separately from the connection target, exactly like
       // curl's `--resolve` - use it directly instead.
-      const status = await new Promise<number>((resolve, reject) => {
+      //
+      // rejectUnauthorized stays false because the mkcert CA root never
+      // leaves the machine that generated it (see docs/HTTPS-LOCAL.md) - the
+      // e2e runner has no copy to verify against. Asserting on the presented
+      // cert's own SAN list instead catches the actual regression this
+      // guards against: a stale/wrong cert deployed without this host in its
+      // SAN list still completes a TLS handshake (mkcert leaf, just for the
+      // wrong names) but wouldn't list `domain` under subjectaltname.
+      const { status, subjectaltname } = await new Promise<{ status: number; subjectaltname: string }>((resolve, reject) => {
         const req = https.request(
           {
             host: TRAEFIK_LAN_IP,
@@ -82,8 +102,9 @@ test.describe('Admin-UI HTTPS tier', () => {
             timeout: 10_000,
           },
           (res) => {
+            const cert = res.socket && 'getPeerCertificate' in res.socket ? (res.socket as import('tls').TLSSocket).getPeerCertificate() : null;
             res.resume();
-            resolve(res.statusCode ?? 0);
+            resolve({ status: res.statusCode ?? 0, subjectaltname: cert?.subjectaltname ?? '' });
           },
         );
         req.on('error', reject);
@@ -91,6 +112,7 @@ test.describe('Admin-UI HTTPS tier', () => {
         req.end();
       });
       expect(status).toBe(401);
+      expect(subjectaltname).toContain(`DNS:${domain}`);
     });
   }
 });
