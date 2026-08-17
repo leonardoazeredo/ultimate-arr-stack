@@ -59,13 +59,13 @@ Back up a service's config volume before any version bump with a DB migration (`
 
 **The rule (no exceptions): every PR must go through the `adversarial-review` skill before it is merged to `main`.** This is in addition to, not instead of, the NAS-testing rule above — a change still needs both a clean NAS verification and an adversarial-review verdict before it reaches `main`. Applies whether merging locally or via `gh pr merge`.
 
-1. Run the `adversarial-review` skill against the PR's full diff (stated intent = what the PR is trying to achieve). It spawns 1–3 reviewers on the *opposite* model CLI (Claude spawns `codex exec`, Codex spawns `claude -p`) from distinct lenses (Skeptic/Architect/Minimalist by diff size) and returns a synthesized verdict: PASS / CONTESTED / REJECT, plus the lead model's own Lead Judgment on which findings to accept.
+1. Run the `adversarial-review` skill against the PR's full diff (stated intent = what the PR is trying to achieve). It spawns 1–3 reviewer subagents on a step-down Anthropic model (`haiku`) from distinct lenses (Skeptic/Architect/Minimalist by diff size) and returns a synthesized verdict: PASS / CONTESTED / REJECT, plus the lead model's own Lead Judgment on which findings to accept.
 2. Address every high-severity finding the Lead Judgment accepted — fix it, or explicitly reject it with a one-line rationale recorded in the PR — before merging. A REJECT verdict blocks merge until re-run clean; CONTESTED needs the disagreement resolved one way or the other, not silently merged past.
 3. Only merge once the verdict is PASS (or CONTESTED/REJECT findings have been explicitly resolved) *and* NAS verification (above) is green.
 
 This is a process rule enforced by whichever agent is doing the merge — there's no CI/git-hook gate blocking merges without it, so don't skip it just because nothing technical stops you.
 
-The skill lives globally at `~/.claude/skills/adversarial-review/` (installed 2026-08-16), not in this repo. It depends on the `codex` CLI being installed and authenticated (done on this machine 2026-08-16) to actually spawn the opposing-model reviewer — without it, the skill can't run and the gate can't be satisfied.
+The skill lives globally at `~/.claude/skills/adversarial-review/` (installed 2026-08-16), not in this repo. It originally depended on the `codex` CLI to spawn an opposite-model reviewer, but that hit the user's Codex plan quota on even small diffs and was dropped 2026-08-17 in favor of reviewer subagents on a step-down Anthropic model (`haiku`, spawned via the `Agent` tool) — no external CLI or separate quota to run out of.
 
 ## Tests
 
