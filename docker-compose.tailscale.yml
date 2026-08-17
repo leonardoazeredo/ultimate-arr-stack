@@ -61,11 +61,14 @@ services:
       # or the enabledRoutes API, same as subnet routes).
       # --advertise-tags=tag:nas-router requires tag:nas-router to already
       # exist in the tailnet's ACL policy's tagOwners (see docs/TAILSCALE.md
-      # step 6) — set the ACL policy up BEFORE recreating this container with
-      # the tag, or `tailscale up` will reject the tag and the node stays
-      # untagged (not a hard failure, but the ACL rules that key off this tag
-      # won't apply until it's actually accepted).
-      - TS_EXTRA_ARGS=--advertise-routes=${LAN_SUBNET}${TS_EXTRA_ROUTES:+,${TS_EXTRA_ROUTES}} --accept-routes --advertise-exit-node --advertise-tags=tag:nas-router
+      # step 6) — set the ACL policy up FIRST, via the admin console, before
+      # adding --advertise-tags here. Confirmed live 2026-08-17: requesting a
+      # tag not yet in tagOwners doesn't just drop the tag with a warning —
+      # it fails the entire `tailscale up` authorization, so the node can't
+      # log in at all until the tag is removed or the policy grants it. Add
+      # ` --advertise-tags=tag:nas-router` back onto the end of TS_EXTRA_ARGS
+      # below only after the ACL policy exists.
+      - TS_EXTRA_ARGS=--advertise-routes=${LAN_SUBNET}${TS_EXTRA_ROUTES:+,${TS_EXTRA_ROUTES}} --accept-routes --advertise-exit-node
     healthcheck:
       test: ["CMD", "tailscale", "status", "--peers=false"]
       interval: 30s
