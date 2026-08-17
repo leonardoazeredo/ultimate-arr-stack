@@ -96,25 +96,41 @@ merge into an existing custom one) with:
 ```json
 {
   "tagOwners": {
-    "tag:nas-router": ["autogroup:admin"],
-    "tag:personal-device": ["autogroup:admin"],
-    "tag:guest": ["autogroup:admin"]
+    "tag:nas-router":       ["autogroup:admin"],
+    "tag:personal-device":  ["autogroup:admin"],
+    "tag:guest":            ["autogroup:admin"]
   },
-  "acls": [
-    {"action": "accept", "src": ["tag:personal-device"], "dst": ["tag:nas-router:*", "<LAN_SUBNET>:*"]},
-    {"action": "accept", "src": ["tag:guest"], "dst": ["<NAS_LAN_IP>:8096", "<NAS_LAN_IP>:5055"]}
+  "grants": [
+    {"src": ["autogroup:admin"], "dst": ["*"], "ip": ["*"]},
+    {"src": ["tag:personal-device"], "dst": ["tag:nas-router", "<LAN_SUBNET>"], "ip": ["*"]},
+    {"src": ["tag:personal-device"], "dst": ["autogroup:internet"], "ip": ["*"]},
+    {"src": ["tag:guest"], "dst": ["<NAS_LAN_IP>"], "ip": ["tcp:8096", "tcp:5055"]}
   ],
   "autoApprovers": {
     "routes": {"<LAN_SUBNET>": ["tag:nas-router"]},
     "exitNode": ["tag:nas-router"]
-  }
+  },
+  "ssh": [
+    {
+      "action": "check",
+      "src":    ["autogroup:member"],
+      "dst":    ["autogroup:self"],
+      "users":  ["autogroup:nonroot", "root"]
+    }
+  ]
 }
 ```
 
 Replace `<LAN_SUBNET>` with your actual `.env` `LAN_SUBNET` value (e.g. `192.168.8.0/24`) and
-`<NAS_LAN_IP>` with the NAS's LAN IP. `autoApprovers` means the subnet route and exit node
+`<NAS_LAN_IP>` with the NAS's LAN IP. This uses the modern `grants` syntax (not the older
+`"action": "accept"` style `acls` array — Tailscale's console may already have generated a
+default policy using `grants`, in which case merge these entries into it rather than replacing
+the whole file). The first `grants` entry is a deliberate safety net: it keeps `autogroup:admin`
+(your own account) with full access regardless of tagging state, so a tagging mistake can't lock
+you out the way the untagged case above did. `autoApprovers` means the subnet route and exit node
 auto-approve for anything tagged `tag:nas-router` — no more manual "Edit route settings" clicks
-(steps 3a/3b above become automatic once the NAS is tagged, step 3 below).
+(steps 3a/3b above become automatic once the NAS is tagged, step 3 below). The `ssh` block is
+Tailscale SSH's default check-mode policy — keep it if your existing policy already has one.
 
 **2. Tag every personal device.** *Machines* → (device) → **⋯** → *Edit ACL tags* → add
 `tag:personal-device`. Repeat for **every** device you personally use, before doing anything else
