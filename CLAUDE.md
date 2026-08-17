@@ -55,6 +55,18 @@ This is delivered **branch-first** (resolves the old "test before commit" vs "de
 
 Back up a service's config volume before any version bump with a DB migration (`docker run --rm -v <vol>:/src:ro -v <dir>:/bak alpine tar czf /bak/<svc>-config-backup-<stamp>.tgz -C /src .`). Never `docker stop` + ad-hoc `docker run` against a live container's static IP to test — apply the change through compose so the test reflects the real config.
 
+## Merge Gate: Adversarial Review
+
+**The rule (no exceptions): every PR must go through the `adversarial-review` skill before it is merged to `main`.** This is in addition to, not instead of, the NAS-testing rule above — a change still needs both a clean NAS verification and an adversarial-review verdict before it reaches `main`. Applies whether merging locally or via `gh pr merge`.
+
+1. Run the `adversarial-review` skill against the PR's full diff (stated intent = what the PR is trying to achieve). It spawns 1–3 reviewer subagents on a step-down Anthropic model (`haiku`) from distinct lenses (Skeptic/Architect/Minimalist by diff size) and returns a synthesized verdict: PASS / CONTESTED / REJECT, plus the lead model's own Lead Judgment on which findings to accept.
+2. Address every high-severity finding the Lead Judgment accepted — fix it, or explicitly reject it with a one-line rationale recorded in the PR — before merging. A REJECT verdict blocks merge until re-run clean; CONTESTED needs the disagreement resolved one way or the other, not silently merged past.
+3. Only merge once the verdict is PASS (or CONTESTED/REJECT findings have been explicitly resolved) *and* NAS verification (above) is green.
+
+This is a process rule enforced by whichever agent is doing the merge — there's no CI/git-hook gate blocking merges without it, so don't skip it just because nothing technical stops you.
+
+The skill lives globally at `~/.claude/skills/adversarial-review/` (installed 2026-08-16), not in this repo. It originally depended on the `codex` CLI to spawn an opposite-model reviewer, but that hit the user's Codex plan quota on even small diffs and was dropped 2026-08-17 in favor of reviewer subagents on a step-down Anthropic model (`haiku`, spawned via the `Agent` tool) — no external CLI or separate quota to run out of.
+
 ## Tests
 
 Run `npm test` (bats + Playwright) after any change to Docker Compose files, service config, networks, or ports. All tests must pass. `npm run test:bats` is fast, static, and needs no NAS/Docker access — it validates compose files themselves (no duplicate ports/IPs, pinned images, no secrets, `.env.example` in sync, pre-commit hook actually installed) and should catch config bugs before they ever reach the NAS. `npm run test:e2e` (Playwright, run on the NAS itself for full coverage) is split by domain under `tests/e2e/`: UI screenshots, API assertions, VPN egress/leak/killswitch checks, DNS/Traefik routing, addon coverage (Decypharr/Magnetio/stremio-jellyfin), and Gluetun zombie-container resilience checks. Don't hardcode a test count in this doc — that's exactly how the old "14 tests" claim went stale; describe categories instead.
