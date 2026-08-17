@@ -41,8 +41,13 @@ set -uo pipefail
 #   cd terraform && bw unlock && ./apply.sh
 #
 # Run on a schedule via the systemd timer alongside this script
-# (detect-credential-drift.timer) - installing that needs root, see the
-# .timer/.service files next to this one.
+# (detect-credential-drift.timer). Installed as a --user unit under leoleg
+# (no root needed - ~/.config/systemd/user/ is writable by its own user; the
+# only extra step is `loginctl enable-linger leoleg`, which a normal user
+# can run on themselves without sudo, so the timer keeps firing after SSH
+# sessions end and across reboots). See the .timer/.service files next to
+# this one, and their `systemctl --user ...` install commands in the repo's
+# deploy notes.
 
 : "${RADARR_API_KEY:?RADARR_API_KEY not set - source .env first}"
 : "${SONARR_API_KEY:?SONARR_API_KEY not set - source .env first}"
