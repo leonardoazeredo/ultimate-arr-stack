@@ -68,7 +68,7 @@ services:
       # log in at all until the tag is removed or the policy grants it. Add
       # ` --advertise-tags=tag:nas-router` back onto the end of TS_EXTRA_ARGS
       # below only after the ACL policy exists.
-      - TS_EXTRA_ARGS=--advertise-routes=${LAN_SUBNET}${TS_EXTRA_ROUTES:+,${TS_EXTRA_ROUTES}} --accept-routes --advertise-exit-node
+      - TS_EXTRA_ARGS=--advertise-routes=${LAN_SUBNET}${TS_EXTRA_ROUTES:+,${TS_EXTRA_ROUTES}} --accept-routes --advertise-exit-node --reset
     healthcheck:
       test: ["CMD", "tailscale", "status", "--peers=false"]
       interval: 30s
