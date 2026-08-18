@@ -27,7 +27,7 @@ GLUETUN_ID=$(docker inspect --format '{{.Id}}' gluetun 2>/dev/null) || {
     exit 1
 }
 
-DEPENDENTS=(qbittorrent sabnzbd prowlarr flaresolverr magnetio-addon)
+DEPENDENTS=(qbittorrent sabnzbd prowlarr flaresolverr vpn-socks5 magnetio-addon)
 zombies=()
 
 for c in "${DEPENDENTS[@]}"; do
