@@ -69,6 +69,32 @@ EOF
     refute_output --partial "qbittorrent"
 }
 
+@test "detect-vpn-zombies DEPENDENTS covers every service tunneled through gluetun" {
+    # Regression guard for the vpn-socks5 gap this whole file exists to fix:
+    # find every service declaring network_mode: "service:gluetun" or
+    # "container:gluetun" across all compose files, and assert each one's
+    # service name is actually present in the script's hardcoded DEPENDENTS
+    # array — so a future service added the same way doesn't silently go
+    # undetected the way vpn-socks5 did.
+    local dependents
+    dependents=$(grep -oE 'DEPENDENTS=\([^)]*\)' "$REPO_ROOT/scripts/detect-vpn-zombies.sh")
+
+    local tunneled
+    tunneled=$(for f in $(get_compose_files); do
+        awk '
+            /^  [a-zA-Z0-9_.-]+:[[:space:]]*$/ { svc=$0; sub(/:[[:space:]]*$/, "", svc); sub(/^  /, "", svc) }
+            /^[[:space:]]*network_mode:[[:space:]]*"(service|container):gluetun"/ { print svc }
+        ' "$f"
+    done)
+
+    [[ -n "$tunneled" ]]
+    while IFS= read -r svc; do
+        [[ -n "$svc" ]] || continue
+        echo "checking $svc is in DEPENDENTS" >&2
+        [[ "$dependents" == *"$svc"* ]]
+    done <<< "$tunneled"
+}
+
 @test "detect-vpn-zombies skips a dependent docker inspect can't find rather than crashing" {
     run bash -c "
         $(stub_docker current-id '
