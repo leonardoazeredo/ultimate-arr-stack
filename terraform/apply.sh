@@ -103,24 +103,33 @@ main() {
   # (auth, jellyfin, plex, radarr, sonarr, subsource all have their own).
   # Live-verified idempotent 2026-08-18: re-running against an
   # already-correct key produces a byte-identical file.
+  # Validates the awk output contains the new key before copying it into the
+  # container, so a section-header regex that stops matching (config.yaml
+  # restructured, section renamed) fails loudly instead of silently copying
+  # an unchanged file over the container's config while reporting success.
   sync_bazarr_key() {
     local section="$1" new_key="$2"
-    ssh cloud-nas bash -s -- "${section}:" "$new_key" <<'REMOTE'
+    ssh -o ConnectTimeout=15 cloud-nas bash -s -- "${section}:" "$new_key" <<'REMOTE'
 set -e
 section="$1"
 new_key="$2"
+tmpfile="/tmp/bazarr_config_new.$$.yaml"
+trap 'rm -f "$tmpfile"' EXIT
 docker exec bazarr awk -v key="$new_key" -v section="$section" '
   /^[a-zA-Z0-9_-]+:$/ { in_section = ($0 == section) }
   in_section && /^  apikey:/ { print "  apikey: " key; next }
   { print }
-' /config/config/config.yaml > /tmp/bazarr_config_new.yaml
-docker cp /tmp/bazarr_config_new.yaml bazarr:/config/config/config.yaml
-rm -f /tmp/bazarr_config_new.yaml
+' /config/config/config.yaml > "$tmpfile"
+grep -qF "  apikey: $new_key" "$tmpfile" || {
+  echo "sync_bazarr_key: apikey line not found for section $section after awk -- aborting, config.yaml not touched" >&2
+  exit 1
+}
+docker cp "$tmpfile" bazarr:/config/config/config.yaml
 REMOTE
   }
   sync_bazarr_key "sonarr" "$SONARR_KEY"
   sync_bazarr_key "radarr" "$RADARR_KEY"
-  ssh cloud-nas "docker restart bazarr" >/dev/null
+  ssh -o ConnectTimeout=15 cloud-nas "docker restart bazarr" >/dev/null
   echo "Bazarr synced (config.yaml edited directly) and restarted."
 
   echo
