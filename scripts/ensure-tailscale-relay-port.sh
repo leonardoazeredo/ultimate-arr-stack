@@ -1,5 +1,5 @@
 #!/bin/bash
-set -uo pipefail
+set -euo pipefail
 #
 # Re-applies `tailscale set --relay-server-port=41641` on node 1 whenever it's
 # missing. That setting (Tailscale 1.86+ peer-relay support) lives purely in
@@ -40,7 +40,14 @@ if ! docker inspect -f '{{.State.Running}}' tailscale 2>/dev/null | grep -q true
   exit 0
 fi
 
-if docker exec tailscale tailscale debug prefs 2>/dev/null | grep -q "\"RelayServerPort\": $RELAY_PORT,"; then
+# Extract the value rather than matching a hardcoded-comma string, so this
+# doesn't silently stop detecting a correct value if `tailscale debug prefs`'s
+# JSON formatting ever changes (e.g. no trailing comma, extra whitespace).
+actual_port=$(docker exec tailscale tailscale debug prefs 2>/dev/null \
+  | grep -o '"RelayServerPort":[[:space:]]*[0-9]*' \
+  | grep -o '[0-9]*$' || true)
+
+if [[ "$actual_port" == "$RELAY_PORT" ]]; then
   echo "ensure-tailscale-relay-port: OK - RelayServerPort already $RELAY_PORT"
   exit 0
 fi
