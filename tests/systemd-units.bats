@@ -33,7 +33,7 @@ setup() {
 
 @test "unit files carry no root/system-install assumptions" {
     local f
-    for f in detect-credential-drift.service detect-credential-drift.timer detect-credential-drift-alert.service; do
+    for f in detect-credential-drift.service detect-credential-drift.timer detect-credential-drift-alert.service ensure-tailscale-relay-port.service ensure-tailscale-relay-port.timer; do
         run grep -c '/etc/systemd' "$UNITS_DIR/$f"
         assert_output "0"
 
@@ -47,6 +47,12 @@ setup() {
 
 @test "service and alert unit ExecStart paths point at the NAS deploy path, not a root-only location" {
     run grep 'ExecStart=' "$UNITS_DIR/detect-credential-drift.service"
+    assert_output --partial "/volume1/docker/arr-stack/"
+    refute_output --partial "/root/"
+}
+
+@test "ensure-tailscale-relay-port unit ExecStart path points at the NAS deploy path, not a root-only location" {
+    run grep 'ExecStart=' "$UNITS_DIR/ensure-tailscale-relay-port.service"
     assert_output --partial "/volume1/docker/arr-stack/"
     refute_output --partial "/root/"
 }

@@ -300,8 +300,11 @@ node-1 restart or recreate, including a plain one with no `--reset`
 involved** — confirmed live 2026-08-25, it isn't written to `tailscaled.state`
 at all, so it's purely in-memory. Tasks #77/#79 dropped `--reset` from that
 node's `TS_EXTRA_ARGS`, which fixes a *different* problem (a stale
-`AdvertiseRoutes` resurrecting), not this one. Re-apply the command above by
-hand after every node-1 restart; see docs/EXIT-NODE-PROJECT-LOG.md §5 item 1.
+`AdvertiseRoutes` resurrecting), not this one. Task #91 self-heals this
+instead: `scripts/ensure-tailscale-relay-port.sh`, run every 30 min via a
+`--user` systemd timer, re-applies the command above automatically after any
+node-1 restart — no manual step needed. See
+docs/EXIT-NODE-PROJECT-LOG.md §5 item 1.
 
 > **Why port forwarding doesn't help.** Gluetun does support ProtonVPN NAT-PMP,
 > but it hands out a *dynamic* port re-leased about every 60 seconds while

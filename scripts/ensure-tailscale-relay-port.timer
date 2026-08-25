@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the node-1 RelayServerPort self-heal check every 30 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+Unit=ensure-tailscale-relay-port.service
+
+[Install]
+WantedBy=timers.target

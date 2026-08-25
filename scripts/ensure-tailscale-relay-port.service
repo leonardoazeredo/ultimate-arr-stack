@@ -1,0 +1,7 @@
+[Unit]
+Description=Re-apply node 1's Tailscale RelayServerPort if a restart wiped it (task #91)
+Documentation=file:/volume1/docker/arr-stack/scripts/ensure-tailscale-relay-port.sh
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /volume1/docker/arr-stack/scripts/ensure-tailscale-relay-port.sh
