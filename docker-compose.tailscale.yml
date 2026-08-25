@@ -605,10 +605,23 @@ services:
           echo "gluetun-exit-rotator: scheduled check (interval $${GLUETUN_EXIT_ROTATE_INTERVAL_SECONDS}s)"
           ensure_fast
         done
+# Explicit `name:` on every volume below pins it to its real physical name
+# (tailscale_<volume>, from this file's own `name: tailscale` above). Without
+# this, an unnamed volume is scoped by project name - if that project name
+# ever changed, Compose would silently create a brand-new EMPTY volume
+# instead of reusing the real one (arr-stack.yml hit exactly this in
+# production before it added the same pins - see its own volumes-block
+# comment). Confirmed live 2026-08-25 that the real names already match this
+# pattern (`docker volume ls`), including a stray orphaned `tailscale-state`
+# volume (no project prefix) left over from before this file had `name:
+# tailscale` at all - that one is unused dead weight, not referenced here.
 volumes:
   tailscale-state:
+    name: tailscale_tailscale-state
   tailscale-exit-state:
+    name: tailscale_tailscale-exit-state
   gluetun-exit-config:
+    name: tailscale_gluetun-exit-config
 
 # arr-core is created by docker-compose.arr-stack.yml. This is the one place
 # this file couples to another compose project — accepted so gluetun-exit gets
