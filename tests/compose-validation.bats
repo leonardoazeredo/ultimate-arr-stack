@@ -186,3 +186,19 @@ get_service_block() {
     run grep -E '^[[:space:]]+- TS_EXTRA_ARGS=.*--advertise-routes=' <<<"$block"
     assert_success
 }
+
+@test "node 1 (tailscale) does NOT pass --reset in TS_EXTRA_ARGS" {
+    # --reset forces tailscaled to wipe ALL persisted prefs back to exactly
+    # these compose-file args on every restart, including live-only,
+    # not-in-git state (e.g. `tailscale set --relay-server-port=41641` for
+    # peer-relay support) that nothing else detects the loss of. It was only
+    # ever needed to force-clear a stale AdvertiseRoutes left over from an
+    # earlier exit-node experiment; that cleanup landed in a87400c (tasks
+    # #77/#79, docs/EXIT-NODE-PROJECT-LOG.md §5/§7). Anchored on end-of-string
+    # or whitespace, not a bare substring match -- --reset is short and
+    # collision-prone.
+    local block
+    block=$(get_service_block "tailscale" "$REPO_ROOT/docker-compose.tailscale.yml")
+    run grep -E -- '^[[:space:]]+- TS_EXTRA_ARGS=.*--reset($|[[:space:]])' <<<"$block"
+    assert_failure
+}

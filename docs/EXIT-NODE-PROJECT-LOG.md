@@ -84,7 +84,7 @@ another way.
 | **0** — Deploy MSS clamp, re-measure | Decide everything downstream on one number | ✅ **Done.** The number came back 22.6 Mbps. This is the phase that invalidated Phases 3–5 |
 | **1** — Narrow the ACL grant, baseline the phone | Tighten `src` to `tag:personal-device` | ⚠️ **Partial.** Phone baselined; the ACL grant narrowing was **not done** — still `autogroup:member` |
 | **2** — Restore access | Fix NAS SSH, confirm router admin | ✅ **Done** (task #82). SSH port 22 was being DROPped by a UGOS firewall rule |
-| **3** — Repo change: drop `--reset`, add relay sidecar | Make the peer relay declarative | ❌ **Superseded.** Tasks #77–#81 remain open but the justification is now latency-only, and weak — see §4.6 |
+| **3** — Repo change: drop `--reset`, add relay sidecar | Make the peer relay declarative | ⚠️ **Split.** `--reset` itself is dropped (#77/#79 ✅ done). The relay sidecar (#78/#80/#81) remains open — justification is now latency-only, and weak — see §4.6 |
 | **4** — Deploy, add router port-forward UDP 41641 | Make node 1 publicly reachable | ❌ **Not done, deliberately.** No router change was ever made |
 | **5** — Verify from phone, then gate | Go/No-Go | ✅ **Gate satisfied** by a different route than planned |
 
@@ -250,7 +250,7 @@ git. Several are load-bearing.
 
 | # | What | Where it lives | Notes / what destroys it |
 |---|---|---|---|
-| 1 | **`tailscale set --relay-server-port=41641`** on node 1 | node 1's prefs | ⚠️ **Wiped by `--reset` on EVERY node-1 restart**, and **nothing detects the loss** — no bats test, no healthcheck, no log line. This document is the only guard. Check: `ssh arr-stack-nas 'docker exec tailscale tailscale debug prefs'` → `RelayServerPort`. Re-apply: `ssh arr-stack-nas 'docker exec tailscale tailscale set --relay-server-port=41641'`. Task #77 removes `--reset`; task #79 adds the guard. Until both land, assume it is gone after any node-1 restart |
+| 1 | **`tailscale set --relay-server-port=41641`** on node 1 | node 1's prefs | ✅ **#77/#79 done** — `--reset` dropped from node 1's `TS_EXTRA_ARGS` in `docker-compose.tailscale.yml`, guarded against returning by the `node 1 (tailscale) does NOT pass --reset in TS_EXTRA_ARGS` bats test. A plain restart/recreate no longer wipes this. Still not tracked in git and still needs a manual re-apply after any recreate that replaces the `tailscale-state` volume, or if it was already wiped by a restart that predates this fix. Check: `ssh arr-stack-nas 'docker exec tailscale tailscale debug prefs'` → `RelayServerPort`. Re-apply: `ssh arr-stack-nas 'docker exec tailscale tailscale set --relay-server-port=41641'` |
 | 2 | Tailnet **ACL policy** — `tagOwners`, grants, `autoApprovers` | Tailscale admin console | Includes `autoApprovers.exitNode: ["tag:nas-router"]` (see §4.6) and the relay grant, still at `autogroup:member` rather than the narrower `tag:personal-device` the plan wanted |
 | 3 | Split DNS for `*.lan` | Tailscale admin console | Prerequisite for `.lan` names through the tunnel |
 | 4 | **macvlan shim** on the NAS | Root's crontab on the NAS (`@reboot`), idempotent — it checks the link exists before recreating. Inspect the live entry with `ssh arr-stack-nas 'crontab -l'` **before** rebuilding from memory; the shape is `ip link add macvlan-shim link eth0 type macvlan mode bridge` + `192.168.8.251/32` on the shim + a host route to Traefik's `192.168.8.250/32` via it | A Linux host can never reach its own macvlan containers by kernel design. Without this, Traefik `.lan` e2e tests fail `EHOSTUNREACH`. Verify with `ip route get 192.168.8.250` on the NAS |
@@ -329,8 +329,8 @@ needed a manual Tailscale toggle — task #90, and the reason
 |---|---|---|
 | #86 | The ~6–9 Mbps per-flow ceiling | Controlled A/B (n≥5 each way, alternating, one server) to confirm the DERP-vs-relay direction, then test the netns-nesting hypothesis. **Biggest remaining lever** |
 | #90 | Android does not recover when `tailscale-exit` restarts | Needs the phone. Drive `tailscale-exit` restart frequency toward zero — that is the lever we control |
-| #77 | Drop `--reset` from node 1 | **Now unblocked** — `a87400c` has been applied through a `--reset` recreate, so dropping it can no longer resurrect a stale `AdvertiseRoutes` |
-| #79 | bats guard against `--reset` returning | Pairs with #77 |
+| #77 | Drop `--reset` from node 1 | ✅ **Done** — dropped from `docker-compose.tailscale.yml`'s `TS_EXTRA_ARGS`, verified live on the NAS |
+| #79 | bats guard against `--reset` returning | ✅ **Done** — `node 1 (tailscale) does NOT pass --reset in TS_EXTRA_ARGS` in `tests/compose-validation.bats` |
 | #78, #80, #81 | Relay sidecar, docs, commit | **Premise weakened** (§3). Latency-only justification. Decide before building |
 | — | ACL grant still `autogroup:member` | Plan Phase 1 wanted `tag:personal-device`. Narrow it if the relay work proceeds |
 

@@ -295,8 +295,10 @@ CGNAT, relaying via DERP London rather than hole-punching direct.
 If it relays, the mitigation is **peer relays** (Tailscale 1.86+): make the
 host-network node a relay with
 `docker exec tailscale tailscale set --relay-server-port=41641` plus a
-`tailscale.com/cap/relay` grant in the ACL. Note this requires dropping `--reset`
-from that node's `TS_EXTRA_ARGS` first, or the setting is wiped on every restart.
+`tailscale.com/cap/relay` grant in the ACL. That node's `TS_EXTRA_ARGS` no
+longer passes `--reset` (tasks #77/#79), so the setting survives a plain
+restart — but it's still not tracked in git, so it still needs a manual
+re-apply after any recreate that replaces the `tailscale-state` volume.
 
 > **Why port forwarding doesn't help.** Gluetun does support ProtonVPN NAT-PMP,
 > but it hands out a *dynamic* port re-leased about every 60 seconds while
