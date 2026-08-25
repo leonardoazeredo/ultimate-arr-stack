@@ -90,15 +90,17 @@ services:
       # tag:nas-router confirmed live 2026-08-17 before this flag was added
       # back — don't remove tag:nas-router from tagOwners without also
       # removing --advertise-tags here first, same failure mode in reverse.
-      # --reset is needed once, to clear the stuck state from the earlier
-      # failed attempt (see docs/TAILSCALE.md troubleshooting) — safe to
-      # drop after this recreate is confirmed stable.
-      # ORDERING CONSTRAINT: do not drop --reset until the exit-node removal
-      # above has been applied at least once. `tailscale up --reset` forces
-      # prefs to exactly these args; without it, a previously-stored
-      # AdvertiseRoutes containing 0.0.0.0/0 and ::/0 would simply persist in
-      # the state DB and node 1 would keep offering a dead exit node.
-      - TS_EXTRA_ARGS=--advertise-routes=${LAN_SUBNET}${TS_EXTRA_ROUTES:+,${TS_EXTRA_ROUTES}} --accept-routes --advertise-tags=tag:nas-router --reset
+      # No --reset here (tasks #77/#79, docs/EXIT-NODE-PROJECT-LOG.md §5/§7).
+      # It was only ever needed to force-clear a stale AdvertiseRoutes left
+      # over from an earlier exit-node experiment; that cleanup landed in
+      # a87400c (itself applied via a --reset recreate), so the flag had
+      # nothing left to do here except force-wipe prefs back to exactly
+      # these compose-file args on every restart — including live-only,
+      # not-in-git state (e.g. `tailscale set --relay-server-port=41641` for
+      # peer-relay support) that nothing detected the loss of. Guarded by
+      # the "does NOT pass --reset" bats test in tests/compose-validation.bats
+      # so it can't come back silently.
+      - TS_EXTRA_ARGS=--advertise-routes=${LAN_SUBNET}${TS_EXTRA_ROUTES:+,${TS_EXTRA_ROUTES}} --accept-routes --advertise-tags=tag:nas-router
     healthcheck:
       test: ["CMD", "tailscale", "status", "--peers=false"]
       interval: 30s
@@ -273,8 +275,9 @@ services:
       # FORWARD` shows no ts-forward jump, try nftables here instead.
       - TS_DEBUG_FIREWALL_MODE=iptables
       # Exit node ONLY — no subnet routes (node 1 owns subnet routing), and
-      # deliberately NO --reset (node 1 needs it once; here it would wipe any
-      # `tailscale set` tweaks, e.g. peer-relay config, on every restart).
+      # deliberately NO --reset (node 1 no longer passes it either, as of
+      # #77/#79 — it would wipe any `tailscale set` tweaks, e.g. peer-relay
+      # config, on every restart).
       #
       # The ::/0 half of this advertisement is unbacked, and that is ACCEPTED --
       # do not spend time on it. `--advertise-exit-node` is exactly equivalent
