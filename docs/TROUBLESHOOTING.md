@@ -143,7 +143,9 @@ docker exec prowlarr wget -qO- http://127.0.0.1:8191/    # flaresolverr -> "read
 docker restart qbittorrent sabnzbd prowlarr flaresolverr   # or whichever started before gluetun
 ```
 
-`./scripts/detect-vpn-zombies.sh` automates the check above — it compares each dependent's `network_mode` binding against Gluetun's *current* container ID and prints exactly which ones are stale. It's also exercised as `tests/e2e/resilience.spec.ts` in the Playwright suite. Run it any time you suspect a zombie, or on a schedule via cron/SSH.
+`./scripts/detect-vpn-zombies.sh` automates the check above — it compares each dependent's `network_mode` binding against Gluetun's *current* container ID and prints exactly which ones are stale, plus the correct recovery command for each. It's also exercised as `tests/e2e/resilience.spec.ts` in the Playwright suite. Run it any time you suspect a zombie, or on a schedule via cron/SSH.
+
+⚠️ **The `docker restart` above only works if gluetun was restarted, not recreated.** Because that script compares *container IDs*, anything it flags is by definition the recreate case — where restart always fails. Jump to [After a Gluetun RECREATE](#after-a-gluetun-recreate-not-just-a-restart-docker-restart-cannot-save-you) instead.
 
 ## NEVER Use `--remove-orphans` (Multi-Compose-File Project)
 
@@ -172,10 +174,38 @@ Error response from daemon: ... joining network namespace of container <old-id>:
 
 ```bash
 cd /volume1/docker/arr-stack
-docker compose -f docker-compose.arr-stack.yml up -d qbittorrent sabnzbd prowlarr flaresolverr
+# Five of the six dependents live here; --force-recreate because compose will
+# otherwise consider an "Up" (but zombie) container already up-to-date:
+docker compose -f docker-compose.arr-stack.yml up -d --force-recreate \
+    qbittorrent sabnzbd prowlarr flaresolverr vpn-socks5
+# magnetio-addon is defined in a DIFFERENT file and must go through it:
+docker compose -f docker-compose.magnetio.yml up -d --force-recreate magnetio-addon
 ```
 
+**Don't stop at the arr-stack file.** `vpn-socks5` and `magnetio-addon` are tunneled dependents too, and `magnetio-addon` is defined in `docker-compose.magnetio.yml` — recreating only the four "obvious" apps leaves the other two as zombies that still look healthy. `./scripts/detect-vpn-zombies.sh` prints the correct per-file commands for exactly the containers it found; prefer its output over any list written here, which can go stale.
+
 Run `./scripts/detect-vpn-zombies.sh` afterward to confirm every dependent now binds to Gluetun's *new* container ID rather than the old one — this is the exact scenario it's built to catch.
+
+#### Worked example: the 2026-08-27 outage
+
+Downloads had been dead for 38 hours before anyone noticed, and the visible symptoms pointed nowhere near the cause: *"series won't download"* and *"Seerr seems to prefer torrents"*.
+
+The chain, root cause first:
+
+1. The NAS was still checked out on an **unmerged feature branch** (`feat/pi1-pi2-split`) from an earlier test. Nothing distinguishes that from a deployed state — see *Deploying to the NAS* in `CLAUDE.md`.
+2. That branch sets `DNS_ADDRESS=${PI2_IP}`, pointing gluetun's resolver at pi2. The matching step that actually *moves* Pi-hole to pi2 had never run, so nothing was listening on `192.168.120.241:53`. (Not a firewall problem — `FIREWALL_OUTBOUND_SUBNETS` did include that subnet.)
+3. gluetun's startup healthcheck could not resolve `cloudflare.com`/`github.com`, so it restarted the VPN roughly every 5 seconds — **failing streak 211**, a different WireGuard server each time.
+4. A restart cycle recreated gluetun with a new container ID, orphaning all six dependents on the dead namespace.
+5. `qbittorrent` and `sabnzbd` were SIGKILLed (exit 137). `prowlarr`, `flaresolverr` and `magnetio-addon` kept reporting **`Up (healthy)`** with *zero* internet, because their healthchecks only probe localhost.
+
+Prowlarr being a healthy-looking zombie is what produced the user-visible symptom: every indexer search returned nothing, so Sonarr/Radarr weren't failing to grab — they were being handed an empty result set. Usenet looked "disabled" simply because SABnzbd was dead, while `decypharr` (on the `arr-core` bridge, *not* in gluetun's namespace) kept working — hence everything that did succeed arrived by torrent.
+
+Recovery was: sync the NAS back to `main`, recreate gluetun via `docker-compose.arr-stack.yml`, then recreate all six dependents via their own compose files as above.
+
+Two lessons worth carrying:
+
+- **`gluetun-recover` cannot help here and ran uselessly for 38 hours.** It is a `docker restart` loop, and restart is precisely what a recreate breaks.
+- **A localhost healthcheck proves nothing about reachability.** This is the same trap as *"an HTTP 200 is not proof you hit the right backend"*, one layer down: three containers were green and had no network at all. When diagnosing, assert on egress (`docker exec <c> curl -s https://api.ipify.org`), not on health status.
 
 **If that compose command hangs:** a dependent that died mid-netns-join can land in a `Dead` state that dockerd can never remove (`docker rm -f` → "removal of container is already in progress", forever). Compose then wedges trying to replace it, or leaves the replacement under a hash-prefixed name (`<id>_flaresolverr`). The only cure is a Docker daemon restart, which also clears the Dead container (observed 2026-08-01 with flaresolverr; check nobody is streaming first):
 
