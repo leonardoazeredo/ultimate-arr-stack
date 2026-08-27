@@ -73,7 +73,7 @@ All notable changes to this project will be documented in this file.
 - **`scripts/boot-compose-up.sh` + `scripts/boot-compose-up.service`**, deployed to `/volume1/docker/boot-compose-up.sh` (symlinked into this repo so `git pull` updates it) and `/etc/systemd/system/`. The script waits for dockerd to accept connections before doing anything, brings each stack up independently so one failure can't block the rest (DNS matters more than Immich), logs to `/volume1/docker/boot-compose-up.log` with self-trimming, and deliberately never passes `--remove-orphans` (see the existing TROUBLESHOOTING entry — it would delete the other compose files' containers).
 
 ### Documentation
-- **TROUBLESHOOTING.md "Docker: Ports Not Published After Reboot"**: the full incident, and how it differs from the neighbouring exit-128 Pi-hole entry — there the container is *stopped*; here it is *running and answering nobody*, which is much harder to spot. Three things learned the hard way and now written down: (1) the systemd unit must use `Wants=`, never `Requires=`/`RequiresMountsFor=` — the first version failed the job nine seconds into boot because `/volume1` wasn't mounted yet and **never retried**, leaving it `inactive (dead)` with nothing in `systemctl status`; (2) a **static IP does not fix this**, unlike the exit-128 case — UGOS reverts the Control Panel setting to DHCP on reboot and overrides `ifcfg-eth0` (which has said `static` since February) via its own `dhclient@eth0.service`; (3) `mooseadmin` must be in the `systemd-journal` group or `journalctl` returns nothing in a way that reads as "no logs" rather than "no permission".
+- **TROUBLESHOOTING.md "Docker: Ports Not Published After Reboot"**: the full incident, and how it differs from the neighbouring exit-128 Pi-hole entry — there the container is *stopped*; here it is *running and answering nobody*, which is much harder to spot. Three things learned the hard way and now written down: (1) the systemd unit must use `Wants=`, never `Requires=`/`RequiresMountsFor=` — the first version failed the job nine seconds into boot because `/volume1` wasn't mounted yet and **never retried**, leaving it `inactive (dead)` with nothing in `systemctl status`; (2) a **static IP does not fix this**, unlike the exit-128 case — UGOS reverts the Control Panel setting to DHCP on reboot and overrides `ifcfg-eth0` (which has said `static` since February) via its own `dhclient@eth0.service`; (3) `nasadmin` must be in the `systemd-journal` group or `journalctl` returns nothing in a way that reads as "no logs" rather than "no permission".
 
 ## [1.7.24] - 2026-08-01
 
@@ -247,7 +247,7 @@ All notable changes to this project will be documented in this file.
 - **Seerr** v3.1.0 → v3.2.0
 
 ### Fixed
-- **Queue-cleanup cron silently failing**: Log path moved from `/var/log/` (which `mooseadmin` can't write to on UGOS) to `$NAS_STACK_DIR/logs/`. Also added detection for `importBlocked` and `importPending` items (already-imported packs, executable files, quality mismatches) that were accumulating unhandled
+- **Queue-cleanup cron silently failing**: Log path moved from `/var/log/` (which `nasadmin` can't write to on UGOS) to `$NAS_STACK_DIR/logs/`. Also added detection for `importBlocked` and `importPending` items (already-imported packs, executable files, quality mismatches) that were accumulating unhandled
 - **Pi-hole config**: Removed unsupported `-q` flag from `pihole-FTL --config` and switched from `pihole restartdns` (which fails under `cap_drop: ALL`) to `docker restart pihole`
 
 ### Security
@@ -307,7 +307,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 - **Seerr library sync and quality defaults**: Documented that Jellyfin libraries must be enabled in Seerr settings and synced, otherwise movies/shows stay stuck at "Requested". Default quality profiles set to `UHD Bluray + WEB` (Radarr) and `Ultra-HD` (Sonarr)
-- **qBittorrent auth subnet whitelist**: Documented local network whitelist (`172.20.0.0/24, 10.10.0.0/24, 127.0.0.0/8`) to prevent IP bans from Sonarr/Radarr reconnections and API scripts after container restarts
+- **qBittorrent auth subnet whitelist**: Documented local network whitelist (`172.20.0.0/24, 192.168.1.0/24, 127.0.0.0/8`) to prevent IP bans from Sonarr/Radarr reconnections and API scripts after container restarts
 
 ### Documentation
 - **UPGRADING.md**: v1.7.3 migration steps for Seerr library sync, quality profile defaults, and qBit auth whitelist

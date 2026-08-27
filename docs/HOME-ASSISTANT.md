@@ -136,7 +136,7 @@ In Beszel: Settings → Notifications → Add URL
 generic+http://HOME_ASSISTANT_IP:8123/api/webhook/beszel-alerts?template=json
 ```
 
-Example: `generic+http://10.10.0.20:8123/api/webhook/beszel-alerts?template=json`
+Example: `generic+http://192.168.1.20:8123/api/webhook/beszel-alerts?template=json`
 
 Click **Test URL** to verify.
 

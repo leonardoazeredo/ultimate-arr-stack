@@ -35,11 +35,11 @@ You should see a line like `https://login.tailscale.com/a/abc123...`. Open it in
 
 Three one-time settings at [login.tailscale.com/admin](https://login.tailscale.com/admin):
 
-**a) Approve the subnet route.** Open *Machines* → click your NAS → *Edit route settings* → tick `10.10.0.0/24` (or whatever you set as `LAN_SUBNET`) → Save. Without this, peers see the route but Tailscale won't forward traffic to it.
+**a) Approve the subnet route.** Open *Machines* → click your NAS → *Edit route settings* → tick `192.168.1.0/24` (or whatever you set as `LAN_SUBNET`) → Save. Without this, peers see the route but Tailscale won't forward traffic to it.
 
 **b) Disable key expiry on the NAS.** Same page → *Disable key expiry*. The NAS is an always-on router; you don't want it to silently disconnect every ~6 months.
 
-**c) Split DNS for `*.lan`.** Open *DNS* → *Add nameserver* → *Custom* → IP `10.10.0.10` → *Restrict to domain*: `lan` → Save. This makes `sonarr.lan`, `homeassistant.lan` etc. resolve via Pi-hole when remote.
+**c) Split DNS for `*.lan`.** Open *DNS* → *Add nameserver* → *Custom* → IP `192.168.1.10` → *Restrict to domain*: `lan` → Save. This makes `sonarr.lan`, `homeassistant.lan` etc. resolve via Pi-hole when remote.
 
 > **Why split DNS?** Tailscale doesn't override your device's normal DNS unless you tell it to (we set `TS_ACCEPT_DNS=false`). The split-DNS rule says "only for `.lan` queries, ask Pi-hole" — everything else keeps using the device's normal resolver.
 
@@ -438,7 +438,7 @@ Put your laptop on a phone hotspot (simulates a v4-only hotel network), then try
 
 ```bash
 # Direct IP — Home Assistant
-curl http://10.10.0.20:8123
+curl http://192.168.1.20:8123
 
 # .lan domain — Sonarr (via Traefik on the NAS)
 curl http://sonarr.lan
@@ -532,11 +532,11 @@ revert to the previous version. No NAS-side action needed; the compose change (a
 The container may have re-used existing state. Force a fresh login:
 ```bash
 docker exec tailscale tailscale logout
-docker exec tailscale tailscale up --advertise-routes=10.10.0.0/24 --accept-routes
+docker exec tailscale tailscale up --advertise-routes=192.168.1.0/24 --accept-routes
 ```
 The URL prints to that command's output.
 
-**Peer can ping the NAS (10.10.0.10) but not other LAN devices (10.10.0.20 etc).**
+**Peer can ping the NAS (192.168.1.10) but not other LAN devices (192.168.1.20 etc).**
 The subnet route isn't approved. Re-check step 3a — until you tick the route box in the admin console and save, only the Tailscale node itself is reachable.
 
 **`*.lan` doesn't resolve when remote.**
@@ -545,7 +545,7 @@ Split DNS isn't configured. Re-check step 3c. Verify on the client:
 # macOS
 scutil --dns | grep -A2 'domain.*lan'
 ```
-You should see a resolver with nameserver `10.10.0.10` scoped to domain `lan`.
+You should see a resolver with nameserver `192.168.1.10` scoped to domain `lan`.
 
 **`*.lan` fails only while the ProtonVPN exit node is selected** (public sites
 fine, `DNS_PROBE_POSSIBLE` on every `.lan` name). Different cause: the exit node

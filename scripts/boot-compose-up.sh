@@ -5,7 +5,7 @@
 # 5 Aug 2026 left every container *running* but with its published ports never
 # established — Pi-hole reported healthy (its healthcheck digs 127.0.0.1 from
 # inside the container, so it passes even when nothing outside can reach it)
-# while nothing was listening on 10.10.0.10:53. DNS was down for the whole house
+# while nothing was listening on the NAS's LAN IP:53. DNS was down for the whole house
 # and the NAS looked fine from `docker ps`.
 #
 # `docker compose up -d` reconciles each container against its compose file and

@@ -2,7 +2,7 @@
 # TAILSCALE - Remote access to your full LAN via mesh VPN
 #
 # What it does:
-# - Acts as a subnet router: advertises your LAN (e.g. 10.10.0.0/24) to your
+# - Acts as a subnet router: advertises your LAN (e.g. 192.168.1.0/24) to your
 #   Tailscale tailnet so phones/laptops can reach Pi-hole, *.lan domains,
 #   Home Assistant, NAS admin UIs, etc. from anywhere.
 # - Traverses CGNAT (no port-forward needed) and falls back to a relay over

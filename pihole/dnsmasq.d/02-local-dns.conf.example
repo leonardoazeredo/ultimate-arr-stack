@@ -3,10 +3,10 @@
 # Traefik routes by Host header to correct service
 #
 # Usage (on NAS):
-#   sed "s/TRAEFIK_LAN_IP/10.10.0.11/g" pihole/dnsmasq.d/02-local-dns.conf.example > pihole/dnsmasq.d/02-local-dns.conf
+#   sed "s/TRAEFIK_LAN_IP/192.168.1.11/g" pihole/dnsmasq.d/02-local-dns.conf.example > pihole/dnsmasq.d/02-local-dns.conf
 #   docker restart pihole
 #
-# Note: Replace 10.10.0.11 with your chosen TRAEFIK_LAN_IP
+# Note: Replace 192.168.1.11 with your chosen TRAEFIK_LAN_IP
 # Note: `pihole reloaddns` does NOT pick up bind-mount changes — use `docker restart pihole`
 
 # Media services

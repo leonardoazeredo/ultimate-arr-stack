@@ -184,9 +184,9 @@ qBittorrent bans IPs after repeated failed login attempts (e.g., from scripts or
 Tools → Options → Web UI → Authentication:
 - **Bypass authentication for clients on localhost:** ✅
 - **Bypass authentication for clients in whitelisted IP subnets:** ✅
-- **Whitelisted subnets:** `172.20.0.0/24, 10.10.0.0/24, 127.0.0.0/8`
+- **Whitelisted subnets:** `172.20.0.0/24, 192.168.1.0/24, 127.0.0.0/8`
 
-> Adjust the `10.10.0.0/24` to match your LAN subnet. The `172.20.0.0/24` is the arr-stack Docker network — this ensures Sonarr, Radarr, and API scripts can always reach qBittorrent without auth failures.
+> Adjust the `192.168.1.0/24` to match your LAN subnet. The `172.20.0.0/24` is the arr-stack Docker network — this ensures Sonarr, Radarr, and API scripts can always reach qBittorrent without auth failures.
 >
 > **Is this safe?** Yes — qBittorrent sits behind Gluetun's VPN tunnel with no ports exposed to the internet. Only devices on your LAN or Docker containers can reach it. The whitelisted subnets are all internal, so auth bypass doesn't widen the attack surface.
 

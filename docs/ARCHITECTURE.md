@@ -167,7 +167,7 @@ magnetio-net (172.22.0.0/24) — isolated, only Gluetun + Magnetio's own contain
 │  │  ┌──────────────┐  ┌────────────────┐  ┌──────────────────────┐ │    │
 │  │  │ sonarr.lan   │  │ pihole.lan     │  │ homeassistant.lan    │ │    │
 │  │  └──────────────┘  └────────────────┘  └──────────────────────┘ │    │
-│  │  Phone → Tailscale → LAN (10.10.0.0/24) → Service               │    │
+│  │  Phone → Tailscale → LAN (192.168.1.0/24) → Service               │    │
 │  │  (No public exposure; only authorised tailnet devices reach LAN)│    │
 │  └──────────────────────────────────────────────────────────────────┘    │
 │                                                                          │

@@ -11,21 +11,21 @@ This works by giving Traefik its own IP address on your home network. When you t
 These are already in `.env` (from `.env.example`). Edit the values for your network:
 
 ```bash
-TRAEFIK_LAN_IP=10.10.0.11    # Unused IP in your LAN range
+TRAEFIK_LAN_IP=192.168.1.11    # Unused IP in your LAN range
 LAN_INTERFACE=eth0            # Network interface (check with: ip link show)
-LAN_SUBNET=10.10.0.0/24       # Your LAN subnet
-LAN_GATEWAY=10.10.0.1         # Your router IP
+LAN_SUBNET=192.168.1.0/24       # Your LAN subnet
+LAN_GATEWAY=192.168.1.1         # Your router IP
 ```
 
 **Step 2: Reserve the IP in your router**
 
-The container uses a static IP with a fake MAC address (`TRAEFIK_LAN_MAC` in `.env`, default `02:42:0a:0a:00:0b`). Your router doesn't know about it, so add a DHCP reservation to prevent it assigning that IP to another device.
+The container uses a static IP with a fake MAC address (`TRAEFIK_LAN_MAC` in `.env`, default `02:42:c0:a8:01:0b`). Your router doesn't know about it, so add a DHCP reservation to prevent it assigning that IP to another device.
 
 <details>
 <summary>Router-specific instructions</summary>
 
-- **MikroTik:** `/ip dhcp-server lease add address=10.10.0.11 mac-address=02:42:0a:0a:00:0b comment="Traefik macvlan" server=dhcp1`
-- **UniFi:** Settings → Networks → DHCP → Static IP → Add `02:42:0a:0a:00:0b` → your `TRAEFIK_LAN_IP`
+- **MikroTik:** `/ip dhcp-server lease add address=192.168.1.11 mac-address=02:42:c0:a8:01:0b comment="Traefik macvlan" server=dhcp1`
+- **UniFi:** Settings → Networks → DHCP → Static IP → Add `02:42:c0:a8:01:0b` → your `TRAEFIK_LAN_IP`
 - **pfSense/OPNsense:** Services → DHCP → Static Mappings → Add
 - **TP-Link:** Advanced → Network → DHCP Server → Address Reservation → Add
 - **Netgear:** Advanced → Setup → LAN Setup → Address Reservation → Add
@@ -53,7 +53,7 @@ docker compose -f docker-compose.traefik.yml up -d
 ```bash
 # Copy example and replace placeholder with your Traefik IP
 mkdir -p pihole/dnsmasq.d
-sed "s/TRAEFIK_LAN_IP/10.10.0.11/g" pihole/dnsmasq.d/02-local-dns.conf.example > pihole/dnsmasq.d/02-local-dns.conf
+sed "s/TRAEFIK_LAN_IP/192.168.1.11/g" pihole/dnsmasq.d/02-local-dns.conf.example > pihole/dnsmasq.d/02-local-dns.conf
 chmod 644 pihole/dnsmasq.d/02-local-dns.conf
 
 # Restart Pi-hole to apply changes

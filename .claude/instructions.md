@@ -199,7 +199,7 @@ If Pi-hole is down and you've lost DNS:
 1. **Connect to mobile hotspot** (different network, uses mobile DNS)
 2. **SSH to NAS using IP address** (not hostname):
    ```bash
-   ssh <user>@<NAS_IP>  # e.g., ssh mooseadmin@10.10.0.10
+   ssh <user>@<NAS_IP>  # e.g., ssh nasadmin@192.168.1.10
    ```
 3. **Start the stack**:
    ```bash
@@ -225,7 +225,7 @@ Stack `.lan` domains are defined in `pihole/dnsmasq.d/02-local-dns.conf` (dnsmas
 nano $NAS_STACK_DIR/pihole/dnsmasq.d/02-local-dns.conf
 
 # Add your entry
-address=/myservice.lan/10.10.0.XX
+address=/myservice.lan/192.168.1.XX
 
 # Restart to pick up bind-mount changes (reloaddns alone is NOT enough)
 docker restart pihole

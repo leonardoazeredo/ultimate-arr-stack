@@ -140,7 +140,7 @@ Prevents API scripts and Sonarr/Radarr from getting IP-banned after container re
 Tools → Options → Web UI → Authentication:
 - **Bypass authentication for clients on localhost:** ✅
 - **Bypass authentication for clients in whitelisted IP subnets:** ✅
-- **Whitelisted subnets:** `172.20.0.0/24, 10.10.0.0/24, 127.0.0.0/8` (adjust `10.10.0.0/24` to match your LAN subnet)
+- **Whitelisted subnets:** `172.20.0.0/24, 192.168.1.0/24, 127.0.0.0/8` (adjust `192.168.1.0/24` to match your LAN subnet)
 
 ---
 
@@ -474,7 +474,7 @@ echo "Migration complete"
 | `MEDIA_ROOT` | Yes | — | Base path for media storage |
 | `TRAEFIK_LAN_IP` | Only for .lan | — | Traefik's dedicated LAN IP for local DNS |
 | `LAN_INTERFACE` | Only for .lan | — | Network interface (e.g., `eth0`) |
-| `LAN_SUBNET` | Only for .lan | — | Your LAN subnet (e.g., `10.10.0.0/24`) |
+| `LAN_SUBNET` | Only for .lan | — | Your LAN subnet (e.g., `192.168.1.0/24`) |
 | `LAN_GATEWAY` | Only for .lan | — | Router IP |
 | `TRAEFIK_LAN_MAC` | Only for .lan | — | Fixed MAC for DHCP reservation |
 
