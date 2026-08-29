@@ -65,8 +65,67 @@ EOF
     assert_failure
     assert_output --partial "ZOMBIE CONTAINERS"
     assert_output --partial "vpn-socks5"
-    assert_output --partial "docker restart"
+    # The remediation must be a compose recreate through the file that DEFINES
+    # the service, not `docker restart`. The script used to print
+    # "Fix: docker restart <names>", which cannot work for anything this script
+    # detects: a zombie exists only once gluetun's container ID has changed, and
+    # the dead ID is baked into HostConfig.NetworkMode, so dockerd refuses the
+    # restart outright ("No such container"). Confirmed live 2026-08-27.
+    assert_output --partial "docker compose -f docker-compose.arr-stack.yml up -d --force-recreate"
+    refute_output --partial "Fix: docker restart"
     refute_output --partial "qbittorrent"
+}
+
+@test "detect-vpn-zombies maps every dependent to a compose file" {
+    # Guards the same class of gap as the DEPENDENTS test below: a service can
+    # be detected as a zombie but have no recovery command printed for it if
+    # compose_file_for() wasn't updated alongside DEPENDENTS. Without this, the
+    # script would name the broken container and then tell you nothing about
+    # how to fix it.
+    local script="$REPO_ROOT/scripts/detect-vpn-zombies.sh"
+
+    # Extract each array separately and assert each is non-empty: a single
+    # combined grep stays non-empty if only one of the two arrays is reformatted
+    # to multi-line (the [^)]* class can't cross newlines), which would silently
+    # drop that array's services from this test while it still passed.
+    local deps=""
+    local arr name
+    for name in DEPENDENTS EXIT_DEPENDENTS; do
+        arr=$(grep -oE "^${name}=\([^)]*\)" "$script" \
+            | sed -E "s/^${name}=\(//; s/\)$//" | tr ' ' '\n')
+        # Must contain a real service name, not merely be non-empty: stripping
+        # only spaces would let a tabs/newlines-only extraction through.
+        [[ "$arr" == *[![:space:]]* ]]
+        deps+="$arr"$'\n'
+    done
+    deps=$(printf '%s' "$deps" | sort -u)
+
+    [[ -n "$deps" ]]
+
+    # The script exits early if `docker inspect gluetun` fails, and
+    # compose_file_for() is defined after that point — so stub docker to report
+    # every dependent as current (no zombies, clean exit 0) and let the sourced
+    # script fall through with the function defined.
+    local stub='docker() {
+        if [[ "$*" == *"--format {{.Id}}"* ]]; then echo "current-id"; return 0; fi
+        echo "container:current-id"
+    }'
+
+    while IFS= read -r svc; do
+        [[ -n "$svc" ]] || continue
+        echo "checking $svc has a compose file mapping" >&2
+        run bash -c "$stub
+            source '$script' >/dev/null
+            compose_file_for '$svc'"
+        assert_success
+        # Non-empty is not enough: a typo'd filename, or a mapping pointing at
+        # the wrong file, would pass that alone and only fail when someone
+        # pasted the printed recovery command during an outage. Assert the file
+        # exists AND actually defines this service.
+        [[ -n "${output// /}" ]]
+        [[ -f "$REPO_ROOT/$output" ]]
+        grep -qE "^  ${svc}:[[:space:]]*$" "$REPO_ROOT/$output"
+    done <<< "$deps"
 }
 
 @test "detect-vpn-zombies DEPENDENTS covers every service tunneled through gluetun" {
