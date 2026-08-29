@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { url, DOCKER_AVAILABLE, dockerExec } from './helpers';
+import { url, bridgeUrl, HOST, DOCKER_AVAILABLE, dockerExec } from './helpers';
 
 // Newer additions to the stack — Decypharr/TorBox, Magnetio, stremio-jellyfin
 // — had zero test coverage before this file existed.
@@ -45,15 +45,30 @@ test.describe('stremio-jellyfin', () => {
   });
 });
 
+// Homepage publishes no host port by design — it is fronted by Traefik with
+// basic auth, so it is reached here on its arr-core bridge IP instead. Needs the
+// Docker CLI to resolve that IP, hence the DOCKER_AVAILABLE gate, matching this
+// suite's convention of skipping off-NAS rather than failing.
 test.describe('Homepage', () => {
+  test.skip(!DOCKER_AVAILABLE, 'needs Docker socket access (run on the NAS)');
+
   test('Homepage dashboard responds', async ({ request }) => {
-    const res = await request.get(url('homepage', '/'));
+    const res = await request.get(bridgeUrl('homepage', 3000, '/'));
     expect(res.ok()).toBeTruthy();
   });
 
   test('Homepage healthcheck endpoint responds', async ({ request }) => {
-    const res = await request.get(url('homepage', '/api/healthcheck'));
+    const res = await request.get(bridgeUrl('homepage', 3000, '/api/healthcheck'));
     expect(res.ok()).toBeTruthy();
+  });
+
+  test('Homepage is NOT reachable on the old published port', async ({ request }) => {
+    // Regression guard for the fix that removed "3000:3000": republishing it
+    // would silently restore unauthenticated LAN access to the dashboard.
+    const res = await request
+      .get(`http://${HOST}:3000/`, { timeout: 5000 })
+      .catch(() => null);
+    expect(res).toBeNull();
   });
 });
 

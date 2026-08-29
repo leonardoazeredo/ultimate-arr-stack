@@ -26,9 +26,9 @@
 | Pi-hole | `NAS_IP:8081/admin` | `https://pihole.lan`* | — |
 | Traefik | — | `https://traefik.lan`* | — |
 | Uptime Kuma | `NAS_IP:3001` | `https://uptime.lan`* | — |
-| duc | `NAS_IP:8838` | `https://duc.lan`* | — |
-| Beszel | `NAS_IP:8090` | `https://beszel.lan`* | — |
-| Homepage | `NAS_IP:3000` | `https://homepage.lan`* | — |
+| duc | — | `https://duc.lan`* | — |
+| Beszel | — | `https://beszel.lan`* | — |
+| Homepage | — | `https://homepage.lan`* | — |
 
 **Legend:**
 - **Core** — Always works on your LAN
@@ -52,7 +52,7 @@
 | Pi-hole | 172.20.0.5 | 8081 | DNS ad-blocking (`/admin`) |
 | Seerr | 172.20.0.8 | 5055 | Request management |
 | Bazarr | 172.20.0.9 | 6767 | Subtitles |
-| ↳ FlareSolverr | (via Gluetun) | 8191 | Cloudflare bypass (inactive until added as an Indexer Proxy in Prowlarr — see [APP-CONFIG.md](APP-CONFIG.md#46-prowlarr-indexer-manager)) |
+| ↳ FlareSolverr | (via Gluetun) | 8191 (not published on the host) | Cloudflare bypass (inactive until added as an Indexer Proxy in Prowlarr — see [APP-CONFIG.md](APP-CONFIG.md#46-prowlarr-indexer-manager)) |
 
 **+ local DNS** (traefik.yml):
 
