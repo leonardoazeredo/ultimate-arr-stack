@@ -102,18 +102,28 @@ setup() {
 # VLAN until 2026-08-29; Traefik routes to their bridge IPs, so publishing buys
 # nothing. Guarded here because nothing else in the suite asserts exposure.
 @test "unauthenticated services publish no host port" {
+    # Port strings are matched WITHOUT quotes and the file is de-quoted first,
+    # because YAML treats `- "8090:8090"`, `- '8090:8090'` and `- 8090:8090` as
+    # the same mapping. An earlier version of this test anchored on the
+    # double-quoted form only, so a single-quoted republish passed it clean —
+    # verified by injecting one. The flow form (`ports: ["8090:8090"]`) is
+    # checked separately since it is not a list item.
     local -a forbidden=(
-        '"8191:8191"'   # FlareSolverr  - SSRF/pivot primitive
-        '"3000:3000"'   # Homepage      - leaks the service inventory
-        '"8090:8090"'   # Beszel        - /api/collections/... answered 200
-        '"8838:80"'     # duc           - filesystem-layout disclosure
+        '8191:8191'   # FlareSolverr  - SSRF/pivot primitive
+        '3000:3000'   # Homepage      - leaks the service inventory
+        '8090:8090'   # Beszel        - /api/collections/... answered 200
+        '8838:80'     # duc           - filesystem-layout disclosure
     )
     for f in $(get_compose_files); do
-        local fname
+        local fname dequoted
         fname=$(basename "$f")
+        dequoted=$(tr -d "\"'" < "$f")
         for pattern in "${forbidden[@]}"; do
-            if grep -qE "^[[:space:]]*-[[:space:]]*${pattern}" "$f" 2>/dev/null; then
+            if grep -qE "^[[:space:]]*-[[:space:]]*${pattern}([[:space:]]|#|$)" <<< "$dequoted"; then
                 fail "$fname republishes ${pattern} — this re-exposes an unauthenticated service on the LAN"
+            fi
+            if grep -qE "^[[:space:]]*ports:[[:space:]]*\[.*${pattern}" <<< "$dequoted"; then
+                fail "$fname republishes ${pattern} in flow syntax — this re-exposes an unauthenticated service on the LAN"
             fi
         done
     done

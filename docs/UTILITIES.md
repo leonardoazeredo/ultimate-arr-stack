@@ -27,7 +27,9 @@ the stack, in one place. Config lives in tracked YAML files under
 `bookmarks.yaml`) — no secrets in those files; widget credentials are
 templated in from `.env` via `{{HOMEPAGE_VAR_*}}` at container start.
 
-**First access**: open http://NAS_IP:3000 (or http://homepage.lan).
+**First access**: open https://homepage.lan. Homepage publishes no host
+port — Traefik's basic auth is its only access control, so there is no
+`NAS_IP:3000` to fall back to (removed 2026-08-29).
 
 **Add the widget credentials to `.env`** (see `.env.example`'s Homepage
 section) — Sonarr/Radarr/Prowlarr reuse the keys already used elsewhere in
@@ -112,7 +114,7 @@ docker compose -f docker-compose.utilities.yml up -d beszel
 ```
 
 **Get the agent key:**
-1. Open http://NAS_IP:8090 (or http://beszel.lan)
+1. Open https://beszel.lan (no host port is published — see docs/REFERENCE.md)
 2. Create an admin account
 3. Click "Add System" → copy the `KEY` value
 

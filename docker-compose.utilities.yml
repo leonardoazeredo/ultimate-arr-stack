@@ -297,7 +297,7 @@ services:
 
   # ═══════════════════════════════════════════════════════════════════════════
   # HOMEPAGE - Unified dashboard with live status widgets for every app.
-  # Access: homepage.lan | NAS_IP:3000 (LAN-only, use WireGuard/Tailscale for remote)
+  # Access: https://homepage.lan only (no host port published — see the note on ports below)
   # ═══════════════════════════════════════════════════════════════════════════
   homepage:
     image: ghcr.io/gethomepage/homepage:v2.0.0
@@ -340,7 +340,7 @@ services:
 
   # ═══════════════════════════════════════════════════════════════════════════
   # DUC - Disk usage analyzer. Visual treemap UI showing what's using storage.
-  # Access: duc.lan | NAS_IP:8838 (LAN-only, use WireGuard for remote)
+  # Access: https://duc.lan only (no host port published — see the note on ports below)
   # Note: Re-indexes daily at 4am. Manual: docker restart duc
   # ═══════════════════════════════════════════════════════════════════════════
   duc:
@@ -372,7 +372,7 @@ services:
 
   # ═══════════════════════════════════════════════════════════════════════════
   # BESZEL - Lightweight server monitoring with historical data and alerts.
-  # Access: beszel.lan | NAS_IP:8090 (LAN-only, use WireGuard for remote)
+  # Access: https://beszel.lan only (no host port published — see the note on ports below)
   # ═══════════════════════════════════════════════════════════════════════════
   beszel:
     image: henrygd/beszel:0.18

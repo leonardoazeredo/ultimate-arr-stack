@@ -34,14 +34,14 @@ test.describe('Admin-UI HTTPS tier', () => {
   //
   // Every `.lan` host redirects http→https, and all but one require
   // basicauth. Jellyfin is the exception, deliberately — see
-  // docs/HTTPS-LOCAL.md. Smoke-checks a few representative hosts rather than
-  // all 13: the routing/TLS/auth mechanism is identical per-host (see
-  // traefik/dynamic/local-services.yml's `-secure` router pattern), so this
-  // catches a regression in the shared mechanism without re-testing config
-  // that's already covered statically. sonarr.lan represents the original
-  // admin-tier hosts; seerr.lan covers the newer media-tier hosts, which have
-  // their own app-level login in addition to this gate. Jellyfin is asserted
-  // separately below, because it is deliberately NOT behind admin-auth.
+  // docs/HTTPS-LOCAL.md. sonarr.lan represents the original admin-tier hosts
+  // and seerr.lan the media tier, which has its own app-level login in
+  // addition to this gate. homepage.lan, duc.lan and beszel.lan are covered
+  // individually rather than as representatives: since their host ports were
+  // removed, basicauth here is their only access control, so "the mechanism
+  // is shared, one host is enough" no longer holds for them. Jellyfin is
+  // asserted separately below, because it is deliberately NOT behind
+  // admin-auth.
   //
   // Deliberate coverage gap: these tests only prove the 401-without-creds
   // gate, not that a *credentialed* request reaches the right backend -
@@ -76,6 +76,16 @@ test.describe('Admin-UI HTTPS tier', () => {
   // guards against: a stale/wrong cert deployed without this host in its
   // SAN list still completes a TLS handshake (mkcert leaf, just for the
   // wrong names) but wouldn't list `domain` under subjectaltname.
+  // The `.lan` hosts under test. homepage/duc/beszel are here specifically
+  // because they no longer publish a host port — Traefik's admin-auth is now
+  // the ONLY thing standing in front of them, so a middleware removed from
+  // traefik/dynamic/local-services.yml would otherwise leave every test green
+  // while the service went unauthenticated on the LAN. jellyfin.lan redirects
+  // like the rest but is deliberately not auth-gated, so it appears only in
+  // the redirect list and gets its own assertion below.
+  const ADMIN_TIER_HOSTS = ['sonarr.lan', 'jellyfin.lan', 'seerr.lan', 'homepage.lan', 'duc.lan', 'beszel.lan'] as const;
+  const AUTH_GATED_HOSTS = ADMIN_TIER_HOSTS.filter((h) => h !== 'jellyfin.lan');
+
   async function httpsProbe(domain: string, path = '/') {
     return new Promise<{ status: number; subjectaltname: string }>((resolve, reject) => {
       const req = https.request(
@@ -104,7 +114,7 @@ test.describe('Admin-UI HTTPS tier', () => {
     });
   }
 
-  for (const domain of ['sonarr.lan', 'jellyfin.lan', 'seerr.lan'] as const) {
+  for (const domain of ADMIN_TIER_HOSTS) {
     test(`http ${domain} redirects to https`, async ({ request }) => {
       test.skip(!TRAEFIK_LAN_IP, 'TRAEFIK_LAN_IP not set');
 
@@ -117,7 +127,7 @@ test.describe('Admin-UI HTTPS tier', () => {
     });
   }
 
-  for (const domain of ['sonarr.lan', 'seerr.lan'] as const) {
+  for (const domain of AUTH_GATED_HOSTS) {
     test(`https ${domain} without credentials is rejected`, async () => {
       test.skip(!TRAEFIK_LAN_IP, 'TRAEFIK_LAN_IP not set');
 
