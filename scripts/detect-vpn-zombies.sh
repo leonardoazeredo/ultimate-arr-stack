@@ -74,7 +74,18 @@ fi
 # through its own file (see docs/TROUBLESHOOTING.md) — so a single blanket
 # command would be wrong for any zombie defined elsewhere. Like DEPENDENTS
 # above, this map doesn't derive itself: add a service here when you add it
-# there. tests/vpn-zombies.bats asserts the two stay in sync.
+# there. tests/vpn-zombies.bats asserts the two stay in sync, and that each
+# mapped file both exists and actually defines that service.
+#
+# Deliberately hardcoded rather than grepped out of the compose files at
+# runtime, which would be shorter. This script's whole job is to be trusted
+# when the stack is already in a bad state — and the documented cause of the
+# 2026-08-27 outage was the NAS sitting on the WRONG BRANCH, where those files
+# say something other than what is deployed. A hardcoded map still prints the
+# right recovery command in that state; a derived one would confidently print
+# the wrong one. It also keeps the script's only runtime dependency `docker`,
+# so it works from cron regardless of where the checkout is. Don't "simplify"
+# this into a grep.
 compose_file_for() {
     case "$1" in
         qbittorrent|sabnzbd|prowlarr|flaresolverr|vpn-socks5) echo "docker-compose.arr-stack.yml" ;;
@@ -91,6 +102,10 @@ if [[ ${#zombies[@]} -gt 0 ]]; then
     echo "'docker restart' CANNOT work here — the dead container's ID is baked into"
     echo "HostConfig.NetworkMode, so dockerd refuses with 'No such container'."
     echo
+    # -f takes a path relative to the working directory, and this script's usual
+    # caller is cron — whose cwd is not the deploy path. Emit the cd so the
+    # block below is pasteable as-is from wherever the output was read.
+    echo "  cd $(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
     # Group by the files the zombies actually map to, derived from
     # compose_file_for() rather than a second hardcoded file list. A literal

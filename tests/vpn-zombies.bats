@@ -93,7 +93,9 @@ EOF
     for name in DEPENDENTS EXIT_DEPENDENTS; do
         arr=$(grep -oE "^${name}=\([^)]*\)" "$script" \
             | sed -E "s/^${name}=\(//; s/\)$//" | tr ' ' '\n')
-        [[ -n "${arr// /}" ]]
+        # Must contain a real service name, not merely be non-empty: stripping
+        # only spaces would let a tabs/newlines-only extraction through.
+        [[ "$arr" == *[![:space:]]* ]]
         deps+="$arr"$'\n'
     done
     deps=$(printf '%s' "$deps" | sort -u)
