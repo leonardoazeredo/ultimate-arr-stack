@@ -32,15 +32,16 @@ test.describe('Admin-UI HTTPS tier', () => {
   // TRAEFIK_LAN_IP rather than relying on the test runner's own DNS
   // resolution working, so this test isolates Traefik's routing specifically.
   //
-  // Every `.lan` host (admin tier and, since the Jellyfin/Seerr extension,
-  // media tier too) now redirects http→https and requires basicauth — see
+  // Every `.lan` host redirects http→https, and all but one require
+  // basicauth. Jellyfin is the exception, deliberately — see
   // docs/HTTPS-LOCAL.md. Smoke-checks a few representative hosts rather than
   // all 13: the routing/TLS/auth mechanism is identical per-host (see
   // traefik/dynamic/local-services.yml's `-secure` router pattern), so this
   // catches a regression in the shared mechanism without re-testing config
   // that's already covered statically. sonarr.lan represents the original
-  // admin-tier hosts; jellyfin.lan/seerr.lan cover the newer media-tier
-  // hosts, which have their own app-level login in addition to this gate.
+  // admin-tier hosts; seerr.lan covers the newer media-tier hosts, which have
+  // their own app-level login in addition to this gate. Jellyfin is asserted
+  // separately below, because it is deliberately NOT behind admin-auth.
   //
   // Deliberate coverage gap: these tests only prove the 401-without-creds
   // gate, not that a *credentialed* request reaches the right backend -
@@ -53,6 +54,56 @@ test.describe('Admin-UI HTTPS tier', () => {
   // Backend health for Jellyfin/Seerr specifically is already covered
   // independently by ui-screenshots.spec.ts, which logs into both via their
   // direct LAN-published ports (bypassing Traefik entirely).
+
+  // Can't use Playwright's `request` fixture with a spoofed Host header
+  // here: Traefik's `sniStrict: true` (tls.yml) rejects the TLS
+  // handshake outright unless the *SNI* itself is a real `.lan`
+  // hostname (confirmed live - connecting by bare IP gets a TLS
+  // "unrecognized_name" alert before any HTTP response), and
+  // Playwright's request context has no way to set SNI independently of
+  // the connection address (tried dns.setServers() to make the hostname
+  // resolve for real - it doesn't work, Playwright's fixture resolves
+  // through a path that ignores it, unlike the historical
+  // dns.resolve4/6-vs-dns.lookup() distinction documented in git
+  // history for this file). Node's own `https` module *does* expose SNI
+  // (`servername`) separately from the connection target, exactly like
+  // curl's `--resolve` - use it directly instead.
+  //
+  // rejectUnauthorized stays false because the mkcert CA root never
+  // leaves the machine that generated it (see docs/HTTPS-LOCAL.md) - the
+  // e2e runner has no copy to verify against. Asserting on the presented
+  // cert's own SAN list instead catches the actual regression this
+  // guards against: a stale/wrong cert deployed without this host in its
+  // SAN list still completes a TLS handshake (mkcert leaf, just for the
+  // wrong names) but wouldn't list `domain` under subjectaltname.
+  async function httpsProbe(domain: string, path = '/') {
+    return new Promise<{ status: number; subjectaltname: string }>((resolve, reject) => {
+      const req = https.request(
+        {
+          host: TRAEFIK_LAN_IP,
+          port: 443,
+          path,
+          method: 'GET',
+          servername: domain,
+          headers: { Host: domain },
+          rejectUnauthorized: false,
+          timeout: 10_000,
+        },
+        (res) => {
+          const cert = res.socket && 'getPeerCertificate' in res.socket ? (res.socket as import('tls').TLSSocket).getPeerCertificate() : null;
+          res.resume();
+          resolve({
+            status: res.statusCode ?? 0,
+            subjectaltname: cert?.subjectaltname ?? '',
+          });
+        },
+      );
+      req.on('error', reject);
+      req.on('timeout', () => req.destroy(new Error('request timed out')));
+      req.end();
+    });
+  }
+
   for (const domain of ['sonarr.lan', 'jellyfin.lan', 'seerr.lan'] as const) {
     test(`http ${domain} redirects to https`, async ({ request }) => {
       test.skip(!TRAEFIK_LAN_IP, 'TRAEFIK_LAN_IP not set');
@@ -64,57 +115,44 @@ test.describe('Admin-UI HTTPS tier', () => {
       expect(res.status()).toBe(301);
       expect(res.headers()['location']).toBe(`https://${domain}/`);
     });
+  }
 
+  for (const domain of ['sonarr.lan', 'seerr.lan'] as const) {
     test(`https ${domain} without credentials is rejected`, async () => {
       test.skip(!TRAEFIK_LAN_IP, 'TRAEFIK_LAN_IP not set');
 
-      // Can't use Playwright's `request` fixture with a spoofed Host header
-      // here: Traefik's `sniStrict: true` (tls.yml) rejects the TLS
-      // handshake outright unless the *SNI* itself is a real `.lan`
-      // hostname (confirmed live - connecting by bare IP gets a TLS
-      // "unrecognized_name" alert before any HTTP response), and
-      // Playwright's request context has no way to set SNI independently of
-      // the connection address (tried dns.setServers() to make the hostname
-      // resolve for real - it doesn't work, Playwright's fixture resolves
-      // through a path that ignores it, unlike the historical
-      // dns.resolve4/6-vs-dns.lookup() distinction documented in git
-      // history for this file). Node's own `https` module *does* expose SNI
-      // (`servername`) separately from the connection target, exactly like
-      // curl's `--resolve` - use it directly instead.
-      //
-      // rejectUnauthorized stays false because the mkcert CA root never
-      // leaves the machine that generated it (see docs/HTTPS-LOCAL.md) - the
-      // e2e runner has no copy to verify against. Asserting on the presented
-      // cert's own SAN list instead catches the actual regression this
-      // guards against: a stale/wrong cert deployed without this host in its
-      // SAN list still completes a TLS handshake (mkcert leaf, just for the
-      // wrong names) but wouldn't list `domain` under subjectaltname.
-      const { status, subjectaltname } = await new Promise<{ status: number; subjectaltname: string }>((resolve, reject) => {
-        const req = https.request(
-          {
-            host: TRAEFIK_LAN_IP,
-            port: 443,
-            path: '/',
-            method: 'GET',
-            servername: domain,
-            headers: { Host: domain },
-            rejectUnauthorized: false,
-            timeout: 10_000,
-          },
-          (res) => {
-            const cert = res.socket && 'getPeerCertificate' in res.socket ? (res.socket as import('tls').TLSSocket).getPeerCertificate() : null;
-            res.resume();
-            resolve({ status: res.statusCode ?? 0, subjectaltname: cert?.subjectaltname ?? '' });
-          },
-        );
-        req.on('error', reject);
-        req.on('timeout', () => req.destroy(new Error('request timed out')));
-        req.end();
-      });
+      const { status, subjectaltname } = await httpsProbe(domain);
       expect(status).toBe(401);
       expect(subjectaltname).toContain(`DNS:${domain}`);
     });
   }
+
+  // Jellyfin is the one `.lan` host deliberately exempt from admin-auth:
+  // `3c576ae` dropped the middleware because its web client fires many
+  // concurrent requests (websocket, HLS segments, thumbnails) that don't all
+  // carry the cached Basic Auth header, producing looping native auth
+  // prompts. See traefik/dynamic/local-services.yml's header comment.
+  //
+  // This assertion was wrong from `97d8522` until 2026-08-29: jellyfin.lan sat
+  // in the 401 loop above and had been failing ever since `3c576ae` removed
+  // the very control it asserted. Rather than delete the coverage, it asserts
+  // the security property that actually holds — Jellyfin's own app-level login
+  // is the real gate — so removing *that* gate still fails a test.
+  test('https jellyfin.lan is exempt from admin-auth but gated by Jellyfin itself', async () => {
+    test.skip(!TRAEFIK_LAN_IP, 'TRAEFIK_LAN_IP not set');
+
+    const { status, subjectaltname } = await httpsProbe('jellyfin.lan');
+    // Not 401: no basicauth challenge. Jellyfin redirects to its own web client.
+    expect(status).toBe(302);
+    expect(subjectaltname).toContain('DNS:jellyfin.lan');
+
+    // The actual gate. If Jellyfin's own auth were ever disabled, the route
+    // would be fully unauthenticated on the LAN and this catches it. Goes
+    // through httpsProbe for the SNI reason above — Playwright's `request`
+    // fixture cannot set SNI, so it cannot reach this route at all.
+    const api = await httpsProbe('jellyfin.lan', '/System/Info');
+    expect(api.status).toBe(401);
+  });
 });
 
 test.describe('Pi-hole port publication', () => {
