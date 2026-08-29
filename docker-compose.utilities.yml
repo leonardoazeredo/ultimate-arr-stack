@@ -304,11 +304,14 @@ services:
     container_name: homepage
     <<: *default-security
     restart: always
-    ports:
-      - "3000:3000"  # Local network access only
+    # No published port: reached via Traefik at homepage.lan, which routes to
+    # this container's bridge IP (traefik/dynamic/local-services.yml ->
+    # homepage-lan => http://172.20.0.22:3000) and applies basic auth. The old
+    # "3000:3000" publish bypassed that auth for anything on the LAN and served
+    # the full service inventory unauthenticated (verified 2026-08-29).
     environment:
       - TZ=${TZ}
-      - HOMEPAGE_ALLOWED_HOSTS=homepage.lan,${NAS_IP}:3000,172.20.0.22:3000
+      - HOMEPAGE_ALLOWED_HOSTS=homepage.lan,172.20.0.22:3000
       - HOMEPAGE_VAR_SONARR_API_KEY=${SONARR_API_KEY}
       - HOMEPAGE_VAR_RADARR_API_KEY=${RADARR_API_KEY}
       - HOMEPAGE_VAR_PROWLARR_API_KEY=${PROWLARR_API_KEY}
@@ -357,8 +360,9 @@ services:
     volumes:
       - /volume1:/scan/volume1:ro      # NAS data (read-only)
       - duc-index:/database            # Persistent index
-    ports:
-      - "8838:80"                      # Local network access only
+    # No published port: reached via Traefik at duc.lan (duc-lan =>
+    # http://172.20.0.14:80) with basic auth. The old "8838:80" publish served
+    # a filesystem-layout browser unauthenticated to the whole LAN.
     environment:
       - TZ=${TZ}
       - SCHEDULE=0 4 * * *             # Re-index daily at 4am
@@ -378,8 +382,11 @@ services:
       - CHOWN           # Create data dirs on first run
       - DAC_OVERRIDE    # Write to root-owned volume directories
     restart: always
-    ports:
-      - "8090:8090"
+    # No published port: reached via Traefik at beszel.lan (beszel-lan =>
+    # http://172.20.0.15:8090) with basic auth. The old "8090:8090" publish
+    # answered /api/collections/systems/records unauthenticated. Safe to drop:
+    # Beszel's hub dials each agent (beszel-agent listens on PORT=45876,
+    # network_mode: host), so no agent depends on this port.
     networks:
       arr-core:
         ipv4_address: 172.20.0.15

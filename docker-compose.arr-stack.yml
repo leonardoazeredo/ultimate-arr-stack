@@ -157,7 +157,13 @@ services:
       - "9696:9696"   # Prowlarr
       - "8085:8085"   # qBittorrent
       - "8082:8080"   # SABnzbd
-      - "8191:8191"   # FlareSolverr
+      # FlareSolverr (8191) is deliberately NOT published. It is an
+      # unauthenticated headless-browser proxy — anything that can reach it can
+      # drive arbitrary outbound requests through this host, so exposing it on
+      # the LAN is an SSRF/pivot primitive. Its only consumer is Prowlarr, which
+      # shares this container's netns and reaches it at http://localhost:8191/
+      # (verified live 2026-08-29 via Prowlarr's /api/v1/indexerproxy). Publishing
+      # it bought nothing and cost a hole. Do not re-add without a real consumer.
       - "7000:7000"   # Magnetio addon (docker-compose.magnetio.yml, network_mode: container:gluetun)
     networks:
       arr-core:

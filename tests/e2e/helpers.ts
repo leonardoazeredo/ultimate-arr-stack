@@ -23,11 +23,37 @@ export const PORTS = {
   decypharr: 8282,
   magnetioAddon: 7000,
   stremioJellyfin: 60421,
-  homepage: 3000,
 } as const;
 
 export function url(service: keyof typeof PORTS, pathStr = '') {
   return `http://${HOST}:${PORTS[service]}${pathStr}`;
+}
+
+// ─── Bridge-only services ────────────────────────────────────────────────────
+//
+// Some services deliberately publish no host port — they are fronted by Traefik
+// with basic auth, which routes to their arr-core bridge IP. Publishing them as
+// well would bypass that auth for anything on the LAN, which is exactly what was
+// removed. The e2e container runs with --network host on the NAS, so it can
+// reach bridge IPs directly.
+//
+// The IP is read from Docker at runtime rather than hardcoded: this repo already
+// carries one "keep these IPs in sync by hand" coupling in
+// traefik/dynamic/local-services.yml, and duplicating it here would add a second
+// place to forget.
+// Network name is the bare "arr-core" (an externally-created network), not a
+// compose-project-prefixed "<project>_arr-core" — confirmed live 2026-08-29.
+export function bridgeIp(container: string): string {
+  const ip = dockerInspect(
+    container,
+    '{{ (index .NetworkSettings.Networks "arr-core").IPAddress }}',
+  );
+  if (!ip) throw new Error(`no arr-core bridge IP for container "${container}"`);
+  return ip;
+}
+
+export function bridgeUrl(container: string, port: number, pathStr = '') {
+  return `http://${bridgeIp(container)}:${port}${pathStr}`;
 }
 
 // ─── UI auth helpers ─────────────────────────────────────────────────────────

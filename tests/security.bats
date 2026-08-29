@@ -94,3 +94,27 @@ setup() {
         done <<< "$jellyfin_section"
     done
 }
+
+# Services that must NOT publish a host port. Each is either unauthenticated by
+# design (FlareSolverr is a headless-browser proxy; duc browses the filesystem)
+# or authenticated only behind Traefik, whose basic auth a published port
+# bypasses entirely. All four were reachable unauthenticated from the personal
+# VLAN until 2026-08-29; Traefik routes to their bridge IPs, so publishing buys
+# nothing. Guarded here because nothing else in the suite asserts exposure.
+@test "unauthenticated services publish no host port" {
+    local -a forbidden=(
+        '"8191:8191"'   # FlareSolverr  - SSRF/pivot primitive
+        '"3000:3000"'   # Homepage      - leaks the service inventory
+        '"8090:8090"'   # Beszel        - /api/collections/... answered 200
+        '"8838:80"'     # duc           - filesystem-layout disclosure
+    )
+    for f in $(get_compose_files); do
+        local fname
+        fname=$(basename "$f")
+        for pattern in "${forbidden[@]}"; do
+            if grep -qE "^[[:space:]]*-[[:space:]]*${pattern}" "$f" 2>/dev/null; then
+                fail "$fname republishes ${pattern} — this re-exposes an unauthenticated service on the LAN"
+            fi
+        done
+    done
+}
