@@ -84,9 +84,19 @@ EOF
     # how to fix it.
     local script="$REPO_ROOT/scripts/detect-vpn-zombies.sh"
 
-    local deps
-    deps=$(grep -oE '^(EXIT_)?DEPENDENTS=\([^)]*\)' "$script" \
-        | sed -E 's/^(EXIT_)?DEPENDENTS=\(//; s/\)$//' | tr ' ' '\n' | sort -u)
+    # Extract each array separately and assert each is non-empty: a single
+    # combined grep stays non-empty if only one of the two arrays is reformatted
+    # to multi-line (the [^)]* class can't cross newlines), which would silently
+    # drop that array's services from this test while it still passed.
+    local deps=""
+    local arr name
+    for name in DEPENDENTS EXIT_DEPENDENTS; do
+        arr=$(grep -oE "^${name}=\([^)]*\)" "$script" \
+            | sed -E "s/^${name}=\(//; s/\)$//" | tr ' ' '\n')
+        [[ -n "${arr// /}" ]]
+        deps+="$arr"$'\n'
+    done
+    deps=$(printf '%s' "$deps" | sort -u)
 
     [[ -n "$deps" ]]
 
@@ -106,7 +116,13 @@ EOF
             source '$script' >/dev/null
             compose_file_for '$svc'"
         assert_success
+        # Non-empty is not enough: a typo'd filename, or a mapping pointing at
+        # the wrong file, would pass that alone and only fail when someone
+        # pasted the printed recovery command during an outage. Assert the file
+        # exists AND actually defines this service.
         [[ -n "${output// /}" ]]
+        [[ -f "$REPO_ROOT/$output" ]]
+        grep -qE "^  ${svc}:[[:space:]]*$" "$REPO_ROOT/$output"
     done <<< "$deps"
 }
 

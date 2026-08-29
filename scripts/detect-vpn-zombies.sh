@@ -92,14 +92,24 @@ if [[ ${#zombies[@]} -gt 0 ]]; then
     echo "HostConfig.NetworkMode, so dockerd refuses with 'No such container'."
     echo
 
+    # Group by the files the zombies actually map to, derived from
+    # compose_file_for() rather than a second hardcoded file list. A literal
+    # list here could disagree with the mapping above, and a zombie whose file
+    # was missing from it would be named as broken and then given no command
+    # and no warning — mapped, so not "unmapped"; absent, so never grouped.
+    # Deriving makes that state unrepresentable: every non-empty mapping gets a
+    # command, every empty one gets the warning below.
     unmapped=()
-    for f in docker-compose.arr-stack.yml docker-compose.magnetio.yml docker-compose.tailscale.yml; do
+    files=$(for c in "${zombies[@]}"; do compose_file_for "$c"; done | sort -u)
+
+    while IFS= read -r f; do
+        [[ -n "$f" ]] || continue
         group=()
         for c in "${zombies[@]}"; do
             [[ "$(compose_file_for "$c")" == "$f" ]] && group+=("$c")
         done
         [[ ${#group[@]} -gt 0 ]] && echo "  docker compose -f $f up -d --force-recreate ${group[*]}"
-    done
+    done <<< "$files"
 
     for c in "${zombies[@]}"; do
         [[ -z "$(compose_file_for "$c")" ]] && unmapped+=("$c")
@@ -107,7 +117,8 @@ if [[ ${#zombies[@]} -gt 0 ]]; then
     if [[ ${#unmapped[@]} -gt 0 ]]; then
         echo
         echo "  WARNING: no compose file mapped for: ${unmapped[*]}"
-        echo "  Add them to compose_file_for() in this script; recreate them by hand meanwhile."
+        echo "  Find the owning file with: grep -l '^  <service>:' docker-compose.*.yml"
+        echo "  then add it to compose_file_for() in this script. Recreate by hand meanwhile."
     fi
 
     echo
