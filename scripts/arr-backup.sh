@@ -12,6 +12,10 @@ set -euo pipefail
 #   --prefix NAME   Volume prefix (default: auto-detect from running containers)
 #   --usb DIR_NAME  Dynamically find USB device under /mnt/@usb/sd*/ containing DIR_NAME
 #                   (device letters change on reboot, so never hardcode e.g. /mnt/@usb/sdd1)
+#   --rotate-days N Delete tarballs older than N days AT THE DESTINATION. Opt-in and
+#                   loud: every deletion is printed. Leave it off for any directory
+#                   managed by scripts/backup-prune.sh - two retention policies on one
+#                   directory is how the 2026-08-30 history loss happened (see below).
 #
 # Examples:
 #   ./scripts/arr-backup.sh --tar                     # Backup to /tmp, create tarball
@@ -19,6 +23,18 @@ set -euo pipefail
 #   ./scripts/arr-backup.sh --tar ~/backups           # Backup to custom dir with tarball
 #   ./scripts/arr-backup.sh --tar --usb arr-backups   # Auto-find USB, save to arr-backups/
 #   ./scripts/arr-backup.sh --prefix media-stack      # Use custom volume prefix
+#   ./scripts/arr-backup.sh --tar /mnt/x --rotate-days 7   # Flat 7-day rotation at /mnt/x
+#
+# Tarballs are named arr-stack-backup-YYYYMMDD-HHMMSS.tar.gz. The seconds matter:
+# scripts/backup-prune.sh keys its GFS tiers off that stamp, and a date-only name
+# means two runs on the same day silently clobber each other.
+#
+# HISTORY: until 2026-08-30 this script named tarballs by DAY only and, whenever a
+# destination directory was given, silently ran `find <dest> -mtime +7 -delete` with
+# stderr suppressed. Pointing it at /volume1/docker/arr-stack-backups - a directory
+# already under backup-prune.sh's GFS retention - therefore destroyed every backup
+# older than a week without printing a word. It took out the entire 2026-08-16 set.
+# Rotation is now opt-in (--rotate-days) and always prints what it removes.
 #
 # Pulling backup to another machine:
 #   # Ugreen NAS (scp doesn't work with /tmp, use cat pipe):
@@ -108,6 +124,10 @@ BACKUP_DIR=""
 VOLUME_PREFIX=""
 USB_DIR_NAME=""
 TARBALL=""
+ROTATE_DAYS=""
+# One stamp for the whole run, captured once. Calling `date` twice can straddle a
+# second boundary and produce a tarball whose name disagrees with its staging dir.
+RUN_TS="$(date +%Y%m%d-%H%M%S)"
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -127,6 +147,10 @@ while [[ $# -gt 0 ]]; do
       USB_DIR_NAME="$2"
       shift 2
       ;;
+    --rotate-days)
+      ROTATE_DAYS="$2"
+      shift 2
+      ;;
     *)
       BACKUP_DIR="$1"
       shift
@@ -136,6 +160,11 @@ done
 
 if $ENCRYPT && ! $CREATE_TAR; then
   echo "ERROR: --encrypt requires --tar"
+  exit 1
+fi
+
+if [ -n "$ROTATE_DAYS" ] && ! [[ "$ROTATE_DAYS" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: --rotate-days requires a non-negative integer, got '$ROTATE_DAYS'"
   exit 1
 fi
 
@@ -176,22 +205,40 @@ fi
 # - Always create backup in /tmp first (reliable space)
 # - If destination specified and different from /tmp, move tarball there after checking space
 FINAL_DEST="${BACKUP_DIR:-}"
-BACKUP_DIR="/tmp/arr-stack-backup-$(date +%Y%m%d)"
-mkdir -p "$BACKUP_DIR"
+BACKUP_DIR="/tmp/arr-stack-backup-${RUN_TS}"
+# Plain mkdir, not -p: it fails if the directory exists, which is the cheapest
+# guard against two runs landing in the same second and interleaving their
+# staging files into one tarball.
+mkdir "$BACKUP_DIR" || {
+  echo "ERROR: $BACKUP_DIR already exists - another backup may be running" >&2
+  exit 1
+}
 
-# Rotate old backups at final destination (keep 7 days)
-KEEP_DAYS=7
-if [ -n "$FINAL_DEST" ] && [ -d "$FINAL_DEST" ]; then
-  find "$FINAL_DEST" -maxdepth 1 -name "arr-stack-backup-*" -type d -mtime +$KEEP_DAYS -exec rm -rf {} \; 2>/dev/null
-  find "$FINAL_DEST" -maxdepth 1 -name "arr-stack-backup-*.tar.gz" -type f -mtime +$KEEP_DAYS -delete 2>/dev/null
+# Flat rotation at the final destination. OPT-IN ONLY (--rotate-days) and always
+# loud, because this directory may already be owned by backup-prune.sh's GFS
+# scheme and nothing else in the system would report a silent mass deletion.
+if [ -n "$ROTATE_DAYS" ] && [ -n "$FINAL_DEST" ] && [ -d "$FINAL_DEST" ]; then
+  echo "Rotating $FINAL_DEST (--rotate-days $ROTATE_DAYS)..."
+  ROTATED=0
+  while IFS= read -r stale; do
+    [ -n "$stale" ] || continue
+    if rm -rf "$stale"; then
+      echo "  removed: $(basename "$stale")"
+      ROTATED=$((ROTATED + 1))
+    else
+      echo "  WARNING: could not remove $(basename "$stale")" >&2
+    fi
+  done < <(find "$FINAL_DEST" -maxdepth 1 -mindepth 1 \
+             -name 'arr-stack-backup-*' -mtime "+$ROTATE_DAYS" | sort)
+  echo "Rotation removed $ROTATED item(s)."
+  echo ""
 fi
 
 # Get current user for ownership fix (avoids needing sudo for tar)
 CURRENT_UID=$(id -u)
 CURRENT_GID=$(id -g)
 
-# Essential volumes only (small, hard to recreate)
-# These are settings/configs that would require manual reconfiguration if lost
+# Volumes holding state that would require manual reconfiguration if lost.
 VOLUME_SUFFIXES=(
   gluetun-config          # VPN provider credentials and settings
   qbittorrent-config      # Client settings, categories, watched folders
@@ -199,6 +246,32 @@ VOLUME_SUFFIXES=(
   prowlarr-config         # Indexer configs and API keys
   bazarr-config           # Subtitle provider credentials
   uptime-kuma-data        # Monitor configurations
+  sonarr-config           # Series DB, quality profiles, custom formats, API key
+  radarr-config           # Movie DB, quality profiles, custom formats, API key
+  jellyfin-config         # Users, watch history, plugin config
+  pihole-etc-pihole       # pihole.toml, gravity DB, custom allow/deny lists
+)
+
+# Per-volume exclusions, relative to the volume root.
+#
+# The four *arr/jellyfin/pihole volumes above were previously excluded wholesale as
+# "large - re-scan to rebuild". That reasoning only ever held for the caches inside
+# them, not for the volumes themselves: quality profiles, custom formats, release
+# profiles, indexer assignments, Jellyfin users and watch history are NOT rebuilt by
+# a re-scan. Measured 2026-08-30, the split is lopsided enough that excluding the
+# caches gets full protection for roughly 35MB:
+#
+#   sonarr-config     1015M total -> ~13M kept  (logs.db alone is 862M)
+#   radarr-config      190M total ->  ~7M kept  (MediaCover 123M, logs 57M)
+#   jellyfin-config    506M total ->  ~9M kept  (metadata 497M, re-downloadable art)
+#   pihole-etc-pihole   50M total ->  ~5M kept  (pihole-FTL.db 34M is query logs)
+#
+# Anything listed here must be genuinely regenerable by the service itself.
+declare -A VOLUME_EXCLUDES=(
+  [sonarr-config]="logs.db logs.db-wal logs.db-shm logs MediaCover Sentry"
+  [radarr-config]="logs.db logs.db-wal logs.db-shm logs MediaCover Sentry"
+  [jellyfin-config]="metadata cache log transcodes"
+  [pihole-etc-pihole]="pihole-FTL.db pihole-FTL.db-wal pihole-FTL.db-shm gravity_old.db listsCache"
 )
 
 # Request manager - detect which volume exists
@@ -208,13 +281,13 @@ elif docker volume inspect "${VOLUME_PREFIX}_overseerr-config" &>/dev/null; then
   VOLUME_SUFFIXES+=(overseerr-config)
 fi
 
-# Large volumes excluded by default (regenerate by re-scanning/re-downloading):
-#   jellyfin-config (407MB) - library metadata, watch history (re-scan to rebuild)
-#   sonarr-config (43MB)    - series database (re-scan to rebuild)
-#   radarr-config (110MB)   - movie database (re-scan to rebuild)
-#   pihole-etc-pihole (138MB) - blocklists auto-download on startup
+# Volumes still excluded entirely, because they hold nothing a service cannot
+# rebuild unaided:
 #   jellyfin-cache          - transcoding cache, fully regenerates
 #   duc-index               - disk usage index, regenerates on restart
+#   configarr-repos         - git clones of upstream config repos, re-cloned on run
+#   magnetio-redis-data     - ephemeral cache (8KB)
+#   decypharr-config, beszel-data, dnscrypt-config - candidates, not yet assessed
 
 STEP="backing up .env"
 echo "=== Arr-Stack Backup ==="
@@ -252,12 +325,30 @@ for suffix in "${VOLUME_SUFFIXES[@]}"; do
   if docker volume inspect "$vol" &>/dev/null; then
     echo -n "Backing up $suffix... "
 
-    # Copy files and fix ownership in one container run
-    # The chown ensures we can tar without sudo later
+    # Copy files and fix ownership in one container run.
+    # The chown ensures we can tar without sudo later.
+    #
+    # Volumes with exclusions go through a tar pipe rather than `cp -a` so the
+    # excluded paths are never read at all - copying sonarr's 862MB logs.db just to
+    # delete it afterwards would dominate the runtime of every backup.
+    if [ -n "${VOLUME_EXCLUDES[$suffix]:-}" ]; then
+      TAR_EXCLUDES=""
+      for ex in ${VOLUME_EXCLUDES[$suffix]}; do
+        TAR_EXCLUDES="$TAR_EXCLUDES --exclude=./$ex"
+      done
+      # pipefail matters here: without it the pipe reports the RECEIVING tar's
+      # status, so a source tar that dies on an I/O or permission error yields a
+      # truncated backup reported as "OK". Verified on the NAS: busybox ash
+      # supports `set -o pipefail`, and without it `false | true` exits 0.
+      COPY_CMD="set -o pipefail; mkdir -p /backup/$suffix && tar -C /source -cf - $TAR_EXCLUDES . | tar -C /backup/$suffix -xf -"
+    else
+      COPY_CMD="mkdir -p /backup/$suffix && cp -a /source/. /backup/$suffix/"
+    fi
+
     if docker run --rm --name arr-backup-worker \
       -v "$vol":/source:ro \
       -v "$BACKUP_DIR":/backup \
-      alpine sh -c "mkdir -p /backup/$suffix && cp -a /source/. /backup/$suffix/ && chown -R $CURRENT_UID:$CURRENT_GID /backup/$suffix" 2>/dev/null; then
+      alpine sh -c "$COPY_CMD && chown -R $CURRENT_UID:$CURRENT_GID /backup/$suffix" 2>/dev/null; then
 
       # Check if anything was actually copied
       if [ -d "$BACKUP_DIR/$suffix" ] && [ "$(ls -A "$BACKUP_DIR/$suffix" 2>/dev/null)" ]; then
@@ -338,13 +429,33 @@ if [ "$CREATE_TAR" = true ]; then
       echo "WARNING: Not enough space at $FINAL_DEST (${AVAILABLE_MB}MB free, need ${REQUIRED_MB}MB)"
       echo "         Tarball remains in /tmp - copy manually when space available"
     else
-      FINAL_TARBALL="$FINAL_DEST/arr-stack-backup-$(date +%Y%m%d).tar.gz"
+      # Keep the real extension: an encrypted tarball moved to a plain .tar.gz
+      # name is a file that cannot be untarred and does not say so.
+      FINAL_TARBALL="$FINAL_DEST/arr-stack-backup-${RUN_TS}.tar.gz"
+      if $ENCRYPT; then
+        FINAL_TARBALL="${FINAL_TARBALL}.gpg"
+      fi
       if mv "$TARBALL" "$FINAL_TARBALL" 2>/dev/null; then
         TARBALL="$FINAL_TARBALL"
         echo "Moved to: $TARBALL"
       else
         notify_failure "Could not move tarball to ${FINAL_DEST}. Backup remains in /tmp."
       fi
+    fi
+  fi
+
+  # Drop the staging copy once the tarball exists. /tmp on this NAS is tmpfs -
+  # a RAM-backed filesystem - and each run stages ~200MB into it. This used to
+  # leak one directory per DAY (the staging name was date-only); with a
+  # per-second name it would leak one per RUN, so cleanup is no longer optional.
+  # Only safe when --tar was used: without it, the staging directory IS the
+  # backup.
+  if [ -n "$TARBALL" ] && [ -f "$TARBALL" ] && [ -d "$BACKUP_DIR" ]; then
+    STEP="cleaning up staging directory"
+    if rm -rf "$BACKUP_DIR"; then
+      echo "Cleaned up staging dir $BACKUP_DIR"
+    else
+      echo "WARNING: could not remove staging dir $BACKUP_DIR" >&2
     fi
   fi
 

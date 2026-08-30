@@ -17,9 +17,13 @@ set -euo pipefail
 #
 # Usage: ./scripts/backup-prune.sh <backup-dir>
 #
-# Expects filenames of the form arr-stack-backup-YYYYMMDD-HHMMSS.tar.gz
-# (optionally .gpg-suffixed). Files without a recognizable timestamp are
-# left untouched and reported, never guessed at.
+# Expects filenames of the form arr-stack-backup-YYYYMMDD-HHMMSS.tar.gz, which is
+# what arr-backup.sh writes (optionally .gpg-suffixed). A date-only
+# arr-stack-backup-YYYYMMDD.tar.gz is also accepted and tiered by its date: that
+# was arr-backup.sh's naming before 2026-08-30, and a name this script cannot
+# parse is a file it can never thin - it would accumulate forever while looking
+# like it was being managed. Files with no recognizable date at all are left
+# untouched and reported, never guessed at.
 
 DIR="${1:?Usage: backup-prune.sh <backup-dir>}"
 [ -d "$DIR" ] || { echo "ERROR: not a directory: $DIR" >&2; exit 1; }
@@ -42,7 +46,11 @@ fi
 
 for f in "${FILES[@]}"; do
   base=$(basename "$f")
+  # Full stamp first; fall back to a bare date for pre-2026-08-30 names.
   ts=$(echo "$base" | grep -oE '[0-9]{8}-[0-9]{6}' || true)
+  if [ -z "$ts" ]; then
+    ts=$(echo "$base" | grep -oE 'arr-stack-backup-[0-9]{8}' | grep -oE '[0-9]{8}$' || true)
+  fi
   if [ -z "$ts" ]; then
     echo "backup-prune: skip (no recognizable timestamp): $base"
     continue
