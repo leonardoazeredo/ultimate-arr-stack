@@ -122,10 +122,14 @@ ip_to_int() {
         local line
         line=$(grep -E "^[[:space:]]*-[[:space:]]*${var}=" "$f" | head -1)
         [[ -n "$line" ]] || fail "$var not set at all"
-        # ${VAR:?...} only. A bare ${VAR} or ${VAR:-default} both leave the
-        # empty string / a default in place, and the addon falls back to admin.
-        echo "$line" | grep -qE "\\\$\{${var}:\?" \
-            || fail "$var must use \${${var}:?...}, got: $line"
+        # Anchored whole-value match, not a substring: the value must be
+        # EXACTLY ${VAR:?message} and nothing else. A substring test passes
+        # `- METRICS_USER=fallback_${METRICS_USER:?err}`, which still hands the
+        # addon a usable value and defeats the point. A bare ${VAR} or
+        # ${VAR:-default} likewise leave an empty string / a default in place,
+        # and the addon falls back to admin.
+        echo "$line" | grep -qE "^[[:space:]]*-[[:space:]]*${var}=\\\$\{${var}:\?[^}]+\}[[:space:]]*$" \
+            || fail "$var must be exactly \${${var}:?...}, got: $line"
     done
 }
 
@@ -136,4 +140,26 @@ ip_to_int() {
     for var in METRICS_USER METRICS_PASSWORD; do
         grep -qE "^[# ]*${var}=" "$f" || fail "$var is not documented in .env.example"
     done
+}
+
+# The compose-side fix above is only necessary because the vendored addon
+# source falls back to published upstream defaults. That coupling is invisible
+# from the compose file, so assert it directly: if a future sync of
+# magnetio/addon/ removes the fallback, this fails and forces someone to
+# re-read whether the ${VAR:?} requirement is still buying anything - rather
+# than leaving a rationale in the compose file that quietly stopped being true.
+@test "magnetio addon source still has the default-credential fallback the compose fix exists for" {
+    local idx="$REPO_ROOT/magnetio/addon/index.js"
+    local srv="$REPO_ROOT/magnetio/addon/serverless.js"
+    [[ -f "$idx" && -f "$srv" ]] || skip "vendored magnetio addon source not present"
+
+    local found=0
+    for f in "$idx" "$srv"; do
+        if grep -qE "process\.env\.METRICS_(USER|PASSWORD)[[:space:]]*\|\|" "$f"; then
+            found=$((found + 1))
+        fi
+    done
+
+    [[ "$found" -eq 2 ]] || fail \
+        "Expected the METRICS_* '|| default' fallback in BOTH index.js and serverless.js, found it in $found. If upstream removed it, re-evaluate whether docker-compose.magnetio.yml still needs the \${VAR:?} required form and update the rationale there."
 }
