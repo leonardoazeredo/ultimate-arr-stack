@@ -191,9 +191,14 @@ jobs:
           NAS_HOST: ${{ secrets.NAS_SSH_HOST }}
           NAS_USER: ${{ secrets.NAS_SSH_USER }}
         run: |
-          set -e
+          set -euo pipefail
+          # ConnectTimeout bounds the handshake; `timeout` bounds the remote
+          # command. Without the second, a stalled suite on the NAS holds the
+          # session open until the job's 6-hour ceiling instead of failing in
+          # minutes -- the slow-hang shape this repo already fixed once for
+          # plain ssh connects.
           ssh -o ConnectTimeout=15 "${NAS_USER}@${NAS_HOST}" \
-            "cd '${NAS_STACK_DIR}' && ./tests/run-tests.sh tests/env-vars.bats"
+            "cd '${NAS_STACK_DIR}' && timeout 300 ./tests/run-tests.sh tests/env-vars.bats"
 
       - name: Recreate affected services
         if: steps.changes.outputs.files != ''
