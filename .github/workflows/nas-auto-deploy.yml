@@ -180,7 +180,8 @@ jobs:
       # Runs the whole file rather than a --filter regex on purpose: a filter
       # that stops matching after a test is renamed would run zero tests and
       # still exit 0, which is the same could-not-fail defect this guard exists
-      # to prevent. All 9 tests pass on the NAS against the real .env.
+      # to prevent. A hardcoded count is deliberately not asserted here either --
+      # that is how the old "14 tests" claim in CLAUDE.md went stale.
       #
       # run-tests.sh bootstraps bats from the vendored submodule -- the NAS has
       # no npm, and no host git either, so if tests/bats-core is ever missing
