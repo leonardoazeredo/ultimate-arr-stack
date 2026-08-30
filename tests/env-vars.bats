@@ -92,3 +92,74 @@ ip_to_int() {
         fail "Host IPs outside their own LAN_SUBNET:\n$outside"
     fi
 }
+
+# ─── magnetio /stats credentials ────────────────────────────────────────────
+# magnetio-addon's basic auth falls back to the published upstream default
+# admin/magnetio when METRICS_USER/METRICS_PASSWORD are unset
+# (magnetio/addon/index.js:18-19, magnetio/addon/serverless.js:153-154).
+# Found live on the NAS 2026-08-30 serving /stats on those defaults.
+#
+# A bare ${METRICS_USER} does NOT fix this: an unset compose variable expands
+# to the empty string, which is falsy in JS, so the `|| 'admin'` fallback still
+# fires. Only the required form ${VAR:?...} makes the misconfiguration loud.
+# These tests exist to stop that distinction being lost in a later edit.
+
+@test "magnetio-addon sets METRICS_USER and METRICS_PASSWORD" {
+    local f="$REPO_ROOT/docker-compose.magnetio.yml"
+    [[ -f "$f" ]] || skip "docker-compose.magnetio.yml not found"
+
+    for var in METRICS_USER METRICS_PASSWORD; do
+        grep -qE "^[[:space:]]*-[[:space:]]*${var}=" "$f" \
+            || fail "$var is not set on magnetio-addon - /stats falls back to admin/magnetio"
+    done
+}
+
+@test "magnetio metrics credentials use the required-variable form" {
+    local f="$REPO_ROOT/docker-compose.magnetio.yml"
+    [[ -f "$f" ]] || skip "docker-compose.magnetio.yml not found"
+
+    for var in METRICS_USER METRICS_PASSWORD; do
+        local line
+        line=$(grep -E "^[[:space:]]*-[[:space:]]*${var}=" "$f" | head -1)
+        [[ -n "$line" ]] || fail "$var not set at all"
+        # Anchored whole-value match, not a substring: the value must be
+        # EXACTLY ${VAR:?message} and nothing else. A substring test passes
+        # `- METRICS_USER=fallback_${METRICS_USER:?err}`, which still hands the
+        # addon a usable value and defeats the point. A bare ${VAR} or
+        # ${VAR:-default} likewise leave an empty string / a default in place,
+        # and the addon falls back to admin.
+        echo "$line" | grep -qE "^[[:space:]]*-[[:space:]]*${var}=\\\$\{${var}:\?[^}]+\}[[:space:]]*$" \
+            || fail "$var must be exactly \${${var}:?...}, got: $line"
+    done
+}
+
+@test "magnetio metrics credentials are documented in .env.example" {
+    local f="$REPO_ROOT/.env.example"
+    [[ -f "$f" ]] || skip ".env.example not found"
+
+    for var in METRICS_USER METRICS_PASSWORD; do
+        grep -qE "^[# ]*${var}=" "$f" || fail "$var is not documented in .env.example"
+    done
+}
+
+# The compose-side fix above is only necessary because the vendored addon
+# source falls back to published upstream defaults. That coupling is invisible
+# from the compose file, so assert it directly: if a future sync of
+# magnetio/addon/ removes the fallback, this fails and forces someone to
+# re-read whether the ${VAR:?} requirement is still buying anything - rather
+# than leaving a rationale in the compose file that quietly stopped being true.
+@test "magnetio addon source still has the default-credential fallback the compose fix exists for" {
+    local idx="$REPO_ROOT/magnetio/addon/index.js"
+    local srv="$REPO_ROOT/magnetio/addon/serverless.js"
+    [[ -f "$idx" && -f "$srv" ]] || skip "vendored magnetio addon source not present"
+
+    local found=0
+    for f in "$idx" "$srv"; do
+        if grep -qE "process\.env\.METRICS_(USER|PASSWORD)[[:space:]]*\|\|" "$f"; then
+            found=$((found + 1))
+        fi
+    done
+
+    [[ "$found" -eq 2 ]] || fail \
+        "Expected the METRICS_* '|| default' fallback in BOTH index.js and serverless.js, found it in $found. If upstream removed it, re-evaluate whether docker-compose.magnetio.yml still needs the \${VAR:?} required form and update the rationale there."
+}
