@@ -148,7 +148,10 @@ services:
       - SERVER_COUNTRIES=${VPN_COUNTRIES}
       - TZ=${TZ}
       - DNS_ADDRESS=172.20.0.5
-      - FIREWALL_OUTBOUND_SUBNETS=${LAN_SUBNET},172.20.0.0/24,10.8.1.0/24
+      # Both LAN variables apply here, not either/or: LAN_SUBNET is the single
+      # CIDR the Traefik macvlan also needs, EXTRA_LAN_SUBNETS is any further LAN
+      # subnets. Only list-accepting consumers like this one read the second.
+      - FIREWALL_OUTBOUND_SUBNETS=${LAN_SUBNET}${EXTRA_LAN_SUBNETS:+,${EXTRA_LAN_SUBNETS}},172.20.0.0/24,10.8.1.0/24
     ports:
       # Ports for services using network_mode: "service:gluetun"
       # Enables direct local access without Traefik (http://NAS_IP:PORT)

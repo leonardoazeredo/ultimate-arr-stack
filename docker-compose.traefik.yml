@@ -20,7 +20,12 @@ name: traefik-edge
 
 services:
   traefik:
-    image: traefik:v3.7
+    # Pinned to a patch version, not the floating `v3.7` minor tag. The float
+    # was not harmless: the NAS was running 3.7.10 while `v3.7` upstream had
+    # moved on to 3.7.12, so the deployed version depended on whenever the
+    # image was last pulled rather than on anything in this file. Bump this
+    # deliberately; never widen it back to a minor tag.
+    image: traefik:v3.7.12
     container_name: traefik
     restart: always
     security_opt:
@@ -97,5 +102,12 @@ networks:
       parent: ${LAN_INTERFACE}  # Network interface - check with: ip link show
     ipam:
       config:
+        # EXACTLY ONE CIDR. Not a list. `docker compose config` does NOT catch a
+        # comma-joined value here -- it only interpolates; the grammar is enforced
+        # by the macvlan driver at creation time, which is AFTER compose has torn
+        # the old network down. A second subnet appended here on 2026-08-30 left
+        # Traefik stopped with its network deleted and every .lan name dead.
+        # Extra LAN subnets go in EXTRA_LAN_SUBNETS, which only the list-accepting
+        # consumers read.
         - subnet: ${LAN_SUBNET}
           gateway: ${LAN_GATEWAY}

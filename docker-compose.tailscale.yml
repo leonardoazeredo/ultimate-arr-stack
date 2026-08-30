@@ -179,6 +179,12 @@ services:
       #     since the Proton tunnel here is IPv4-only.
       # tailscale-exit-routing grants both in OUTPUT instead, which opens the
       # firewall without perturbing routing.
+      # Deliberately ${LAN_SUBNET} ALONE -- no EXTRA_LAN_SUBNETS, unlike the same
+      # line in docker-compose.arr-stack.yml. This tunnel exists to give
+      # tailscale-exit internet egress plus .lan (VLAN10) access; nothing about
+      # that job needs a second LAN segment, and every subnet listed here is one
+      # the killswitch permits OUTSIDE the tunnel. Widening it is a security
+      # decision, not a config tidy-up -- make it deliberately or not at all.
       - FIREWALL_OUTBOUND_SUBNETS=${LAN_SUBNET},172.20.0.0/24
       # Health must NOT depend on DNS. Note the plural: HEALTH_TARGET_ADDRESS
       # (singular) is silently ignored by this image, which was easy to miss
