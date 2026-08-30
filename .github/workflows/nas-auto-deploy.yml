@@ -163,6 +163,37 @@ jobs:
             ${ARRGIT} pull --ff-only origin '${BRANCH}'
           "
 
+      # The bats step above runs on ubuntu-latest, where there is no .env, so
+      # the LAN_SUBNET/EXTRA_LAN_SUBNETS grammar guard silently falls back to
+      # the always-clean committed .env.example and cannot fail. The recreate
+      # below runs against the NAS's REAL .env. That is the exact gap that let
+      # LAN_SUBNET=192.168.110.0/24,192.168.120.0/24 sit dormant until a
+      # routine image pin recreated Traefik, which deleted the traefik-lan
+      # macvlan and then could not rebuild it -- every .lan hostname went down.
+      #
+      # `docker compose config` does NOT catch this: it only interpolates, and
+      # the CIDR grammar is enforced by the network driver at creation time,
+      # i.e. after the old network is already torn down. So the check has to be
+      # this one, run here: after the sync (so it tests the branch's own guard)
+      # and before anything is recreated.
+      #
+      # Runs the whole file rather than a --filter regex on purpose: a filter
+      # that stops matching after a test is renamed would run zero tests and
+      # still exit 0, which is the same could-not-fail defect this guard exists
+      # to prevent. All 9 tests pass on the NAS against the real .env.
+      #
+      # run-tests.sh bootstraps bats from the vendored submodule -- the NAS has
+      # no npm, and no host git either, so if tests/bats-core is ever missing
+      # from the deploy path this step fails loudly rather than skipping.
+      - name: Validate the NAS .env before recreating anything
+        env:
+          NAS_HOST: ${{ secrets.NAS_SSH_HOST }}
+          NAS_USER: ${{ secrets.NAS_SSH_USER }}
+        run: |
+          set -e
+          ssh -o ConnectTimeout=15 "${NAS_USER}@${NAS_HOST}" \
+            "cd '${NAS_STACK_DIR}' && ./tests/run-tests.sh tests/env-vars.bats"
+
       - name: Recreate affected services
         if: steps.changes.outputs.files != ''
         env:
