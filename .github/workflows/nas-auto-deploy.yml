@@ -142,10 +142,10 @@ jobs:
             set -e
             mkdir -p '${NAS_BACKUP_DIR}'
             cd '${NAS_STACK_DIR}'
+            # arr-backup.sh stamps YYYYMMDD-HHMMSS itself as of 2026-08-30, so the
+            # rename this step used to do is gone. No --rotate-days here: this
+            # directory's retention belongs to backup-prune.sh alone.
             ./scripts/arr-backup.sh --tar '${NAS_BACKUP_DIR}'
-            TS=\$(date +%Y%m%d-%H%M%S)
-            DAY_TARBALL='${NAS_BACKUP_DIR}/arr-stack-backup-'\$(date +%Y%m%d)'.tar.gz'
-            mv \"\$DAY_TARBALL\" '${NAS_BACKUP_DIR}/arr-stack-backup-'\${TS}'.tar.gz'
             ./scripts/backup-prune.sh '${NAS_BACKUP_DIR}'
           "
 

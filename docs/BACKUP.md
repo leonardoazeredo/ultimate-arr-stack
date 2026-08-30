@@ -18,34 +18,41 @@ For the automated daily backup to work, plug a USB drive into your NAS:
 
 ## What Gets Backed Up
 
-The backup script (`scripts/arr-backup.sh`) backs up **essential configs only** - small files that are hard to recreate:
+The backup script (`scripts/arr-backup.sh`) backs up **state a service cannot rebuild by itself**. Volumes marked *(cache excluded)* are backed up with their regenerable subdirectories skipped — see the exclusion list in the script.
 
-| Volume | Size | Contents |
+| Volume | Kept | Contents |
 |--------|------|----------|
 | gluetun-config | ~7MB | VPN provider settings |
-| qbittorrent-config | ~9MB | Client settings, categories |
-| sabnzbd-config | <1MB | Usenet provider credentials and settings |
-| prowlarr-config | ~22MB | Indexer configs, API keys |
-| bazarr-config | ~2MB | Subtitle provider credentials |
+| qbittorrent-config | ~15MB | Client settings, categories |
+| sabnzbd-config | ~2MB | Usenet provider credentials and settings |
+| prowlarr-config | ~14MB | Indexer configs, API keys |
+| bazarr-config | ~6MB | Subtitle provider credentials |
 | uptime-kuma-data | ~14MB | Monitor configurations |
-| seerr-config | ~5MB | User accounts, requests |
+| seerr-config | ~123MB | User accounts, requests |
+| sonarr-config *(cache excluded)* | ~13MB of 1015MB | Series DB, quality profiles, custom formats, API key |
+| radarr-config *(cache excluded)* | ~7MB of 190MB | Movie DB, quality profiles, custom formats, API key |
+| jellyfin-config *(cache excluded)* | ~9MB of 506MB | Users, watch history, plugin config |
+| pihole-etc-pihole *(cache excluded)* | ~5MB of 50MB | `pihole.toml`, gravity DB, custom allow/deny lists |
 
-**Total: ~60MB uncompressed, ~13MB compressed**
+Sizes measured on the live NAS 2026-08-30.
+
+**The four *(cache excluded)* volumes were previously skipped entirely** on the grounds that they were large and "re-scan to rebuild". That was only ever true of the caches inside them. A re-scan does not rebuild quality profiles, custom formats, release profiles, indexer assignments, Jellyfin users, or watch history. Excluding just the caches buys full protection for those services for roughly 35MB — `sonarr-config`'s 862MB `logs.db` was the bulk of what made the volume look too expensive to back up.
 
 ## What's NOT Backed Up
 
-Large volumes that regenerate automatically are excluded:
+Volumes holding nothing a service cannot rebuild unaided:
 
 | Volume | Size | Why Excluded |
 |--------|------|--------------|
-| jellyfin-config | ~407MB | Re-scan library to rebuild metadata |
-| sonarr-config | ~43MB | Re-scan library to rebuild |
-| radarr-config | ~110MB | Re-scan library to rebuild |
-| pihole-etc-pihole | ~138MB | Blocklists auto-download on startup |
-| jellyfin-cache | ~43MB | Transcoding cache, fully regenerates |
+| jellyfin-cache | ~12MB | Transcoding cache, fully regenerates |
 | duc-index | ~20MB | Disk usage index, regenerates on restart |
+| configarr-repos | ~10MB | Git clones of upstream config repos, re-cloned on run |
+| magnetio-redis-data | 8KB | Ephemeral cache |
+| decypharr-config | ~3MB | Not yet assessed — candidate for inclusion |
+| beszel-data | ~400KB | Not yet assessed — candidate for inclusion |
+| dnscrypt-config | ~500KB | Not yet assessed — candidate for inclusion |
 
-> **Note:** If you want to preserve watch history (Jellyfin) or avoid re-scanning, you can manually backup these volumes using the same docker command shown below.
+Plus the cache subdirectories inside the four *(cache excluded)* volumes above: `logs.db`, `logs`, `MediaCover`, `Sentry` (*arr), `metadata`/`cache`/`log`/`transcodes` (Jellyfin), `pihole-FTL.db`/`gravity_old.db`/`listsCache` (Pi-hole).
 
 **Homepage** (`homepage/config/`) isn't a Docker volume at all — it's a
 bind-mounted, git-tracked directory, so its config is already backed up by
@@ -179,14 +186,16 @@ A cron job runs daily at 6am, backing up to USB:
 sudo crontab -l
 
 # Default schedule (already configured):
-0 6 * * * $NAS_STACK_DIR/scripts/arr-backup.sh --tar /mnt/arr-backup >> /var/log/arr-backup.log 2>&1
+0 6 * * * $NAS_STACK_DIR/scripts/arr-backup.sh --tar --rotate-days 7 /mnt/arr-backup >> /var/log/arr-backup.log 2>&1
 ```
+
+> **`--rotate-days 7` is required as of 2026-08-30.** Rotation used to happen implicitly whenever a destination was given. It is now opt-in, so a cron line without this flag will fill the USB. Conversely, **never pass `--rotate-days` at a directory managed by `backup-prune.sh`** — see the warning under *Automated Pre-Deploy Backup*.
 
 **Features:**
 - ✓ Backs up to `/tmp` first (reliable), then moves to USB
 - ✓ Checks actual tarball size vs destination space before moving
 - ✓ Falls back to `/tmp` if USB lacks space (with warning)
-- ✓ Keeps 7 days of backups on USB, auto-rotates old ones
+- ✓ With `--rotate-days N`, deletes backups older than N days and prints each one
 - ✓ EXIT trap ensures critical services stay running no matter what
 - ✓ Does NOT stop services during backup
 
@@ -200,7 +209,9 @@ sudo crontab -e
 
 ## Automated Pre-Deploy Backup (GitHub Actions)
 
-`.github/workflows/nas-auto-deploy.yml` (see that file's header comment for the full pipeline, and CLAUDE.md's *Deploying to the NAS* section for how this relates to the manual branch-first workflow) backs up before every deploy it runs, to a separate location from the daily cron backup above: `/volume1/docker/arr-stack-backups/` on the NAS itself, not the USB drive. It reuses `scripts/arr-backup.sh --tar` unchanged (same essential-volumes list as above), then renames the tarball with a full timestamp (`arr-stack-backup-YYYYMMDD-HHMMSS.tar.gz` — the cron job's plain `arr-backup.sh --tar` only stamps by day, which would silently clobber a same-day backup if this ran more than once a day) and runs `scripts/backup-prune.sh` on that directory.
+`.github/workflows/nas-auto-deploy.yml` (see that file's header comment for the full pipeline, and CLAUDE.md's *Deploying to the NAS* section for how this relates to the manual branch-first workflow) backs up before every deploy it runs, to a separate location from the daily cron backup above: `/volume1/docker/arr-stack-backups/` on the NAS itself, not the USB drive. It reuses `scripts/arr-backup.sh --tar` unchanged (same volume list as above) and runs `scripts/backup-prune.sh` on that directory. `arr-backup.sh` stamps tarballs `arr-stack-backup-YYYYMMDD-HHMMSS.tar.gz` itself, so the workflow no longer renames them; before 2026-08-30 it stamped by day only and the workflow had to rename each tarball to stop same-day runs clobbering each other.
+
+> **Never pass `--rotate-days` at this directory.** Its retention belongs to `backup-prune.sh` alone. On 2026-08-30 a manual `arr-backup.sh --tar /volume1/docker/arr-stack-backups` destroyed the entire backup history: the script then applied a silent, non-optional `find -mtime +7 -delete` to any destination it was given, and every existing tarball was 14 days old. Nothing was printed and stderr was suppressed. That rotation is now opt-in, and this is why.
 
 **Retention is GFS (Grandfather-Father-Son) tiered, not flat 7-day**, since this runs on every deploy rather than once a day and a flat "keep everything for 7 days" policy would grow unbounded over months of frequent deploys:
 
