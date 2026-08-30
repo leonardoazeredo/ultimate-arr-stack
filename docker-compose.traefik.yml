@@ -102,5 +102,12 @@ networks:
       parent: ${LAN_INTERFACE}  # Network interface - check with: ip link show
     ipam:
       config:
+        # EXACTLY ONE CIDR. Not a list. `docker compose config` does NOT catch a
+        # comma-joined value here -- it only interpolates; the grammar is enforced
+        # by the macvlan driver at creation time, which is AFTER compose has torn
+        # the old network down. A second subnet appended here on 2026-08-30 left
+        # Traefik stopped with its network deleted and every .lan name dead.
+        # Extra LAN subnets go in EXTRA_LAN_SUBNETS, which only the list-accepting
+        # consumers read.
         - subnet: ${LAN_SUBNET}
           gateway: ${LAN_GATEWAY}

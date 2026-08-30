@@ -179,7 +179,10 @@ services:
       #     since the Proton tunnel here is IPv4-only.
       # tailscale-exit-routing grants both in OUTPUT instead, which opens the
       # firewall without perturbing routing.
-      - FIREWALL_OUTBOUND_SUBNETS=${LAN_SUBNET},172.20.0.0/24
+      # Both LAN variables apply here, not either/or -- see the same line in
+      # docker-compose.arr-stack.yml. LAN_SUBNET stays a single CIDR because the
+      # Traefik macvlan shares it; EXTRA_LAN_SUBNETS carries any further subnets.
+      - FIREWALL_OUTBOUND_SUBNETS=${LAN_SUBNET}${EXTRA_LAN_SUBNETS:+,${EXTRA_LAN_SUBNETS}},172.20.0.0/24
       # Health must NOT depend on DNS. Note the plural: HEALTH_TARGET_ADDRESS
       # (singular) is silently ignored by this image, which was easy to miss
       # because the container stays healthy either way -- gluetun's healthcheck

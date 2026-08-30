@@ -63,6 +63,83 @@ ip_to_int() {
     echo $(( (a << 24) + (b << 16) + (c << 8) + d ))
 }
 
+# ─── LAN_SUBNET / EXTRA_LAN_SUBNETS grammar ─────────────────────────────────
+# On 2026-08-30 the NAS .env held LAN_SUBNET=192.168.110.0/24,192.168.120.0/24.
+# That is legal for the gluetun killswitch and FATAL for Traefik's macvlan, which
+# takes exactly one CIDR. `docker compose up -d traefik` stopped Traefik, DELETED
+# the traefik-lan network, then failed to recreate it -- every .lan name went down.
+#
+# `docker compose config` will NOT catch this: it only interpolates, and the CIDR
+# grammar is enforced by the network driver at creation time, i.e. after the old
+# network is already gone. Verified against the real broken .env -- it reported
+# the file VALID. So the check has to live here.
+#
+# The test below at ":66" is a second victim of the same value: `prefix=${subnet#*/}`
+# feeding `$(( 32 - prefix ))` is a bash arithmetic syntax error on a comma form.
+
+# One CIDR, with real bounds -- not just "digits, dot, digits".
+is_cidr() {
+    local c="$1" ip prefix o
+    [[ "$c" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})/([0-9]{1,2})$ ]] || return 1
+    ip="${c%/*}"; prefix="${c#*/}"
+    (( 10#$prefix <= 32 )) || return 1
+    local IFS=.
+    for o in $ip; do (( 10#$o <= 255 )) || return 1; done
+    return 0
+}
+
+# The .env the suite can actually see. On pi1/CI that is .env.example (the real
+# .env is gitignored); on the NAS it is the deployed one. Reported either way so
+# a pass never hides WHICH file was checked.
+grammar_envfile() {
+    if [[ -f "$REPO_ROOT/.env" ]]; then printf '%s' "$REPO_ROOT/.env"
+    else printf '%s' "$REPO_ROOT/.env.example"; fi
+}
+
+# Trims quotes, CR and surrounding whitespace ONLY. It must not delete interior
+# spaces: `a/24, b/24` is a real error and stripping it would make the guard below
+# unable to fail, which is the whole defect class these tests exist to catch.
+env_value() {
+    grep -E "^[[:space:]]*${1}=" "$2" | tail -1 | cut -d= -f2- \
+        | tr -d "\"'\r" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+}
+
+@test "LAN_SUBNET is exactly one CIDR (Traefik's macvlan cannot parse a list)" {
+    local f; f=$(grammar_envfile)
+    [[ -f "$f" ]] || skip "no .env or .env.example to check"
+
+    # Guard against this test silently outliving the thing it protects.
+    grep -qE '^[[:space:]]*- subnet: \$\{LAN_SUBNET\}' "$REPO_ROOT/docker-compose.traefik.yml" \
+        || skip "docker-compose.traefik.yml no longer interpolates LAN_SUBNET into a macvlan subnet"
+
+    local val; val=$(env_value LAN_SUBNET "$f")
+    [[ -n "$val" ]] || skip "LAN_SUBNET not set in $(basename "$f")"
+
+    is_cidr "$val" || fail "LAN_SUBNET must be exactly one CIDR, got:"$'\n'"  LAN_SUBNET=$val  (in $(basename "$f"))"$'\n'"A comma-joined value is tolerated by gluetun's FIREWALL_OUTBOUND_SUBNETS but destroys the traefik-lan macvlan on its next recreate. Put further subnets in EXTRA_LAN_SUBNETS."
+}
+
+@test "EXTRA_LAN_SUBNETS is a clean comma-separated CIDR list" {
+    local f; f=$(grammar_envfile)
+    [[ -f "$f" ]] || skip "no .env or .env.example to check"
+
+    local val; val=$(env_value EXTRA_LAN_SUBNETS "$f")
+    [[ -n "$val" ]] || skip "EXTRA_LAN_SUBNETS is unset or empty in $(basename "$f") - nothing to validate"
+
+    # Structure is checked on the RAW string first. Splitting on commas cannot
+    # detect a trailing comma -- bash word-splitting discards the empty trailing
+    # field -- so a split-then-check guard would pass on `10.0.0.0/24,` forever.
+    local bad="" part
+    [[ "$val" == ,* || "$val" == *, ]] && bad+="  leading or trailing comma"$'\n'
+    [[ "$val" == *,,* ]]               && bad+="  empty element (',,')"$'\n'
+    [[ "$val" == *[[:space:]]* ]]      && bad+="  contains whitespace"$'\n'
+
+    local IFS=,
+    for part in $val; do
+        is_cidr "$part" || bad+="  '${part}' is not a CIDR"$'\n'
+    done
+    [[ -z "$bad" ]] || fail "EXTRA_LAN_SUBNETS must be CIDRs separated by commas, no spaces:"$'\n'"  EXTRA_LAN_SUBNETS=$val  (in $(basename "$f"))"$'\n'"$bad"
+}
+
 @test ".env.example host IPs all fall inside LAN_SUBNET" {
     local env_example="$REPO_ROOT/.env.example"
     [[ -f "$env_example" ]] || skip ".env.example not found"
