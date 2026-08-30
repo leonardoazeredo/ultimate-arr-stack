@@ -179,15 +179,26 @@ The script auto-detects which request manager volume exists and backs it up:
 
 ## Automated Daily Backup
 
-A cron job runs daily at 6am, backing up to USB:
+> **NOT CURRENTLY CONFIGURED — verified on the live NAS 2026-08-30.** This section
+> used to say the cron job below was "already configured". There is no
+> `/mnt/arr-backup`, no `/var/log/arr-backup.log`, and no `arr-stack-backup-*`
+> file on any of the five mounted USB devices (`/mnt/@usb/sd{a,b,c,f,g}1`). No
+> daily USB backup has ever run. The only backups that exist are the pre-deploy
+> ones in `/volume1/docker/arr-stack-backups`. Treat the block below as the
+> procedure for setting it up, not a description of current state.
+
+To run a daily backup to USB at 6am:
 
 ```bash
 # View current cron
 sudo crontab -l
 
-# Default schedule (already configured):
+# Add:
 0 6 * * * $NAS_STACK_DIR/scripts/arr-backup.sh --tar --rotate-days 7 /mnt/arr-backup >> /var/log/arr-backup.log 2>&1
 ```
+
+Mount the USB drive at `/mnt/arr-backup` first, or use `--usb <dir-name>` so the
+script finds the device by content rather than by a letter that changes on reboot.
 
 > **`--rotate-days 7` is required as of 2026-08-30.** Rotation used to happen implicitly whenever a destination was given. It is now opt-in, so a cron line without this flag will fill the USB. Conversely, **never pass `--rotate-days` at a directory managed by `backup-prune.sh`** — see the warning under *Automated Pre-Deploy Backup*.
 
