@@ -157,6 +157,20 @@ services:
       - REDIS_URI=redis://:${MAGNETIO_REDIS_PASSWORD}@magnetio-redis:6379
       - SCRAPER_URL=http://magnetio-scraper:8080
       - LOG_LEVEL=info
+      # Basic-auth for /stats and the swagger-stats middleware. The addon
+      # source falls back to admin/magnetio when these are unset
+      # (addon/index.js:18-19, addon/serverless.js:153-154) - published
+      # defaults, so leaving them unset serves live metrics to anyone who can
+      # reach :7000. Verified on the NAS 2026-08-30: unset, and
+      # `curl -u admin:magnetio .../stats` returned 200.
+      #
+      # `:?` and NOT a bare ${METRICS_USER}: an unset variable expands to the
+      # EMPTY STRING, and '' is falsy in JS, so `process.env.METRICS_USER ||
+      # 'admin'` silently reinstates the default. Confirmed by running that
+      # expression inside the real container. The required-variable form makes
+      # compose refuse to start instead of quietly serving defaults.
+      - METRICS_USER=${METRICS_USER:?METRICS_USER must be set - see .env.example}
+      - METRICS_PASSWORD=${METRICS_PASSWORD:?METRICS_PASSWORD must be set - see .env.example}
     labels:
       - gluetun.dependent=true  # gluetun-recover restarts this if SIGKILLed/zombied by a gluetun restart
     restart: unless-stopped

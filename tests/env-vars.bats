@@ -92,3 +92,48 @@ ip_to_int() {
         fail "Host IPs outside their own LAN_SUBNET:\n$outside"
     fi
 }
+
+# ─── magnetio /stats credentials ────────────────────────────────────────────
+# magnetio-addon's basic auth falls back to the published upstream default
+# admin/magnetio when METRICS_USER/METRICS_PASSWORD are unset
+# (magnetio/addon/index.js:18-19, magnetio/addon/serverless.js:153-154).
+# Found live on the NAS 2026-08-30 serving /stats on those defaults.
+#
+# A bare ${METRICS_USER} does NOT fix this: an unset compose variable expands
+# to the empty string, which is falsy in JS, so the `|| 'admin'` fallback still
+# fires. Only the required form ${VAR:?...} makes the misconfiguration loud.
+# These tests exist to stop that distinction being lost in a later edit.
+
+@test "magnetio-addon sets METRICS_USER and METRICS_PASSWORD" {
+    local f="$REPO_ROOT/docker-compose.magnetio.yml"
+    [[ -f "$f" ]] || skip "docker-compose.magnetio.yml not found"
+
+    for var in METRICS_USER METRICS_PASSWORD; do
+        grep -qE "^[[:space:]]*-[[:space:]]*${var}=" "$f" \
+            || fail "$var is not set on magnetio-addon - /stats falls back to admin/magnetio"
+    done
+}
+
+@test "magnetio metrics credentials use the required-variable form" {
+    local f="$REPO_ROOT/docker-compose.magnetio.yml"
+    [[ -f "$f" ]] || skip "docker-compose.magnetio.yml not found"
+
+    for var in METRICS_USER METRICS_PASSWORD; do
+        local line
+        line=$(grep -E "^[[:space:]]*-[[:space:]]*${var}=" "$f" | head -1)
+        [[ -n "$line" ]] || fail "$var not set at all"
+        # ${VAR:?...} only. A bare ${VAR} or ${VAR:-default} both leave the
+        # empty string / a default in place, and the addon falls back to admin.
+        echo "$line" | grep -qE "\\\$\{${var}:\?" \
+            || fail "$var must use \${${var}:?...}, got: $line"
+    done
+}
+
+@test "magnetio metrics credentials are documented in .env.example" {
+    local f="$REPO_ROOT/.env.example"
+    [[ -f "$f" ]] || skip ".env.example not found"
+
+    for var in METRICS_USER METRICS_PASSWORD; do
+        grep -qE "^[# ]*${var}=" "$f" || fail "$var is not documented in .env.example"
+    done
+}
