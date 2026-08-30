@@ -206,7 +206,13 @@ fi
 # - If destination specified and different from /tmp, move tarball there after checking space
 FINAL_DEST="${BACKUP_DIR:-}"
 BACKUP_DIR="/tmp/arr-stack-backup-${RUN_TS}"
-mkdir -p "$BACKUP_DIR"
+# Plain mkdir, not -p: it fails if the directory exists, which is the cheapest
+# guard against two runs landing in the same second and interleaving their
+# staging files into one tarball.
+mkdir "$BACKUP_DIR" || {
+  echo "ERROR: $BACKUP_DIR already exists - another backup may be running" >&2
+  exit 1
+}
 
 # Flat rotation at the final destination. OPT-IN ONLY (--rotate-days) and always
 # loud, because this directory may already be owned by backup-prune.sh's GFS
@@ -223,7 +229,7 @@ if [ -n "$ROTATE_DAYS" ] && [ -n "$FINAL_DEST" ] && [ -d "$FINAL_DEST" ]; then
       echo "  WARNING: could not remove $(basename "$stale")" >&2
     fi
   done < <(find "$FINAL_DEST" -maxdepth 1 -mindepth 1 \
-             -name 'arr-stack-backup-*' -mtime "+$ROTATE_DAYS" 2>/dev/null | sort)
+             -name 'arr-stack-backup-*' -mtime "+$ROTATE_DAYS" | sort)
   echo "Rotation removed $ROTATED item(s)."
   echo ""
 fi
@@ -330,7 +336,11 @@ for suffix in "${VOLUME_SUFFIXES[@]}"; do
       for ex in ${VOLUME_EXCLUDES[$suffix]}; do
         TAR_EXCLUDES="$TAR_EXCLUDES --exclude=./$ex"
       done
-      COPY_CMD="mkdir -p /backup/$suffix && tar -C /source -cf - $TAR_EXCLUDES . | tar -C /backup/$suffix -xf -"
+      # pipefail matters here: without it the pipe reports the RECEIVING tar's
+      # status, so a source tar that dies on an I/O or permission error yields a
+      # truncated backup reported as "OK". Verified on the NAS: busybox ash
+      # supports `set -o pipefail`, and without it `false | true` exits 0.
+      COPY_CMD="set -o pipefail; mkdir -p /backup/$suffix && tar -C /source -cf - $TAR_EXCLUDES . | tar -C /backup/$suffix -xf -"
     else
       COPY_CMD="mkdir -p /backup/$suffix && cp -a /source/. /backup/$suffix/"
     fi
@@ -431,6 +441,21 @@ if [ "$CREATE_TAR" = true ]; then
       else
         notify_failure "Could not move tarball to ${FINAL_DEST}. Backup remains in /tmp."
       fi
+    fi
+  fi
+
+  # Drop the staging copy once the tarball exists. /tmp on this NAS is tmpfs -
+  # a RAM-backed filesystem - and each run stages ~200MB into it. This used to
+  # leak one directory per DAY (the staging name was date-only); with a
+  # per-second name it would leak one per RUN, so cleanup is no longer optional.
+  # Only safe when --tar was used: without it, the staging directory IS the
+  # backup.
+  if [ -n "$TARBALL" ] && [ -f "$TARBALL" ] && [ -d "$BACKUP_DIR" ]; then
+    STEP="cleaning up staging directory"
+    if rm -rf "$BACKUP_DIR"; then
+      echo "Cleaned up staging dir $BACKUP_DIR"
+    else
+      echo "WARNING: could not remove staging dir $BACKUP_DIR" >&2
     fi
   fi
 

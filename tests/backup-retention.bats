@@ -171,3 +171,38 @@ setup() {
         }
     done
 }
+
+@test "the tar-pipe copy sets pipefail" {
+    # Without it the pipe reports the receiving tar's status, so a source tar that
+    # dies on an I/O or permission error yields a truncated backup reported "OK".
+    run grep -n 'COPY_CMD="set -o pipefail;' "$BACKUP_SH"
+    assert_success
+}
+
+@test "arr-backup.sh removes its /tmp staging dir once the tarball exists" {
+    # /tmp on the NAS is tmpfs. Each run stages ~200MB there; the staging name is
+    # per-second, so without cleanup it leaks a directory per run into RAM.
+    run grep -n 'rm -rf "\$BACKUP_DIR"' "$BACKUP_SH"
+    assert_success
+
+    # Guarded on the tarball existing - without --tar the staging dir IS the backup.
+    run grep -B 3 'rm -rf "\$BACKUP_DIR"' "$BACKUP_SH"
+    assert_output --partial '-f "$TARBALL"'
+}
+
+@test "arr-backup.sh refuses to reuse an existing staging dir" {
+    # Plain mkdir, not mkdir -p: two runs in the same second would otherwise
+    # interleave their staging files into one tarball.
+    run grep -nE '^mkdir "\$BACKUP_DIR"' "$BACKUP_SH"
+    assert_success
+
+    run grep -nE '^mkdir -p "\$BACKUP_DIR"' "$BACKUP_SH"
+    assert_failure
+}
+
+@test "rotation does not suppress find's errors" {
+    # A rotation that cannot read the directory must say so; silence is the
+    # failure mode this whole change exists to remove.
+    run bash -c "grep -A 2 -- '-mtime \"+\\\$ROTATE_DAYS\"' '$BACKUP_SH' | grep -c '2>/dev/null'"
+    assert_output "0"
+}
