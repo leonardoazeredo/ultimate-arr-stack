@@ -240,3 +240,59 @@ env_value() {
     [[ "$found" -eq 2 ]] || fail \
         "Expected the METRICS_* '|| default' fallback in BOTH index.js and serverless.js, found it in $found. If upstream removed it, re-evaluate whether docker-compose.magnetio.yml still needs the \${VAR:?} required form and update the rationale there."
 }
+
+# ─── the guard must actually be wired into the deploy path ──────────────────
+# The grammar guard above is only as good as where it runs. In CI it executes
+# on ubuntu-latest, which has no .env, so it falls back to the always-clean
+# committed .env.example and cannot fail. The value that took every .lan
+# hostname down lived in the NAS's real, untracked .env. So the workflow has to
+# run this file ON THE NAS, after the sync and before any recreate -- and that
+# ordering has to be asserted, or a future reshuffle silently reopens the gap
+# without breaking a single test.
+
+@test "nas-auto-deploy validates the NAS .env after syncing and before recreating" {
+    local wf="$REPO_ROOT/.github/workflows/nas-auto-deploy.yml"
+    [[ -f "$wf" ]] || skip "nas-auto-deploy.yml not present"
+
+    # This assertion only means something while the workflow still recreates
+    # services on the NAS. Skipping on a missing step name alone would let an
+    # incomplete cleanup hide here, so only skip when NOTHING in the workflow
+    # recreates anything -- i.e. the hazard is genuinely gone, not renamed.
+    local recreate
+    recreate=$(grep -n '^      - name: Recreate affected services' "$wf" | cut -d: -f1)
+    if [[ -z "$recreate" ]]; then
+        grep -qE '^[^#]*docker compose .*up ' "$wf" \
+            && fail "the 'Recreate affected services' step was renamed or restructured, but the workflow still runs a compose recreate. Re-point this test at the new step rather than letting it skip."
+        skip "workflow no longer recreates anything on the NAS -- the hazard this guards is gone"
+    fi
+
+    local sync validate
+    sync=$(grep -n '^      - name: Sync branch to NAS' "$wf" | cut -d: -f1)
+    # The guard invocation itself, not a step name -- a renamed step still
+    # passes, a deleted one does not. `^[^#]*` rejects a commented-out step:
+    # both reviewers of this change independently caught that a bare substring
+    # match passes against a fully commented-out block, and a direct test
+    # confirmed it. A guard that survives its own subject being commented out
+    # is the could-not-fail defect this file exists to catch.
+    validate=$(grep -n '^[^#]*run-tests\.sh tests/env-vars\.bats' "$wf" | cut -d: -f1)
+
+    [[ -n "$validate" ]] || fail "nas-auto-deploy.yml never runs tests/env-vars.bats on the NAS."\n'"Without it the deploy pipeline recreates services against an .env that nothing has validated -- exactly how the traefik-lan macvlan was destroyed."
+
+    [[ $(wc -l <<<"$validate") -eq 1 ]] || fail "expected exactly one NAS env-vars invocation, found:"\n'"$validate"
+
+    [[ -n "$sync" ]] || fail "no 'Sync branch to NAS' step -- cannot prove the guard runs against the branch's own copy"
+
+    # Present but disabled is the same as absent. A step carrying `if:` may
+    # never execute (`if: false`, or a condition that is simply never true),
+    # and a line-presence check cannot see that. The validation step must be
+    # unconditional -- it guards a recreate that would already have detonated.
+    local step_start step_body
+    step_start=$(grep -n '^      - name: .*Validate the NAS .env' "$wf" | cut -d: -f1)
+    if [[ -n "$step_start" ]]; then
+        step_body=$(awk -v s="$step_start" 'NR>s && /^      - name: /{exit} NR>=s' "$wf")
+        grep -qE '^        if:' <<<"$step_body" \
+            && fail "the NAS .env validation step carries an 'if:' condition, so it may never run. This step must be unconditional -- unlike the recreate it protects, there is nothing to skip it for."
+    fi
+    (( sync < validate )) || fail "the NAS .env validation (line $validate) runs BEFORE the sync (line $sync), so it tests whatever was already on the NAS, not this branch."
+    (( validate < recreate )) || fail "the NAS .env validation (line $validate) runs AFTER 'Recreate affected services' (line $recreate). A bad .env would detonate before it is ever checked."
+}
