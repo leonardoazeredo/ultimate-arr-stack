@@ -288,10 +288,55 @@ The script auto-detects which request manager volume exists and backs it up:
 > mounted USB devices (`/mnt/@usb/sd{a,b,c,f,g}1`). Treat the block below as the
 > procedure for setting one up, not a description of current state.
 >
-> **The 04:00 job's cron line needs one edit** — see *Exit status* above. It chains
-> `arr-backup.sh … && backup-prune.sh …`, and now that a failed volume exits
-> non-zero, a partial backup would silently stop the pruner. Change `&&` to `;`.
-> (Reading root's crontab needs `sudo`, so this has not been verified in place.)
+> **The 04:00 job's cron line needs two edits.** Read in place 2026-08-31 (via a
+> read-only mount of `/var/spool/cron`, since `sudo -n` needs a password), it is:
+>
+> ```
+> 0 4 * * * PATH=/usr/bin:/bin; cd /volume1/docker/arr-stack && ./scripts/arr-backup.sh --tar /volume1/docker/arr-stack-backups && ./scripts/backup-prune.sh /volume1/docker/arr-stack-backups
+> ```
+>
+> 1. **`&&` between the two scripts** — see *Exit status* above. `arr-backup.sh`
+>    writes its tarball *before* the `FAILED > 0` exit (measured: a run with
+>    `0 backed up, 17 failed` still produced a 214-byte archive), so a partial
+>    failure adds a file to the GFS directory **and** skips the pruner. Repeated
+>    partial nights accumulate with nothing thinning them. Use `;`.
+> 2. **No output redirection** — see *Nightly run has no failure signal* below.
+>
+> The replacement line, keeping `cd … &&` so a failed `cd` still stops:
+>
+> ```
+> 0 4 * * * PATH=/usr/bin:/bin; cd /volume1/docker/arr-stack && { ./scripts/arr-backup.sh --tar /volume1/docker/arr-stack-backups; ./scripts/backup-prune.sh /volume1/docker/arr-stack-backups; } >> /var/log/arr-backup.log 2>&1
+> ```
+>
+> Back the crontab up first — it holds two `@reboot` lines (the tailnet SSH
+> iptables rule and the `macvlan-shim` setup) that exist **nowhere in this repo**.
+> Losing the shim takes every `.lan` hostname down on the next reboot.
+
+### Nightly run has no failure signal
+
+**Measured 2026-08-31, and it is the reason the two edits above matter.** Every
+failure signal this script emits is discarded on the 04:00 run:
+
+| Path | State |
+|---|---|
+| Redirection in the cron line | none |
+| `MAILTO` in root's crontab | not set |
+| MTA on PATH (`sendmail`/`mail`/`ssmtp`/`postfix`/`exim`) | none installed |
+| `/var/mail` | empty — no root spool file |
+| `notify_failure()` | no-ops unless `HA_WEBHOOK_URL` is set |
+| Does `arr-backup.sh` source `.env`? | never — no `source`/`.` in the file |
+| `HA_WEBHOOK_URL` in the live `.env` | not present |
+| Any log file | none anywhere on the NAS |
+
+So the exit status is discarded by cron, `notify_failure` degrades to an `echo`
+into a void, and docker's own error — which `docker_volume_inventory()`
+deliberately does not silence — lands nowhere.
+
+This does **not** apply to the deploy path: `.github/workflows/nas-auto-deploy.yml`
+runs both scripts under `set -e` twice over with output in the job log, so a failed
+backup aborts the deploy before `main` is touched. The exit-status work is
+load-bearing there. It is specifically the unattended nightly run that is blind,
+and `>> /var/log/arr-backup.log 2>&1` is what closes it.
 
 To run a daily backup to USB at 6am:
 

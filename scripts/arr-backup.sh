@@ -219,9 +219,21 @@ fi
 # of them, running or stopped" -- a confident, specific, wrong reason that sends
 # whoever reads it looking for a project rename that never happened.
 #
-# stderr is deliberately NOT silenced. When this fails the operator needs docker's
-# own message ("permission denied", "Cannot connect to the Docker daemon"), and
-# under cron that is the only place it can come from.
+# stderr is deliberately NOT silenced: when this fails the operator needs docker's
+# own message ("permission denied", "Cannot connect to the Docker daemon"), which
+# no error string reconstructed here can substitute for.
+#
+# Do NOT read that as "cron will show it". Measured 2026-08-31: the 04:00 entry in
+# root's crontab has no redirection, the crontab sets no MAILTO, the NAS has no MTA
+# on PATH and an empty /var/mail, and notify_failure() below no-ops because
+# HA_WEBHOOK_URL is unset and this script never sources .env. Every failure signal
+# this script emits -- this message, the summary, notify_failure, and the exit
+# status -- is discarded on the nightly run. It reaches a human only via an
+# interactive run or .github/workflows/nas-auto-deploy.yml, which runs both scripts
+# under `set -e` with the output in the job log.
+#
+# The cron entry needs `>> /var/log/arr-backup.log 2>&1` to close that. See
+# docs/BACKUP.md "Nightly run has no failure signal".
 docker_volume_inventory() {
   local ids out
   INVENTORY_VOLUMES=""
