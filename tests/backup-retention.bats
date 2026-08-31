@@ -415,3 +415,38 @@ load_cleanup() {
         return 1
     }
 }
+
+@test "cleanup waits for the copy client before removing the staging dir" {
+    # `docker rm -f` alone does NOT make the teardown safe, and the test above is
+    # therefore only half the guarantee. Measured on the NAS 2026-08-31: a SIGTERM
+    # landing between the `docker run` client's create request and the daemon acting
+    # on it left the rm -f matching nothing, the staging rm succeeding, and the
+    # daemon then creating the container anyway -- re-making the bind-mount host
+    # directory root-owned and copying a volume into it, after cleanup had already
+    # printed "Cleaned up staging dir".
+    #
+    # The `wait` is the barrier that closes it: once the client has exited, nothing
+    # is left that can re-create the directory. It must sit AFTER the rm -f (which
+    # bounds how long it blocks) and BEFORE the staging rm (which is what it
+    # protects). Asserting only that a `wait` exists somewhere would not catch it
+    # being moved past the rm, which is the failure mode.
+    local kill_ln wait_ln rm_ln
+    kill_ln=$(grep -n 'docker rm -f arr-backup-worker' "$BACKUP_SH" | head -1 | cut -d: -f1)
+    wait_ln=$(grep -n '^ *wait 2>/dev/null' "$BACKUP_SH" | head -1 | cut -d: -f1)
+    rm_ln=$(grep -n 'rm -rf "\$STAGING_DIR"' "$BACKUP_SH" | head -1 | cut -d: -f1)
+    [ -n "$wait_ln" ] || {
+        echo "no 'wait' barrier in the exit handler -- an orphaned copy container"
+        echo "can re-create the staging dir after it is removed"
+        return 1
+    }
+    [ -n "$kill_ln" ] && [ -n "$rm_ln" ] || { echo "could not locate rm -f / staging rm"; return 1; }
+    [ "$kill_ln" -lt "$wait_ln" ] || {
+        echo "wait at line $wait_ln runs BEFORE the rm -f at $kill_ln - it would block"
+        echo "for a full volume copy instead of a killed container"
+        return 1
+    }
+    [ "$wait_ln" -lt "$rm_ln" ] || {
+        echo "wait at line $wait_ln runs AFTER the staging rm at $rm_ln - the rm is unprotected"
+        return 1
+    }
+}

@@ -114,17 +114,33 @@ cleanup_on_exit() {
   # Defaulted expansions because this trap is installed before those variables
   # are initialised, and `set -u` would otherwise turn an early failure into a
   # confusing unbound-variable error inside the handler.
-  # Stop the copy container FIRST. Killing this script does not stop it, and docker
-  # re-creates a bind mount's host directory on demand -- so on an interrupted run
-  # the staging path reappeared seconds after the rm below removed it, owned by root
-  # and therefore undeletable by the unprivileged account that runs the backup.
-  # Measured on the NAS 2026-08-31 by interrupting a real run mid-copy.
+  # Stop the copy container FIRST, then WAIT for its client to exit. Both halves
+  # are needed, and neither is optional.
+  #
+  # Killing this script kills neither the `docker run` client it is blocked on nor
+  # the container the DAEMON runs on that client's behalf. Measured on the NAS
+  # 2026-08-31, interrupting a real run mid-copy: the SIGTERM landed between the
+  # client's create request and the daemon acting on it, so `docker rm -f` matched
+  # nothing, the rm below succeeded and printed "Cleaned up", and the daemon THEN
+  # created the container anyway -- re-making the bind-mount host directory
+  # root-owned (docker creates a missing bind source on demand) and copying a whole
+  # volume into it. The husk that left behind was undeletable by the unprivileged
+  # account that runs the backup, which is the exact harm this cleanup exists to
+  # prevent.
+  #
+  # `wait` closes that race deterministically instead of probabilistically: once
+  # the client has exited, the container has either been created, run and released
+  # its mount, or will never exist -- so nothing survives that can re-create the
+  # directory after the rm. It is bounded by one volume copy, and the `rm -f` above
+  # is what keeps that bound short. The script starts no background jobs, so `wait`
+  # can only ever be waiting on that client.
   #
   # Gated on STAGING_DIR so only a run that actually owns the staging directory can
-  # kill the worker. `|| true` because the container is already gone on every normal
-  # exit (it runs with --rm), and an error there must not abort this handler.
+  # kill the worker. `|| true` on both because the container is already gone on every
+  # normal exit (it runs with --rm), and an error here must not abort this handler.
   if [ -n "${STAGING_DIR:-}" ]; then
     docker rm -f arr-backup-worker >/dev/null 2>&1 || true
+    wait 2>/dev/null || true
   fi
 
   if [ "${CREATE_TAR:-false}" = true ] && [ -n "${STAGING_DIR:-}" ] && [ -d "${STAGING_DIR}" ]; then
