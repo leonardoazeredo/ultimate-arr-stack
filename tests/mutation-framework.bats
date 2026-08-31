@@ -170,3 +170,45 @@ CORPUS
         [ -f "$REPO_ROOT/$f" ] || { echo "corpus targets a missing bats file: $f"; return 1; }
     done < <(grep -oE -- '--bats [^ ]+' "$corpus" | awk '{print $2}' | sort -u)
 }
+
+@test "a failed restore is fatal and keeps the pristine copy" {
+    # The runner's own defect class, turned on itself. The first version printed
+    # FATAL, carried on, and could still finish with every mutation KILLED and
+    # exit 0 while a mutated file sat in the tree -- indistinguishable from an
+    # ordinary edit. It then rm -rf'd the backup directory the FATAL message had
+    # just told the reader to restore from.
+    #
+    # cp to an existing unwritable file fails for a non-root user, so chmod 444
+    # after mutating is a faithful stand-in for a restore that cannot happen.
+    if [ "$(id -u)" -eq 0 ]; then
+        skip "root ignores the write bit, so a failed restore cannot be simulated"
+    fi
+    write_corpus <<CORPUS
+mutation demo-unrestorable \
+  --file "$FX/target.sh" --bats "$FX/fixture.bats" \
+  --test "asserts the guarded output" --why "x" \
+  --apply 'sed -i s@yes@nope@ "\$F"; chmod 444 "\$F"'
+CORPUS
+    run "$RUNNER" "$FX/corpus.sh"
+    chmod 644 "$FX/target.sh"
+
+    [ "$status" -ne 0 ] || {
+        echo "the runner exited 0 having left a mutated file in the tree."
+        echo "$output"; return 1
+    }
+    [[ "$output" == *"FATAL"* && "$output" == *"could not restore"* ]] || {
+        echo "a failed restore said nothing identifiable."
+        echo "$output"; return 1
+    }
+
+    # The message names a path to restore from by hand. It has to still be there.
+    local backup_dir
+    backup_dir=$(grep -oE '/tmp/[^ ]*\.orig' <<<"$output" | head -1)
+    [ -n "$backup_dir" ] || { echo "no backup path was reported: $output"; return 1; }
+    [ -f "$backup_dir" ] || {
+        echo "the runner deleted the very backup it told the reader to use:"
+        echo "  $backup_dir"
+        return 1
+    }
+    grep -q 'echo yes' "$backup_dir" || { echo "the kept backup is not pristine"; return 1; }
+}

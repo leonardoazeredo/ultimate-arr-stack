@@ -44,20 +44,46 @@ shift $((OPTIND - 1))
 TOTAL=0; KILLED=0; SURVIVED=0; ERRORED=0; SKIPPED=0
 WORK="$(mktemp -d)"
 CURRENT_FILE=""; CURRENT_BACKUP=""
+RESTORE_FAILED=0
 
 # Restoring is the one thing that must happen no matter how this exits. A
 # mutated file left in the tree is worse than no mutation testing at all: it
 # looks like an ordinary edit and there is nothing to distinguish it from one.
 restore_current() {
     [[ -n "$CURRENT_FILE" && -f "$CURRENT_BACKUP" ]] || return 0
-    cp "$CURRENT_BACKUP" "$CURRENT_FILE"
+    # `cmp` alone, deliberately. Checking cp's exit status as well reads like
+    # belt and braces, but a mutation proved it unfalsifiable: every case where
+    # a failed cp matters is a case where the bytes differ, so cmp fires first
+    # and the cp branch can never be the thing that catches anything. This
+    # repo's own rule -- verify the outcome, not the exit status of the command
+    # that was supposed to produce it -- picks the survivor.
+    cp "$CURRENT_BACKUP" "$CURRENT_FILE" 2>/dev/null || true
     if ! cmp -s "$CURRENT_BACKUP" "$CURRENT_FILE"; then
-        echo "FATAL: could not restore $CURRENT_FILE from $CURRENT_BACKUP" >&2
-        echo "FATAL: restore it by hand before doing anything else." >&2
+        RESTORE_FAILED=1
+        echo "FATAL: could not restore $CURRENT_FILE" >&2
+        echo "FATAL: THE TREE IS MUTATED RIGHT NOW. The pristine copy is at" >&2
+        echo "FATAL:   $CURRENT_BACKUP" >&2
+        echo "FATAL: put it back by hand before doing anything else." >&2
+        return 1
     fi
+    RESTORE_FAILED=0
     CURRENT_FILE=""; CURRENT_BACKUP=""
 }
-cleanup() { restore_current; rm -rf "$WORK"; }
+
+# A failed restore must be fatal in BOTH directions, and the first version of
+# this was neither. It printed FATAL and carried on: the run could still finish
+# with 24 KILLED and exit 0 while a mutated file sat in the tree, indexed by
+# nothing, looking exactly like an ordinary edit. And `rm -rf "$WORK"` ran
+# immediately after -- deleting the pristine copy the message had just told the
+# reader to restore from. A tool built to catch silent failure, failing silently.
+cleanup() {
+    restore_current || true
+    if [[ "$RESTORE_FAILED" -eq 1 ]]; then
+        echo "FATAL: keeping the backups in $WORK - do NOT delete it." >&2
+        exit 3
+    fi
+    rm -rf "$WORK"
+}
 trap cleanup EXIT
 trap 'echo; echo "interrupted - restoring" >&2; exit 130' INT TERM
 
@@ -153,8 +179,10 @@ mutation() {
     # 4. The test must now fail.
     res=$(run_tests "$batsfile" "$testre"); st=${res% *}; count=${res#* }
 
-    # 5. Restore, verified.
-    restore_current
+    # 5. Restore, verified. If it did not work, stop the entire run here --
+    # mutating the next target on top of a tree we could not put back turns one
+    # recoverable problem into an unrecoverable one.
+    restore_current || exit 3
 
     if [[ "$st" -ne 0 ]]; then
         echo "KILLED $id  ($count test(s))"
