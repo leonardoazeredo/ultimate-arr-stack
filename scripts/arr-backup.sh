@@ -91,7 +91,114 @@ ensure_services_running() {
     docker compose -f "$COMPOSE_FILE" up -d $STOPPED 2>/dev/null
   fi
 }
-trap 'ensure_services_running' EXIT
+# Everything that must happen on ANY exit path -- normal, error, or interrupt.
+#
+# There is only ONE EXIT trap slot in bash: a second `trap ... EXIT` REPLACES this
+# one rather than adding to it. That is why the staging cleanup lives inside this
+# function instead of getting its own trap, and why anything added later must go
+# here too.
+cleanup_on_exit() {
+  # Drop the /tmp staging copy. /tmp on this NAS is tmpfs -- RAM-backed -- and
+  # each run stages ~220MB into it. Cleanup used to be inline on the happy path
+  # only, so every FAILED run leaked a directory per run into RAM until reboot.
+  #
+  # STAGING_DIR is deliberately a SEPARATE variable from BACKUP_DIR. BACKUP_DIR
+  # holds the user's DESTINATION until it is reassigned to the staging path
+  # further down; a trap on BACKUP_DIR would delete the destination directory
+  # if the run died before that reassignment.
+  #
+  # Only when --tar was given: without it the staging directory IS the backup.
+  # Note this removes the staging DIRECTORY only, never $TARBALL -- when the move
+  # to the final destination fails, that tarball in /tmp is the run's only output.
+  #
+  # Defaulted expansions because this trap is installed before those variables
+  # are initialised, and `set -u` would otherwise turn an early failure into a
+  # confusing unbound-variable error inside the handler.
+  # Stop any copy container still carrying this run's staging dir as a bind mount.
+  #
+  # Killing this script kills neither the `docker run` client it is blocked on nor
+  # the container the DAEMON runs on that client's behalf. Measured on the NAS
+  # 2026-08-31, interrupting a real run mid-copy: the SIGTERM landed between the
+  # client's create request and the daemon acting on it, so `docker rm -f` matched
+  # nothing, the rm below succeeded and printed "Cleaned up", and the daemon THEN
+  # created the container anyway -- re-making the bind-mount host directory
+  # root-owned (docker creates a missing bind source on demand) and copying a whole
+  # volume into it. The husk that left behind was undeletable by the unprivileged
+  # account that runs the backup, which is the exact harm this cleanup exists to
+  # prevent.
+  #
+  # What actually closes that race is the TERM/INT trap installed above this
+  # function, not anything here: with it, an interrupt cannot land mid-copy at all,
+  # because bash defers the handler until the in-flight `docker run` has returned.
+  # By the time this cleanup runs there is no container left to re-create anything.
+  # `wait` was tried here first and does NOT work -- bash does not treat a
+  # foreground child interrupted by a signal as waitable, so it returned instantly
+  # and the husk reappeared exactly as before. Measured on the NAS, both ways.
+  #
+  # The `rm -f` stays as belt-and-braces for the paths the signal trap does not
+  # cover (a worker left behind by an earlier killed run, or SIGKILL). Gated on
+  # STAGING_DIR so only a run that actually owns the staging directory can kill the
+  # worker; `|| true` because the container is already gone on every normal exit
+  # (it runs with --rm), and an error here must not abort this handler.
+  if [ -n "${STAGING_DIR:-}" ]; then
+    docker rm -f arr-backup-worker >/dev/null 2>&1 || true
+  fi
+
+  if [ "${CREATE_TAR:-false}" = true ] && [ -n "${STAGING_DIR:-}" ] && [ -d "${STAGING_DIR}" ]; then
+    if rm -rf "$STAGING_DIR"; then
+      echo "Cleaned up staging dir $STAGING_DIR"
+    else
+      echo "WARNING: could not remove staging dir $STAGING_DIR" >&2
+    fi
+  fi
+
+  # Deliberately after the cleanup: this call can be slow or hang (it shells out
+  # to `docker compose up -d`), and the leak guarantee above must not depend on
+  # it returning.
+  # `|| true` is load-bearing, and this is the one line here that was measured to
+  # matter. Under `set -e` a non-zero return from this call aborts the handler and
+  # BECOMES the script's exit status: a fully successful backup exited 42 when this
+  # returned 42. That is the wrong direction -- it turns a clean run into a failed
+  # one, and a `backup && prune` cron chain then silently skips pruning forever.
+  #
+  # The bug is inherited, not introduced: the previous `trap 'ensure_services_running'
+  # EXIT` had exactly the same exposure. Fixed here because this handler now owns it.
+  #
+  # Note what does NOT fix it: capturing `$?` and ending with `return $rc`. `set -e`
+  # aborts the handler before that return is ever reached. Both were tested.
+  ensure_services_running || true
+}
+trap 'cleanup_on_exit' EXIT
+
+# Deferral, not interrupt handling -- and the deferral is the entire point.
+#
+# Without a trap on these signals, bash dies the instant one arrives, WHILE the
+# `docker run` copy container it launched is still in flight. Neither the client nor
+# the daemon dies with it, so the cleanup above raced a container that was still
+# being created and lost: it removed the staging directory, and the daemon re-made
+# it root-owned moments later. Measured on the NAS 2026-08-31, twice.
+#
+# With a trap installed, bash will not run the handler while it is waiting on a
+# foreground command -- it runs it once that command returns. So the in-flight
+# volume copy always completes first, and cleanup_on_exit then runs with nothing
+# left that can re-create what it removes. The cost is bounded by a single volume
+# copy; the alternative is a guaranteed leak of RAM-backed /tmp on every interrupt.
+#
+# Distinct codes rather than one handler: 128+SIGNUM is what a shell killed by that
+# signal would have reported, and cron/systemd read it.
+on_interrupt() {
+  echo "" >&2
+  echo "Interrupted - the in-flight volume copy was allowed to finish so the" >&2
+  echo "staging directory could be cleaned up." >&2
+  exit "$1"
+}
+trap 'on_interrupt 143' TERM
+trap 'on_interrupt 130' INT
+# HUP is here for the same reason as the other two, not for completeness: a backup
+# started over ssh that loses its connection is an ordinary way for this script to
+# die, and it would leak the staging directory exactly like a SIGTERM. Hit during
+# this branch's own NAS verification, when a timed-out ssh dropped a live run.
+trap 'on_interrupt 129' HUP
 
 # Find USB backup directory dynamically (device letters change on reboot)
 # Searches /mnt/@usb/sd*/ for a subdirectory matching the given name,
@@ -130,6 +237,9 @@ BACKUP_DIR=""
 VOLUME_PREFIX=""
 USB_DIR_NAME=""
 TARBALL=""
+# Set only once the /tmp staging directory actually exists; the EXIT trap keys
+# its cleanup off this, so it must stay empty until then.
+STAGING_DIR=""
 ROTATE_DAYS=""
 # One stamp for the whole run, captured once. Calling `date` twice can straddle a
 # second boundary and produce a tarball whose name disagrees with its staging dir.
@@ -414,6 +524,11 @@ mkdir "$BACKUP_DIR" || {
   echo "ERROR: $BACKUP_DIR already exists - another backup may be running" >&2
   exit 1
 }
+# Arm the EXIT trap's cleanup only now that the directory really exists. Set after
+# the mkdir, never before: on the collision branch above the directory belongs to
+# ANOTHER RUNNING BACKUP, and arming beforehand would make this run delete the
+# staging copy out from under it.
+STAGING_DIR="$BACKUP_DIR"
 
 # Flat rotation at the final destination. OPT-IN ONLY (--rotate-days) and always
 # loud, because this directory may already be owned by backup-prune.sh's GFS
@@ -728,20 +843,9 @@ if [ "$CREATE_TAR" = true ]; then
     fi
   fi
 
-  # Drop the staging copy once the tarball exists. /tmp on this NAS is tmpfs -
-  # a RAM-backed filesystem - and each run stages ~200MB into it. This used to
-  # leak one directory per DAY (the staging name was date-only); with a
-  # per-second name it would leak one per RUN, so cleanup is no longer optional.
-  # Only safe when --tar was used: without it, the staging directory IS the
-  # backup.
-  if [ -n "$TARBALL" ] && [ -f "$TARBALL" ] && [ -d "$BACKUP_DIR" ]; then
-    STEP="cleaning up staging directory"
-    if rm -rf "$BACKUP_DIR"; then
-      echo "Cleaned up staging dir $BACKUP_DIR"
-    else
-      echo "WARNING: could not remove staging dir $BACKUP_DIR" >&2
-    fi
-  fi
+  # The staging copy is removed by the EXIT trap (cleanup_on_exit), not here.
+  # It used to be removed inline at this point, which covered only the happy
+  # path and leaked ~220MB of tmpfs on every failed run.
 
   echo ""
   echo "To copy off-NAS:"
