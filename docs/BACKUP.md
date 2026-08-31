@@ -160,6 +160,40 @@ Examples:
   ./scripts/arr-backup.sh --prefix media-stack     # Pin all volumes to one prefix
 ```
 
+### Environment knobs
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `SAFETY_TIMEOUT` | `120` | Seconds allowed for the exit-trap restart of any service the backup stopped. |
+| `HA_WEBHOOK_URL` | unset | Where `notify_failure` posts. Unset on this NAS, so it degrades to `echo` — see *Exit status* below. |
+
+`SAFETY_TIMEOUT` is an **operator knob, not a test hook.** 120s is chosen against a
+measured full-stack `compose up -d` on this NAS settling in ~50s. Raise it if the
+stack grows; do not lower it to make a test faster.
+
+It exists because `ensure_services_running` runs from the **EXIT trap**. Before
+2026-08-31 that call was unbounded and its stderr went to `/dev/null`, so a hung
+`docker compose up -d` held cleanup open indefinitely while a failed one left
+services down with no trace whatsoever. It now reports a timeout and a failure
+distinctly, and raises `notify_failure` either way.
+
+It still **returns 0 on failure, deliberately.** `cleanup_on_exit` invokes it under
+`set -e`, where a non-zero return becomes the script's own exit status — that once
+made a successful backup exit 42, and would make a `backup && prune` cron chain stop
+pruning permanently. The gap was never the status; it was the missing signal.
+
+### Staging directory
+
+The archive is assembled in `/tmp/arr-stack-backup-<timestamp>` and moved to the
+destination at the end. Two distinct variables hold these roles — `STAGING_DIR` for
+the `/tmp` working copy and `FINAL_DEST` for where it lands. They used to be the same
+variable, reassigned partway through the script.
+
+If `mkdir` on the staging directory fails, the script now distinguishes **"it already
+exists — another backup may be running"** from any other cause (permissions, missing
+parent, full filesystem) and prints `mkdir`'s own stderr for the latter. It previously
+reported the collision message for all of them.
+
 ### Volume Resolution
 
 Docker names a volume `<compose-project>_<name>`, and this stack spans **four**
