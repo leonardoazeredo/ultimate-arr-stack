@@ -183,6 +183,17 @@ CORPUS
     if [ "$(id -u)" -eq 0 ]; then
         skip "root ignores the write bit, so a failed restore cannot be simulated"
     fi
+    # Do not assume this platform's `cp` refuses an unwritable destination. If
+    # it happily overwrites, the mutation restores cleanly, the runner exits 0,
+    # and this test fails for a reason that has nothing to do with the runner.
+    # Prove the premise here, and skip honestly if it does not hold -- a test
+    # that cannot set up its own scenario must say so, not report a verdict.
+    echo probe > "$FX/probe"; echo other > "$FX/probe.src"; chmod 444 "$FX/probe"
+    if cp "$FX/probe.src" "$FX/probe" 2>/dev/null; then
+        chmod 644 "$FX/probe"
+        skip "this platform's cp overwrites an unwritable file; cannot simulate a failed restore"
+    fi
+    chmod 644 "$FX/probe"
     write_corpus <<CORPUS
 mutation demo-unrestorable \
   --file "$FX/target.sh" --bats "$FX/fixture.bats" \
@@ -211,4 +222,37 @@ CORPUS
         return 1
     }
     grep -q 'echo yes' "$backup_dir" || { echo "the kept backup is not pristine"; return 1; }
+}
+
+@test "a vanished backup is fatal, not a silent no-op" {
+    # restore_current's guard used to be one condition covering two very
+    # different situations: nothing to restore (fine) and the backup is gone
+    # (the tree is mutated and unrecoverable). Both returned 0, silently.
+    #
+    # --apply runs under `bash -c` with only $F exported, so it cannot read
+    # $CURRENT_BACKUP. It does not need to: the backup is named after the
+    # mutation id, so the fixture can find it.
+    write_corpus <<CORPUS
+mutation demo-lostbackup \
+  --file "$FX/target.sh" --bats "$FX/fixture.bats" \
+  --test "asserts the guarded output" --why "x" \
+  --apply 'sed -i s@yes@nope@ "\$F"; find "\${TMPDIR:-/tmp}" -maxdepth 2 -name demo-lostbackup.orig -delete'
+CORPUS
+    run "$RUNNER" "$FX/corpus.sh"
+
+    [ "$status" -ne 0 ] || {
+        echo "the runner exited 0 with a mutated file and no backup of it."
+        echo "$output"; return 1
+    }
+    # Assert on a phrase that appears ONLY in the missing-backup branch. The
+    # first version of this checked for "vanished", which also appears in the
+    # backup's own filename (it is named after the mutation id) -- so the
+    # assertion was satisfied by the fixture's own test data and passed with the
+    # guard disabled. An assertion matching an incidental substring of its
+    # inputs is exactly the vacuous-test shape this file exists to catch, and it
+    # got in here.
+    [[ "$output" == *"FATAL"* && "$output" == *"nothing left to restore"* ]] || {
+        echo "a missing backup was treated as nothing-to-do."
+        echo "$output"; return 1
+    }
 }

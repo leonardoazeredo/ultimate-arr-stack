@@ -1,3 +1,5 @@
+# shellcheck shell=bash
+# (sourced by run-mutations.sh, never executed - hence a directive, not a shebang)
 # Mutations for the backup path and the deploy guards.
 #
 # These encode the breakages that were applied by hand during the sessions that

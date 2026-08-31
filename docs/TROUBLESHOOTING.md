@@ -219,6 +219,53 @@ sudo systemctl restart docker    # bounces the whole stack; ~2-3 min to settle
 docker compose -f docker-compose.arr-stack.yml up -d --dry-run <service> 2>&1 | grep -i recreate
 ```
 
+## The Deploy Reported Success and Nothing Was Deployed
+
+The single most expensive failure shape in this repo. Every instance looks
+identical from outside: **exit 0, and either silence or a cheerful message.** No
+error to search for, no log line to grep, nothing in `docker ps`. The stack just
+quietly keeps running the old code, and the gap between "deployed" and "not
+deployed" is invisible until something downstream trips over it — 38 hours later,
+in the worked example above.
+
+Three separate bugs of this shape were live simultaneously until 2026-08-31, each
+independently sufficient to break a deploy, stacked so that fixing any one of them
+alone would have changed nothing observable.
+
+| # | The bug | What it looked like from outside |
+| --- | --- | --- |
+| 1 | The `post-merge` hook derived its repo root from `${BASH_SOURCE[0]}` — which git sets to the path *inside* the git dir (`.git/hooks/post-merge`). Bash does not resolve that symlink, so `git -C .git/hooks rev-parse --show-toplevel` fatalled, `\|\| true` swallowed it, and an `exit 0` guard meant for "not a git repo" fired on **every merge**. | `git merge` printed its normal output. The hook produced not one character, ever. |
+| 2 | `scripts/sync-nas.sh` exited 0 when the NAS was unreachable. | Indistinguishable from a successful sync. |
+| 3 | The NAS pulls from **`origin`**, but the hook fires *during* the merge, before any push. The merge commit did not exist on origin yet. | `git pull` on the NAS: `Already up to date.` — exit 0, correct output, wrong commit. |
+
+Note the third one especially: nothing there is broken. Every command did exactly
+what it was asked. The remote genuinely was up to date with a ref that did not yet
+contain the merge.
+
+### The check that distinguishes them
+
+Never ask whether the deploy command succeeded. Ask the NAS what it is holding —
+**the branch, not only the commit.** A NAS on the right commit of the wrong branch
+is the 2026-08-27 outage.
+
+```bash
+docker run --rm -v /volume1/docker/arr-stack:/repo -w /repo \
+  alpine/git -c safe.directory=/repo rev-parse --abbrev-ref HEAD   # must be: main
+```
+
+Run that from the NAS (or over `ssh arr-stack-nas`). `git rev-parse --abbrev-ref HEAD`
+on the deploy path is the **first** thing to check when diagnosing anything
+stack-wide, before touching a single container.
+
+`sync-nas.sh` now does this itself and reports `NAS NOT synced` on any failure, and
+the hook refuses to push a dirty or diverged tree. But the reason all three survived
+so long is worth more than the fixes: **`tests/hooks-installed.bats` passed the entire
+time.** It asserted the hook symlink existed, was executable, and pointed at the right
+target. All three were true. All three were irrelevant. Presence is not behaviour —
+see `tests/nas-sync.bats`, which runs the hook against a throwaway repo with a real
+origin and asserts on what it *did*, and `./tests/mutation/run-mutations.sh`, which
+proves each of those assertions can actually fail.
+
 ## SABnzbd: Stuck Unpack Loop
 
 **Symptom:** Radarr shows "Downloading" at 100% with 0 B file size. SABnzbd UI is unresponsive or Save fails. Logs show `Unpacked files []` repeatedly.

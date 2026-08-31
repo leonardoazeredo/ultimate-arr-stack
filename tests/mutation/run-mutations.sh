@@ -50,7 +50,18 @@ RESTORE_FAILED=0
 # mutated file left in the tree is worse than no mutation testing at all: it
 # looks like an ordinary edit and there is nothing to distinguish it from one.
 restore_current() {
-    [[ -n "$CURRENT_FILE" && -f "$CURRENT_BACKUP" ]] || return 0
+    # Nothing to restore is a legitimate no-op. A backup that has gone missing
+    # is NOT -- it means the mutated file is in the tree with nothing left to
+    # put back, and the old single-condition guard returned 0 for both, silently.
+    [[ -n "$CURRENT_FILE" ]] || return 0
+    if [[ ! -f "$CURRENT_BACKUP" ]]; then
+        RESTORE_FAILED=1
+        echo "FATAL: the backup of $CURRENT_FILE has vanished from under us." >&2
+        echo "FATAL:   expected it at $CURRENT_BACKUP" >&2
+        echo "FATAL: THE TREE IS MUTATED and there is nothing left to restore" >&2
+        echo "FATAL: it from. Recover $CURRENT_FILE from git." >&2
+        return 1
+    fi
     # `cmp` alone, deliberately. Checking cp's exit status as well reads like
     # belt and braces, but a mutation proved it unfalsifiable: every case where
     # a failed cp matters is a case where the bytes differ, so cmp fires first
@@ -144,7 +155,9 @@ mutation() {
     # Split declaration from assignment (SC2155): `local x=$(cmd)` takes the
     # exit status of `local`, not of the command.
     local backup
-    backup="$WORK/$(echo "$id" | tr -c 'A-Za-z0-9._-' '_').orig"
+    # printf, not echo: `echo` appends a newline and `tr -c` then turns it into
+    # a trailing '_', so every backup was silently named "<id>_.orig".
+    backup="$WORK/$(printf '%s' "$id" | tr -c 'A-Za-z0-9._-' '_').orig"
     cp "$file" "$backup"
     CURRENT_FILE="$file"; CURRENT_BACKUP="$backup"
 
@@ -156,14 +169,14 @@ mutation() {
         echo "       --test '$testre' matched NO tests in $(basename "$batsfile")."
         echo "       bats exits 0 having run nothing, which is indistinguishable"
         echo "       from a pass. Fix the regex."
-        ERRORED=$((ERRORED + 1)); restore_current; return 0
+        ERRORED=$((ERRORED + 1)); restore_current || exit 3; return 0
     fi
     if [[ "$st" -ne 0 ]]; then
         echo "ERROR  $id"
         echo "       the test is already failing unmutated - a later failure"
         echo "       would prove nothing. Fix the test first."
         sed 's/^/       | /' "$WORK/last-output.txt" | head -20
-        ERRORED=$((ERRORED + 1)); restore_current; return 0
+        ERRORED=$((ERRORED + 1)); restore_current || exit 3; return 0
     fi
 
     # 2. Apply, 3. assert it actually landed.
@@ -173,7 +186,7 @@ mutation() {
         echo "       the mutation changed NOTHING. Its result would have been a"
         echo "       false KILLED (or a false SURVIVED) either way. Most likely"
         echo "       the pattern no longer matches $(basename "$file")."
-        ERRORED=$((ERRORED + 1)); restore_current; return 0
+        ERRORED=$((ERRORED + 1)); restore_current || exit 3; return 0
     fi
 
     # 4. The test must now fail.

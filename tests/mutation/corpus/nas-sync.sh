@@ -1,3 +1,5 @@
+# shellcheck shell=bash
+# (sourced by run-mutations.sh, never executed - hence a directive, not a shebang)
 # Mutations for the NAS sync path (scripts/post-merge, scripts/sync-nas.sh).
 #
 # Each entry reintroduces a defect that path has actually had, or a near
@@ -111,3 +113,10 @@ mutation runner-deletes-the-backup-it-names \
   --test "failed restore is fatal" \
   --why "cleanup rm -rf's the pristine copy the FATAL message just told the reader to restore from" \
   --apply 'sed -i "s@^    if \[\[ \"\$RESTORE_FAILED\" -eq 1 \]\]; then\$@    if false; then@" "$F"'
+
+mutation runner-vanished-backup-is-silent \
+  --file tests/mutation/run-mutations.sh \
+  --bats tests/mutation-framework.bats \
+  --test "vanished backup is fatal" \
+  --why "a backup that disappeared is treated as nothing-to-restore, so the mutated file stays in the tree unreported" \
+  --apply 'sed -i "s@^    if \[\[ ! -f \"\$CURRENT_BACKUP\" \]\]; then\$@    if false; then@" "$F"'
