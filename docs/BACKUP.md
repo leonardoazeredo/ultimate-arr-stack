@@ -160,6 +160,42 @@ Examples:
   ./scripts/arr-backup.sh --prefix media-stack     # Pin all volumes to one prefix
 ```
 
+### Environment knobs
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `SAFETY_TIMEOUT` | `120` | Seconds allowed for the exit-trap restart of any service the backup stopped. |
+| `HA_WEBHOOK_URL` | unset | Where `notify_failure` posts. Unset on this NAS, so it degrades to `echo` — see *Exit status* below. |
+
+`SAFETY_TIMEOUT` is an **operator knob, not a test hook.** 120s is chosen against a
+measured full-stack `compose up -d` on this NAS settling in ~50s. Raise it if the
+stack grows; do not lower it to make a test faster.
+
+It bounds `ensure_services_running`, which runs from the **EXIT trap** to restart
+anything the backup stopped. On timeout or failure it says so distinctly and raises
+`notify_failure` — **so if you see `SAFETY: TIMED OUT` or `SAFETY: FAILED`, services
+are still down and need restarting by hand.**
+
+It still **returns 0 on failure, deliberately.** `cleanup_on_exit` invokes it under
+`set -e`, where a non-zero return becomes the script's own exit status — that once
+made a successful backup exit 42, and would make a `backup && prune` cron chain stop
+pruning permanently. The gap was never the status; it was the missing signal.
+
+### Staging directory
+
+The archive is assembled in `/tmp/arr-stack-backup-<timestamp>` (tmpfs — roughly
+220 MB per run) and moved to the destination at the end. **`/tmp` therefore needs room
+for a full copy of the archive**, on top of the destination.
+
+If `mkdir` on that directory fails, the script distinguishes **"it already exists —
+another backup may be running"** from any other cause (permissions, missing parent,
+full filesystem), printing `mkdir`'s own stderr for the latter. If you see the
+collision message, check for a concurrent run before deleting anything.
+
+Staging and destination are separate variables (`STAGING_DIR`, `FINAL_DEST`) and must
+stay separate — the EXIT trap runs `rm -rf` on the staging path. History in
+`docs/TEST-HARDENING-LOG.md` §5.3.
+
 ### Volume Resolution
 
 Docker names a volume `<compose-project>_<name>`, and this stack spans **four**
