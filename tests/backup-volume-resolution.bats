@@ -137,6 +137,40 @@ load_resolver() {
     done
 }
 
+# Define the script's real docker_volume_inventory() in this shell, and put a stub
+# `docker` first on PATH so its failure modes can be driven directly. Same
+# extraction assertions as load_resolver() and for the same reason.
+#
+# $1 is the stub's body: a bash case/if over "$@" that plays whatever docker
+# behaviour the test needs. It APPENDS its own argv to $STUB_LOG, so a test can
+# assert what the helper actually asked docker, not just what came back.
+load_inventory() {
+    local body
+    body=$(awk -v s="docker_volume_inventory() {" 'index($0, s) == 1, /^\}$/' "$BACKUP_SH")
+    [[ -n "$body" ]] || {
+        echo "could not extract docker_volume_inventory() from $BACKUP_SH -- renamed?"
+        return 1
+    }
+    grep -qx '}' <<<"$body" || {
+        echo "extraction of docker_volume_inventory() never reached a closing brace; got:"
+        echo "$body"
+        return 1
+    }
+    eval "$body"
+
+    STUB_LOG="$BATS_TEST_TMPDIR/docker-calls"
+    : > "$STUB_LOG"
+    mkdir -p "$BATS_TEST_TMPDIR/bin"
+    {
+        echo '#!/usr/bin/env bash'
+        echo 'printf "%s\n" "$*" >> "$STUB_LOG"'
+        echo "$1"
+    } > "$BATS_TEST_TMPDIR/bin/docker"
+    chmod +x "$BATS_TEST_TMPDIR/bin/docker"
+    PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+    export STUB_LOG
+}
+
 # The curated list, minus comments. Conditional appends (seerr/overseerr) are not
 # included -- those are optional by design and handled before the loop.
 curated_volumes() {
@@ -521,19 +555,172 @@ curated_volumes() {
     }
 }
 
-@test "ATTACHED_VOLUMES is built from containers that exist, not just running ones" {
-    # STATIC assertion, and deliberately so -- stated rather than dressed up as
-    # more than it is. Every functional test above supplies its own inventories so
-    # the resolver can be exercised without docker, which means none of them can
-    # see a change to the code that BUILDS those inventories. Proved by mutation:
-    # replacing the real ATTACHED_VOLUMES with "" was caught by nothing.
+@test "the ATTACHED inventory asks docker for stopped containers too" {
+    # Was a static grep for `docker ps -a -q` until the inventory moved into a
+    # function. It is now a real behavioural test: drive the helper with a stub
+    # docker and assert what it actually asked for.
     #
     # A `docker ps` here instead of `docker ps -a` makes the whole backup's answer
     # depend on which containers happen to be up at 04:00 -- the defect this
-    # branch exists to remove.
-    grep -qE '^ATTACHED_VOLUMES=\$\(docker ps -a -q' "$BACKUP_SH" || {
-        echo "ATTACHED_VOLUMES is not built from 'docker ps -a -q'. Found:"
-        grep -nE '^(ATTACHED|MOUNTED)_VOLUMES=' "$BACKUP_SH" || echo "  (no such assignment at all)"
+    # resolver exists to remove.
+    load_inventory 'case "$1 $2" in
+      "ps -a") echo c1; echo c2 ;;
+      "ps -q") echo c1 ;;
+      *) echo vol-from-inspect ;;
+    esac'
+
+    docker_volume_inventory -a
+    grep -q -- "^ps -a -q$" "$STUB_LOG" || {
+        echo "helper did not ask docker for stopped containers. It ran:"
+        cat "$STUB_LOG"
+        return 1
+    }
+}
+
+@test "a docker ps failure is an ERROR, not an empty inventory" {
+    # The whole point of the guard. An empty ATTACHED_VOLUMES is read by
+    # resolve_volume() as proof that every candidate is an orphan, so a docker
+    # failure that returns empty makes multi-candidate volumes FAIL with
+    # "no container references any of them" -- a specific, confident, wrong reason.
+    load_inventory 'echo "Cannot connect to the Docker daemon" >&2; exit 1'
+
+    run docker_volume_inventory -a
+    [ "$status" -ne 0 ] || {
+        echo "docker ps failed and the helper returned success"
+        return 1
+    }
+
+    docker_volume_inventory -a || true
+    [ -n "$INVENTORY_ERROR" ] || { echo "no INVENTORY_ERROR set on failure"; return 1; }
+    [ -z "$INVENTORY_VOLUMES" ] || {
+        echo "INVENTORY_VOLUMES set despite failure: '$INVENTORY_VOLUMES'"
+        return 1
+    }
+}
+
+@test "no containers at all is a legal empty inventory, not an error" {
+    # The other half, and the reason the guard cannot just be "empty means broken":
+    # asking successfully and being told "none" is a real state a fresh host is in.
+    load_inventory 'exit 0'
+
+    run docker_volume_inventory -a
+    [ "$status" -eq 0 ] || {
+        echo "an empty-but-successful docker ps was treated as a failure: $output"
+        return 1
+    }
+}
+
+@test "docker inspect failing on a vanished container is tolerated if others answered" {
+    # A container can be removed between `ps` and `inspect`; docker then exits
+    # non-zero having still reported on every other container. Failing the whole
+    # backup for that would swap a silent-wrong-answer bug for a flaky-backup bug.
+    load_inventory 'case "$1" in
+      ps) echo c1; echo c2 ;;
+      inspect) echo survivor-vol; echo "No such object: c2" >&2; exit 1 ;;
+    esac'
+
+    run docker_volume_inventory -a
+    [ "$status" -eq 0 ] || { echo "a partial inspect was treated as fatal: $output"; return 1; }
+
+    docker_volume_inventory -a
+    [ "$INVENTORY_VOLUMES" = "survivor-vol" ] || {
+        echo "expected the surviving container's volume, got '$INVENTORY_VOLUMES'"
+        return 1
+    }
+}
+
+@test "docker inspect failing with NO output is an error" {
+    # The boundary of the tolerance above. Nothing came back at all, so the
+    # question itself failed and there is no inventory to reason from.
+    load_inventory 'case "$1" in
+      ps) echo c1 ;;
+      inspect) echo "permission denied" >&2; exit 1 ;;
+    esac'
+
+    run docker_volume_inventory -a
+    [ "$status" -ne 0 ] || {
+        echo "a total inspect failure was treated as an empty inventory"
+        return 1
+    }
+}
+
+@test "both inventories are guarded, and the ATTACHED one asks for -a" {
+    # Wiring, asserted statically and narrowly: the behaviour above is only worth
+    # anything if the script actually routes through the guarded helper. A bare
+    # assignment would restore the silent-empty path with every test still green.
+    grep -qE '^if ! docker_volume_inventory -a; then' "$BACKUP_SH" || {
+        echo "the ATTACHED inventory is not built through a guarded 'docker_volume_inventory -a'"
+        grep -nE 'ATTACHED_VOLUMES=|docker_volume_inventory' "$BACKUP_SH" || true
+        return 1
+    }
+    grep -qE '^if ! docker_volume_inventory; then' "$BACKUP_SH" || {
+        echo "the MOUNTED inventory is not built through a guarded 'docker_volume_inventory'"
+        return 1
+    }
+    grep -qE '^(ATTACHED|MOUNTED)_VOLUMES=\$\(docker ' "$BACKUP_SH" && {
+        echo "an inventory is still assigned straight from a docker pipeline, bypassing the guard"
+        return 1
+    }
+
+    # Each result must land in its OWN variable. Proved by mutation: swapping one
+    # assignment for the other leaves both guards in place and every other test
+    # green, while the tie-break silently reads an unset or duplicated inventory.
+    grep -qx 'ATTACHED_VOLUMES="$INVENTORY_VOLUMES"' "$BACKUP_SH" || {
+        echo "ATTACHED_VOLUMES is never assigned from the guarded inventory"
+        return 1
+    }
+    grep -qx 'MOUNTED_VOLUMES="$INVENTORY_VOLUMES"' "$BACKUP_SH" || {
+        echo "MOUNTED_VOLUMES is never assigned from the guarded inventory"
+        return 1
+    }
+    return 0
+}
+
+@test "a failed inventory exits NON-ZERO, not just loudly" {
+    # Proved by mutation: turning either guard's `exit 1` into `exit 0` survived
+    # every other test in this file. The script would print ERROR, call
+    # notify_failure, and then exit successfully -- a detected failure reported as
+    # a clean run, which is the exact defect class this whole file exists to break.
+    local blk n=0
+    while IFS= read -r ln; do
+        # NOT `awk 'NR>=s, /^fi$/'`: a range whose start condition stays true
+        # re-opens on the line after it closes, so that form walks the whole rest
+        # of the file and finds the NEXT guard's `exit 1`. Proved by mutation --
+        # it passed against a first guard whose exit had been changed to 0.
+        blk=$(awk -v s="$ln" 'NR>=s{print; if ($0 == "fi") exit}' "$BACKUP_SH")
+        grep -qE '^[[:space:]]*exit 1$' <<<"$blk" || {
+            echo "the inventory guard starting at line $ln does not exit non-zero:"
+            echo "$blk"
+            return 1
+        }
+        n=$((n + 1))
+    done < <(grep -nE '^if ! docker_volume_inventory' "$BACKUP_SH" | cut -d: -f1)
+
+    [ "$n" -eq 2 ] || {
+        echo "expected 2 guarded inventory builds, found $n"
+        return 1
+    }
+}
+
+@test "containers with no named volumes give an empty inventory, not a crash" {
+    # The function's contract is that empty-but-successful is legal. Proved by
+    # mutation: flipping the `|| true` after `grep .` to `&& true` makes an
+    # all-blank inspect result abort the script under `set -e` -- turning the
+    # normal state of a host whose containers use only bind mounts into a failure.
+    load_inventory 'case "$1" in
+      ps) echo c1; echo c2 ;;
+      inspect) echo ""; echo "" ;;
+    esac'
+
+    run docker_volume_inventory -a
+    [ "$status" -eq 0 ] || {
+        echo "volume-less containers were treated as a failure: $output"
+        return 1
+    }
+
+    docker_volume_inventory -a
+    [ -z "$INVENTORY_VOLUMES" ] || {
+        echo "expected an empty inventory, got '$INVENTORY_VOLUMES'"
         return 1
     }
 }

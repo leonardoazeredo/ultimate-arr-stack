@@ -188,6 +188,46 @@ an orphaned volume is worse than a failed backup, because it looks like it worke
 > for. Measured on the NAS: `arr-stack_beszel-data` is referenced by 1 container,
 > `arr-utilities_beszel-data` by 0, running or stopped.
 
+Both tie-break inventories are built through a guarded helper that separates
+**"nothing is attached"** from **"I could not ask"**. If `docker ps` fails, or
+`docker inspect` fails for every container, the run stops with docker's own error
+rather than continuing with an empty set.
+
+> **Why an empty inventory cannot be allowed to mean "no containers".** An empty
+> `ATTACHED_VOLUMES` is read by the resolver as proof that every candidate is an
+> orphan. A docker failure that returns empty therefore does not produce a vague
+> error — it produces a *confident and specific* one, failing every multi-candidate
+> volume with `no container references any of them, running or stopped` and sending
+> whoever reads it looking for a project rename that never happened. Measured on
+> this NAS by stubbing `docker ps` to fail: exactly one curated name, `beszel-data`,
+> is multi-candidate, and it failed with precisely that wrong cause while the other
+> 16 volumes backed up normally — `16 backed up, 1 failed`, which reads as a
+> selective, plausible, already-known problem rather than a broken daemon.
+> (`configarr-repos` also exists under two prefixes but is not in the curated list,
+> so it is never resolved and cannot produce this.) Single-candidate names resolve
+> on the early return and are unaffected, which is what makes the shape so
+> convincing.
+>
+> That is the *mild* case. The stub above left `docker run` working, which is not a
+> combination that occurs in practice: whatever denies the containers endpoint denies
+> container creation too, and the copy itself is a `docker run`. Stubbing both — the
+> realistic shape — gave `0 backed up, 1 skipped, 17 failed` **and still wrote a
+> 214-byte tarball into the destination**. `backup-prune.sh` tiers purely by the
+> filename's timestamp and never inspects size or contents, so that empty archive is
+> an ordinary retention candidate: inside the 7-30 day tier it is eligible to be the
+> "newest backup per calendar day" that displaces a real one. The non-zero exit is
+> the only thing distinguishing it, and only if something is reading exit codes.
+>
+> A container disappearing between `docker ps` and `docker inspect` is a race, not
+> a broken daemon: `inspect` exits non-zero having still reported every other
+> container, and that partial result is used. Only a total failure — nothing back
+> at all — stops the run.
+>
+> Note the asymmetry this closes. `docker volume ls` has been guarded since the
+> coverage fix; the container queries were not. `docker-socket-proxy` in this stack
+> runs `VOLUMES=0, CONTAINERS=1`, so it fails the *guarded* call — the reverse
+> shape, and the one that was already safe.
+
 A name in the curated list that resolves to nothing is a **failure**, not a skip.
 Until 2026-08-31 it was a skip: the script auto-detected one prefix (always
 `arr-stack`), so after uptime-kuma moved into the `arr-utilities` project its
