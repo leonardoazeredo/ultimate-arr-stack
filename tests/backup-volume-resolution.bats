@@ -537,3 +537,27 @@ curated_volumes() {
         return 1
     }
 }
+
+@test "intersect_lines matches WHOLE lines, so a substring name cannot false-match" {
+    # Found by mutation testing (universalmutator), not by review: replacing
+    # `grep -Fxq` with `grep -Fq` survived all 18 tests above. Nothing here proved
+    # the -x was load-bearing, so the exact-match property was uncovered.
+    #
+    # It is load-bearing. Volume names nest: a candidate `old_seerr-config` is a
+    # substring of an unrelated `xold_seerr-config-v2`. Without -x the orphan
+    # matches a live volume it has nothing to do with, both candidates survive
+    # tier 1, and a name that resolves cleanly today becomes ambiguous -- i.e. a
+    # FAILED volume, silently, the moment someone creates a longer-named volume.
+    load_resolver
+
+    local cands=$'old_seerr-config\nnew_seerr-config'
+    local attached=$'xold_seerr-config-v2\nnew_seerr-config'
+
+    run intersect_lines "$cands" "$attached"
+    [ "$output" = "new_seerr-config" ] || {
+        echo "expected only the exactly-matching new_seerr-config, got:"
+        echo "$output"
+        echo "(a substring match would also return old_seerr-config)"
+        return 1
+    }
+}
