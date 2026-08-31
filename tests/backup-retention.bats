@@ -179,15 +179,17 @@ setup() {
     assert_success
 }
 
-@test "arr-backup.sh removes its /tmp staging dir once the tarball exists" {
-    # /tmp on the NAS is tmpfs. Each run stages ~200MB there; the staging name is
-    # per-second, so without cleanup it leaks a directory per run into RAM.
-    run grep -n 'rm -rf "\$BACKUP_DIR"' "$BACKUP_SH"
-    assert_success
+@test "arr-backup.sh cleans up its /tmp staging dir from the EXIT trap" {
+    # Superseded the old assertion on the literal string `rm -rf "$BACKUP_DIR"`,
+    # which proved a removal existed but nothing about WHEN it ran -- and it ran
+    # only on the happy path, which was the bug. The behavioural coverage is in
+    # the cleanup_on_exit tests at the end of this file; this one just pins the
+    # removal to the trap handler and to STAGING_DIR rather than BACKUP_DIR.
+    run grep -c 'rm -rf "\$BACKUP_DIR"' "$BACKUP_SH"
+    assert_output "0"
 
-    # Guarded on the tarball existing - without --tar the staging dir IS the backup.
-    run grep -B 3 'rm -rf "\$BACKUP_DIR"' "$BACKUP_SH"
-    assert_output --partial '-f "$TARBALL"'
+    run grep -n 'rm -rf "\$STAGING_DIR"' "$BACKUP_SH"
+    assert_success
 }
 
 @test "arr-backup.sh refuses to reuse an existing staging dir" {
@@ -205,4 +207,164 @@ setup() {
     # failure mode this whole change exists to remove.
     run bash -c "grep -A 2 -- '-mtime \"+\\\$ROTATE_DAYS\"' '$BACKUP_SH' | grep -c '2>/dev/null'"
     assert_output "0"
+}
+
+# --- staging-directory cleanup on every exit path -------------------------------
+#
+# Until 2026-08-31 the /tmp staging copy was removed inline on the happy path only.
+# /tmp on this NAS is tmpfs (RAM-backed) and each run stages ~220MB, so every FAILED
+# run leaked a directory into RAM until the next reboot. Cleanup now lives in the
+# EXIT trap, which covers normal, error and interrupt exits alike.
+#
+# These extract cleanup_on_exit() and run it directly rather than grepping for it:
+# the previous version of this coverage asserted the literal string
+# `rm -rf "$BACKUP_DIR"`, which said nothing about WHEN it ran -- and "when" was the
+# entire bug.
+
+load_cleanup() {
+    local body
+    body=$(awk -v s="cleanup_on_exit() {" 'index($0, s) == 1, /^\}$/' "$BACKUP_SH")
+    [[ -n "$body" ]] || {
+        echo "could not extract cleanup_on_exit() from $BACKUP_SH -- renamed?"
+        return 1
+    }
+    grep -qx '}' <<<"$body" || {
+        echo "extraction of cleanup_on_exit() never reached a closing brace; got:"
+        echo "$body"
+        return 1
+    }
+    # Stubbed: the real one shells out to docker compose, which these static tests
+    # deliberately never touch.
+    ensure_services_running() { :; }
+    eval "$body"
+}
+
+@test "cleanup_on_exit removes the staging dir when --tar was used" {
+    load_cleanup
+    CREATE_TAR=true
+    STAGING_DIR="$BATS_TEST_TMPDIR/staging"
+    mkdir -p "$STAGING_DIR"
+    dd if=/dev/zero of="$STAGING_DIR/blob" bs=1024 count=8 2>/dev/null
+
+    cleanup_on_exit
+
+    [ ! -d "$STAGING_DIR" ] || {
+        echo "staging dir survived cleanup_on_exit"
+        return 1
+    }
+}
+
+@test "cleanup_on_exit KEEPS the staging dir when --tar was not used" {
+    # Without --tar the staging directory IS the backup. Removing it would delete
+    # the only thing the run produced.
+    load_cleanup
+    CREATE_TAR=false
+    STAGING_DIR="$BATS_TEST_TMPDIR/staging"
+    mkdir -p "$STAGING_DIR"
+
+    cleanup_on_exit
+
+    [ -d "$STAGING_DIR" ] || {
+        echo "cleanup_on_exit deleted the staging dir that WAS the backup"
+        return 1
+    }
+}
+
+@test "cleanup_on_exit never removes the tarball, only the staging directory" {
+    # When the move to the final destination fails, the tarball left in /tmp is the
+    # run's only output. It sits beside the staging dir and shares its name stem, so
+    # a careless glob would take it too.
+    load_cleanup
+    CREATE_TAR=true
+    STAGING_DIR="$BATS_TEST_TMPDIR/arr-stack-backup-20260831-010203"
+    mkdir -p "$STAGING_DIR"
+    local tarball="${STAGING_DIR}.tar.gz"
+    echo "archive" > "$tarball"
+
+    cleanup_on_exit
+
+    [ ! -d "$STAGING_DIR" ] || { echo "staging dir survived"; return 1; }
+    [ -f "$tarball" ] || {
+        echo "cleanup removed $tarball -- that is the backup when the move failed"
+        return 1
+    }
+}
+
+@test "cleanup_on_exit is inert before the staging dir is armed" {
+    # The trap is installed near the top of the script, long before CREATE_TAR and
+    # STAGING_DIR exist. Under `set -u` an undefaulted expansion would abort the
+    # handler with "unbound variable", masking whatever real failure was on its way
+    # out. Asserted by reaching the line AFTER the call: the abort would skip it.
+    #
+    # Run in a fresh shell rather than via bats' `run`, because cleanup_on_exit
+    # deliberately returns the status it inherited -- so its exit code says nothing
+    # about whether it aborted, and only the marker does.
+    local script="$BATS_TEST_TMPDIR/inert.sh"
+    {
+        echo 'set -euo pipefail'
+        awk -v s="cleanup_on_exit() {" 'index($0, s) == 1, /^\}$/' "$BACKUP_SH"
+        echo 'ensure_services_running() { :; }'
+        echo 'cleanup_on_exit'
+        echo 'echo REACHED_END'
+    } > "$script"
+
+    run bash "$script"
+    [[ "$output" == *REACHED_END* ]] || {
+        echo "cleanup_on_exit aborted before its variables were initialised:"
+        echo "$output"
+        return 1
+    }
+}
+
+@test "the EXIT trap preserves the script's exit status" {
+    # The last statement of arr-backup.sh is `exit 1` when any volume FAILED. A
+    # cron `backup && prune` chain reads exactly that status to decide whether to
+    # prune, so a handler that clobbered it would re-tell the lie this script was
+    # fixed to stop telling.
+    #
+    # What this does and does not cover, established by mutation rather than
+    # assumed: replacing `return $rc` with `return 0` does NOT break it, because
+    # bash preserves the pending exit status whenever an EXIT trap returns
+    # normally. What it DOES catch is a handler that calls `exit` itself -- the
+    # real EXIT-trap footgun, and the one an "always exit cleanly" edit would
+    # introduce.
+    local script="$BATS_TEST_TMPDIR/exit-status.sh"
+    {
+        echo 'set -euo pipefail'
+        awk -v s="cleanup_on_exit() {" 'index($0, s) == 1, /^\}$/' "$BACKUP_SH"
+        echo 'ensure_services_running() { :; }'
+        echo 'CREATE_TAR=false'
+        echo 'STAGING_DIR=""'
+        echo 'trap cleanup_on_exit EXIT'
+        echo 'exit 1'
+    } > "$script"
+
+    run bash "$script"
+    [ "$status" -eq 1 ] || {
+        echo "expected exit 1 through the trap, got $status"
+        return 1
+    }
+}
+
+@test "there is exactly one EXIT trap in arr-backup.sh" {
+    # bash keeps ONE EXIT trap: a second `trap ... EXIT` silently REPLACES the
+    # first. Adding one for the staging cleanup would have disabled
+    # ensure_services_running, the safety net that restarts stopped containers.
+    run bash -c "grep -cE '^[^#]*trap .* EXIT' '$BACKUP_SH'"
+    assert_output "1"
+}
+
+@test "STAGING_DIR is armed only after the mkdir collision guard" {
+    # The mkdir is deliberately not -p: it fails when the directory already exists,
+    # which means ANOTHER RUN owns it. Arming the trap before that guard would make
+    # this run delete a concurrent run's staging copy on its way out.
+    local mkdir_ln arm_ln
+    mkdir_ln=$(grep -n '^mkdir "\$BACKUP_DIR"' "$BACKUP_SH" | cut -d: -f1)
+    arm_ln=$(grep -n '^STAGING_DIR="\$BACKUP_DIR"' "$BACKUP_SH" | cut -d: -f1)
+    [ -n "$mkdir_ln" ] || { echo "could not find the mkdir guard"; return 1; }
+    [ -n "$arm_ln" ] || { echo "could not find the STAGING_DIR assignment"; return 1; }
+    [ "$arm_ln" -gt "$mkdir_ln" ] || {
+        echo "STAGING_DIR armed at line $arm_ln, before the mkdir guard at $mkdir_ln"
+        return 1
+    }
 }

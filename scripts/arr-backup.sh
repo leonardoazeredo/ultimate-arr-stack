@@ -91,7 +91,54 @@ ensure_services_running() {
     docker compose -f "$COMPOSE_FILE" up -d $STOPPED 2>/dev/null
   fi
 }
-trap 'ensure_services_running' EXIT
+# Everything that must happen on ANY exit path -- normal, error, or interrupt.
+#
+# There is only ONE EXIT trap slot in bash: a second `trap ... EXIT` REPLACES this
+# one rather than adding to it. That is why the staging cleanup lives inside this
+# function instead of getting its own trap, and why anything added later must go
+# here too.
+cleanup_on_exit() {
+  # Capture the status the script is exiting with and hand it back at the end.
+  # Bash already preserves it when an EXIT trap returns normally -- measured, not
+  # assumed -- so this is belt-and-braces rather than load-bearing today. It is
+  # here so a later edit that ends this function with a status-changing command
+  # cannot silently turn the partial-backup `exit 1` below into a 0. That status
+  # is the only thing a `backup && prune` cron chain reads to decide whether to
+  # prune, so it is worth pinning explicitly.
+  local rc=$?
+
+  # Drop the /tmp staging copy. /tmp on this NAS is tmpfs -- RAM-backed -- and
+  # each run stages ~220MB into it. Cleanup used to be inline on the happy path
+  # only, so every FAILED run leaked a directory per run into RAM until reboot.
+  #
+  # STAGING_DIR is deliberately a SEPARATE variable from BACKUP_DIR. BACKUP_DIR
+  # holds the user's DESTINATION until it is reassigned to the staging path
+  # further down; a trap on BACKUP_DIR would delete the destination directory
+  # if the run died before that reassignment.
+  #
+  # Only when --tar was given: without it the staging directory IS the backup.
+  # Note this removes the staging DIRECTORY only, never $TARBALL -- when the move
+  # to the final destination fails, that tarball in /tmp is the run's only output.
+  #
+  # Defaulted expansions because this trap is installed before those variables
+  # are initialised, and `set -u` would otherwise turn an early failure into a
+  # confusing unbound-variable error inside the handler.
+  if [ "${CREATE_TAR:-false}" = true ] && [ -n "${STAGING_DIR:-}" ] && [ -d "${STAGING_DIR}" ]; then
+    if rm -rf "$STAGING_DIR"; then
+      echo "Cleaned up staging dir $STAGING_DIR"
+    else
+      echo "WARNING: could not remove staging dir $STAGING_DIR" >&2
+    fi
+  fi
+
+  # Deliberately after the cleanup: this call can be slow or hang (it shells out
+  # to `docker compose up -d`), and the leak guarantee above must not depend on
+  # it returning.
+  ensure_services_running
+
+  return $rc
+}
+trap 'cleanup_on_exit' EXIT
 
 # Find USB backup directory dynamically (device letters change on reboot)
 # Searches /mnt/@usb/sd*/ for a subdirectory matching the given name,
@@ -130,6 +177,9 @@ BACKUP_DIR=""
 VOLUME_PREFIX=""
 USB_DIR_NAME=""
 TARBALL=""
+# Set only once the /tmp staging directory actually exists; the EXIT trap keys
+# its cleanup off this, so it must stay empty until then.
+STAGING_DIR=""
 ROTATE_DAYS=""
 # One stamp for the whole run, captured once. Calling `date` twice can straddle a
 # second boundary and produce a tarball whose name disagrees with its staging dir.
@@ -414,6 +464,11 @@ mkdir "$BACKUP_DIR" || {
   echo "ERROR: $BACKUP_DIR already exists - another backup may be running" >&2
   exit 1
 }
+# Arm the EXIT trap's cleanup only now that the directory really exists. Set after
+# the mkdir, never before: on the collision branch above the directory belongs to
+# ANOTHER RUNNING BACKUP, and arming beforehand would make this run delete the
+# staging copy out from under it.
+STAGING_DIR="$BACKUP_DIR"
 
 # Flat rotation at the final destination. OPT-IN ONLY (--rotate-days) and always
 # loud, because this directory may already be owned by backup-prune.sh's GFS
@@ -728,20 +783,9 @@ if [ "$CREATE_TAR" = true ]; then
     fi
   fi
 
-  # Drop the staging copy once the tarball exists. /tmp on this NAS is tmpfs -
-  # a RAM-backed filesystem - and each run stages ~200MB into it. This used to
-  # leak one directory per DAY (the staging name was date-only); with a
-  # per-second name it would leak one per RUN, so cleanup is no longer optional.
-  # Only safe when --tar was used: without it, the staging directory IS the
-  # backup.
-  if [ -n "$TARBALL" ] && [ -f "$TARBALL" ] && [ -d "$BACKUP_DIR" ]; then
-    STEP="cleaning up staging directory"
-    if rm -rf "$BACKUP_DIR"; then
-      echo "Cleaned up staging dir $BACKUP_DIR"
-    else
-      echo "WARNING: could not remove staging dir $BACKUP_DIR" >&2
-    fi
-  fi
+  # The staging copy is removed by the EXIT trap (cleanup_on_exit), not here.
+  # It used to be removed inline at this point, which covered only the happy
+  # path and leaked ~220MB of tmpfs on every failed run.
 
   echo ""
   echo "To copy off-NAS:"
