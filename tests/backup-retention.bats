@@ -162,11 +162,58 @@ setup() {
     # 644 in the index and only worked on the NAS because that copy happened to
     # carry an exec bit the repo never set - a fresh checkout would have failed
     # the pre-deploy backup with 'Permission denied'.
+    #
+    # This reads the INDEX, not the filesystem, and that distinction is the whole
+    # test: the working-tree exec bit is exactly what lied last time. Do not
+    # "fix" the skip below by falling back to `[ -x "$f" ]` - that check passes
+    # on the NAS today while the index is still wrong, which is the bug, not the
+    # coverage.
+    #
+    # The NAS has no host git binary at all (it drives this repo through a
+    # containerised alpine/git), so this test used to fail there for a reason that
+    # has nothing to do with the mode being wrong - the same shape as the CI-hooks
+    # failure CLAUDE.md already records. Skip with a reason instead.
+    #
+    # The reason says "no host git binary", not "the mode cannot be read here":
+    # the containerised git could read it perfectly well. What is missing is the
+    # binary this test invokes, and a skip message that overstates the limitation
+    # would discourage someone from later wiring the containerised path in.
+    command -v git >/dev/null 2>&1 \
+        || skip "no host git binary on this machine (the NAS drives this repo through a containerised alpine/git)"
+
     for f in scripts/arr-backup.sh scripts/backup-prune.sh; do
         local mode
         mode=$(cd "$REPO_ROOT" && git ls-files -s "$f" | awk '{print $1}')
+        # An empty mode means git ran but the path is not tracked (or was renamed).
+        # Reported separately because "is mode  in git, expected 100755" reads as a
+        # permissions problem when it is actually a missing file.
+        [ -n "$mode" ] || {
+            echo "$f is not tracked in git - renamed or deleted without updating this test"
+            return 1
+        }
         [ "$mode" = "100755" ] || {
             echo "$f is mode $mode in git, expected 100755"
+            return 1
+        }
+    done
+}
+
+@test "both backup scripts are executable on disk" {
+    # A DIFFERENT claim from the index test above, and deliberately not a fallback
+    # for it. That one asks whether the repo will hand a fresh checkout an
+    # executable file; this one asks whether the copy sitting here right now can
+    # actually be run. The index was wrong while the working tree was right, which
+    # is exactly why the index test exists - so this must never be allowed to stand
+    # in for it.
+    #
+    # Its value is that it runs everywhere, including the NAS, where the index test
+    # can only skip. Without it the NAS asserts nothing at all about these two
+    # scripts, and the NAS is the machine that actually executes them.
+    for f in scripts/arr-backup.sh scripts/backup-prune.sh; do
+        [ -f "$REPO_ROOT/$f" ] || { echo "$f does not exist"; return 1; }
+        [ -x "$REPO_ROOT/$f" ] || {
+            echo "$f is not executable on disk - running it directly would fail with"
+            echo "'Permission denied', which is how the deploy workflow invokes it"
             return 1
         }
     done
