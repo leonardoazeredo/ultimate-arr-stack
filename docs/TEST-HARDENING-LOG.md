@@ -3,6 +3,12 @@
 Audited record of the hardening pass merged as `86d5fcf` on 2026-09-01
 (branch `fix/nas-sync-silent-failure`, six commits, 13 files, +1651/−69).
 
+**Last updated: 2026-09-01.** Sections 2–6 and 8 are historical and stay true;
+**§1 and §7 decay.** Every claim in §1 carries the command to re-check it rather than a
+copied value — `docs/EXIT-NODE-PROJECT-LOG.md` learned this by embedding a commit SHA
+that its own commit invalidated on landing. If you find a bare number in §1, treat it
+as a bug.
+
 Read this before changing anything in `scripts/post-merge`, `scripts/sync-nas.sh`,
 `scripts/arr-backup.sh`, or `tests/mutation/`. Its value is not the list of fixes —
 those are in the diff. It is the record of **which of this repo's guards turned out
@@ -13,14 +19,14 @@ them read as coverage right up until it was watched.
 
 ## 1. Status at a glance
 
-| | |
+| | Re-check |
 | --- | --- |
-| Merged | `86d5fcf`, 2026-09-01, local merge — the `post-merge` hook fired and synced the NAS |
-| pi1 suite | 140 pass / 2 fail — both `jq: command not found`, pre-existing, see §7 |
-| NAS suite | **142 / 142** at `main` |
-| Mutation corpus | **34 killed / 0 survived / 0 errored** |
+| Merged | `86d5fcf`, 2026-09-01, local merge — the `post-merge` hook fired and synced the NAS. `git log --oneline --no-decorate a56d2cc..86d5fcf` |
+| pi1 suite | Green at merge bar 2 pre-existing `jq: command not found` failures (see §7). `./tests/run-tests.sh` |
+| NAS suite | Green at merge. `ssh arr-stack-nas 'cd /volume1/docker/arr-stack && ./tests/run-tests.sh'` |
+| Mutation corpus | All killed at merge, none survived. `./tests/mutation/run-mutations.sh` — the count is whatever the corpus holds now, not a number to copy |
 | Merge gate | CONTESTED → all findings explicitly accepted or rejected on the record (§6) |
-| NAS deploy path | on `main`, verified by reading its branch, not by trusting the hook |
+| NAS deploy path | Must be `main`. Re-check the **branch**, not the commit: `ssh arr-stack-nas "docker run --rm -v /volume1/docker/arr-stack:/repo -w /repo alpine/git -c safe.directory=/repo rev-parse --abbrev-ref HEAD"` |
 
 ---
 
@@ -63,7 +69,9 @@ asserts the file actually changed, runs the named bats test, and requires it to 
 It is deliberately **not** part of `./tests/run-tests.sh` — it runs the suite twice
 per mutation. Run it after touching any guard, and add a corpus entry with any new one.
 
-Corpus: 34 mutations across `corpus/nas-sync.sh` and `corpus/backup-and-guards.sh`.
+Corpus: `corpus/nas-sync.sh` and `corpus/backup-and-guards.sh`. **`tests/mutation/README.md`
+is the authoritative guide** — design, how to add an entry, and the full write-up of the
+lessons summarised below. This section records only what the framework caught here.
 
 ### What it caught that human review did not
 
@@ -110,10 +118,23 @@ it had been counted as coverage while never once running. Now it falls back to
 for `alpine/git` and the Playwright runner) and skips only when neither is available,
 naming which.
 
-Discovery widened from `scripts/*.sh` plus `terraform/apply.sh` to every tracked file that is a shell script:
-**29 → 43 files**, which brought in `scripts/post-merge` and `scripts/pre-commit` —
-both load-bearing git hooks, both extensionless, both previously unchecked. Clean at
-`-S error`. Widening the severity is a separate deliberate decision, not done here.
+Discovery widened from `scripts/*.sh` plus `terraform/apply.sh` to every tracked file
+that is a shell script: **16 → 43 files**. Clean at `-S error`. Widening the severity
+is a separate deliberate decision, not done here.
+
+What the old glob missed matters more than the count. A shell glob is **not**
+recursive, so `scripts/*.sh` never descended into `scripts/lib/` — all **13** check
+scripts that `scripts/pre-commit` sources (`check-secrets.sh`, `check-env-vars.sh`,
+`check-conflicts.sh`, …) were unchecked, as were `scripts/post-merge` and
+`scripts/pre-commit` themselves, both extensionless and both load-bearing.
+
+> Two numbers for this were published wrong before the right one: commit `3f56fd1`'s
+> own message says "19 files -> 43", and the first draft of this document said 29. Both
+> came from `git ls-files 'scripts/*.sh'`, whose pathspec `*` matches across `/` and so
+> counts the `lib/` files the real glob could never see. The correct comparison runs the
+> glob the test actually ran: `ls -1 scripts/*.sh | wc -l` → 15, plus `terraform/apply.sh`.
+> Checking a proxy instead of the thing itself is the defect class this whole document is
+> about, committed while documenting it.
 
 ### 5.3 `scripts/arr-backup.sh` — three defects
 
@@ -158,6 +179,10 @@ dropped:
 
 ## 7. Open items
 
+**This section decays.** Mark an item done in place rather than deleting it — an
+"Open items" list that silently loses entries is indistinguishable from one nobody
+has touched.
+
 - **The 04:00 cron log redirection — needs interactive sudo on the NAS.** The nightly
   backup runs (tarball `20260831-040002`, root-owned) but writes **no log**, so its
   only failure signals reach nobody. Replacement crontab staged and verified intact at
@@ -172,7 +197,8 @@ dropped:
 
 ## 8. Traps
 
-Concrete, each one paid for in this pass.
+Concrete, each one paid for in this pass. The test traps marked ▸ have their full
+write-up in `tests/mutation/README.md`; these are the one-line forms.
 
 **Shell**
 
@@ -189,12 +215,12 @@ Concrete, each one paid for in this pass.
 
 **Tests**
 
-- **An assertion can be satisfied by its own fixture.** Never assert on a string that
+- ▸ **An assertion can be satisfied by its own fixture.** Never assert on a string that
   also appears in the test's own data — especially not the fixture's name.
 - **`$TMPDIR` is not `/tmp` under bats**, and `mktemp -d` honours it.
 - **bats `-f <regex>` exits 0 having run nothing** when the filter matches no test.
   The runner parses the TAP `1..N` plan line rather than trusting the status.
-- **A test extracted from a script with `awk` inherits none of its callees.** Anything
+- ▸ **A test extracted from a script with `awk` inherits none of its callees.** Anything
   the extracted body calls must be stubbed, or it dies `command not found` while the
   test reports success.
 
