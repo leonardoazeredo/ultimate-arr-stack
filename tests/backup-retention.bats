@@ -233,6 +233,17 @@ load_cleanup() {
         echo "$body"
         return 1
     }
+    # The awk range above ends at the FIRST line-start `}`, so a `}` appearing at
+    # column 0 inside the handler (in a comment, say) would truncate the body
+    # early -- and a truncation that happens to still be valid bash would eval
+    # cleanly and silently test less than it claims to. Anchoring on the
+    # handler's real last statement is what makes that detectable.
+    grep -q 'ensure_services_running || true' <<<"$body" || {
+        echo "extraction of cleanup_on_exit() is TRUNCATED -- it does not reach the"
+        echo "handler's last statement, so these tests would cover less than they claim:"
+        echo "$body"
+        return 1
+    }
     # Stubbed: the handler shells out to docker (compose up, and the worker
     # teardown), which this file's header promises never to touch. Without these
     # the tests would silently depend on a docker binary being present.
@@ -462,7 +473,18 @@ load_cleanup() {
         echo "NOT deferred, so cleanup would race a still-running copy container"
         return 1
     }
-    [ "$rc" -eq 143 ] || { echo "expected exit 143 (128+SIGTERM), got $rc"; return 1; }
+    [ "$rc" -eq 143 ] || {
+        if [ "$rc" -eq 0 ]; then
+            # Distinguishes a loaded machine from a regression: rc=0 with a full
+            # elapsed time means the kill landed after the stand-in copy had
+            # already returned, so nothing was deferred and nothing was tested.
+            echo "the SIGTERM landed after the 3s stand-in copy finished - this run"
+            echo "proved nothing (machine too loaded), it is not a regression"
+        else
+            echo "expected exit 143 (128+SIGTERM), got $rc"
+        fi
+        return 1
+    }
 }
 
 @test "the interrupt traps are installed before any copy container is started" {
@@ -476,6 +498,43 @@ load_cleanup() {
     [ -n "$run_ln" ] || { echo "could not find the copy container launch"; return 1; }
     [ "$trap_ln" -lt "$run_ln" ] || {
         echo "SIGTERM trap at line $trap_ln is installed AFTER the copy container at $run_ln"
+        return 1
+    }
+}
+
+@test "a failing worker teardown does not stop the staging dir from being removed" {
+    # The handler runs under `set -e`, where a bare failing call aborts it. The
+    # worker teardown is the FIRST thing it does, so if its `|| true` were ever
+    # dropped, every run whose worker was already gone -- which is every normal run,
+    # the container uses --rm -- would abort cleanup before reaching the rm and leak
+    # the staging directory. Every other test here stubs docker as succeeding and
+    # would not notice.
+    #
+    # Run in a real `bash` process, NOT via `cleanup_on_exit || true` in this shell:
+    # a command that is part of a `||` list is precisely where `set -e` does not
+    # fire, so calling it that way makes this test unable to fail. It was written
+    # that way first and passed against the mutation it exists to catch.
+    local body; body=$(awk -v s="cleanup_on_exit() {" 'index($0, s) == 1, /^\}$/' "$BACKUP_SH")
+    [[ -n "$body" ]] || { echo "could not extract cleanup_on_exit()"; return 1; }
+
+    local staging="$BATS_TEST_TMPDIR/staging"
+    mkdir -p "$staging/somevolume"
+    local script="$BATS_TEST_TMPDIR/teardown.sh"
+    {
+        echo 'set -euo pipefail'
+        echo 'ensure_services_running() { :; }'
+        # The real failure this models: `docker rm -f` on a container already gone.
+        echo 'docker() { return 1; }'
+        echo "$body"
+        echo 'CREATE_TAR=true'
+        printf 'STAGING_DIR=%q\n' "$staging"
+        echo 'cleanup_on_exit'
+    } > "$script"
+    bash "$script" >/dev/null 2>&1 || true
+
+    [ ! -d "$staging" ] || {
+        echo "staging dir survived a failing worker teardown - the teardown aborted"
+        echo "the handler under set -e before it reached the rm"
         return 1
     }
 }
