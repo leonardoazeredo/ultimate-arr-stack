@@ -162,6 +162,19 @@ setup() {
     # 644 in the index and only worked on the NAS because that copy happened to
     # carry an exec bit the repo never set - a fresh checkout would have failed
     # the pre-deploy backup with 'Permission denied'.
+    #
+    # This reads the INDEX, not the filesystem, and that distinction is the whole
+    # test: the working-tree exec bit is exactly what lied last time. Do not
+    # "fix" the skip below by falling back to `[ -x "$f" ]` - that check passes
+    # on the NAS today while the index is still wrong, which is the bug, not the
+    # coverage.
+    #
+    # The NAS has no host git at all (it drives this repo through a containerised
+    # alpine/git), so there the question cannot be asked rather than answered
+    # wrongly. Skip with a reason instead of failing for an unrelated cause.
+    command -v git >/dev/null 2>&1 \
+        || skip "no host git on this machine (the NAS uses a containerised git) - the index mode cannot be read here"
+
     for f in scripts/arr-backup.sh scripts/backup-prune.sh; do
         local mode
         mode=$(cd "$REPO_ROOT" && git ls-files -s "$f" | awk '{print $1}')
