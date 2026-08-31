@@ -61,7 +61,11 @@ notify_failure() {
   fi
 }
 STEP="initialising"
-trap 'notify_failure "Failed during: ${STEP}. Check /var/log/arr-backup.log"' ERR
+# No "check /var/log/arr-backup.log" here: that file does not exist on this NAS
+# and nothing creates it. The cron entry would have to redirect into it first
+# (see docs/BACKUP.md "Nightly run has no failure signal"). Naming a log that is
+# never written sends whoever reads this alert to an empty path.
+trap 'notify_failure "Failed during: ${STEP}"' ERR
 
 # Derive stack directory from script location (scripts/ is one level below stack root)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -219,9 +223,17 @@ fi
 # of them, running or stopped" -- a confident, specific, wrong reason that sends
 # whoever reads it looking for a project rename that never happened.
 #
-# stderr is deliberately NOT silenced. When this fails the operator needs docker's
-# own message ("permission denied", "Cannot connect to the Docker daemon"), and
-# under cron that is the only place it can come from.
+# stderr is deliberately NOT silenced: when this fails the operator needs docker's
+# own message ("permission denied", "Cannot connect to the Docker daemon"), which
+# no error string reconstructed here can substitute for.
+#
+# Do NOT read that as "whoever runs this will see it". This script emits; it cannot
+# make anyone listen. Whether stderr reaches a human is a property of the CALLER --
+# a terminal, a CI job log, a cron entry's redirection -- and this script has no way
+# to check which it got. Deployment-side, that guarantee has been broken before.
+# docs/BACKUP.md "Nightly run has no failure signal" carries the current measurement;
+# it is dated there rather than asserted here, because it describes the environment
+# and will change the day someone fixes it.
 docker_volume_inventory() {
   local ids out
   INVENTORY_VOLUMES=""
