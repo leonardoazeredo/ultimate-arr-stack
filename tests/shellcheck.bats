@@ -39,7 +39,12 @@ shell_files() {
             *.sh) echo "$f"; continue ;;
             *.bats|*.md|*.yml|*.yaml|*.json) continue ;;
         esac
-        if head -c 64 "$REPO_ROOT/$f" | head -1 | grep -qE '^#!.*(bash|/sh)'; then
+        # Match the interpreter WORD, not a path fragment. The first version
+        # was '^#!.*(bash|/sh)', which misses `#!/usr/bin/env sh` entirely --
+        # no `/sh` substring, no `bash` -- so such a file would be silently
+        # uncovered. The \b keeps `#!/usr/bin/env fish` and `.../python` out.
+        if head -c 64 "$REPO_ROOT/$f" | head -1 \
+           | grep -qE '^#!.*\b(ba|da|k|z)?sh([[:space:]]|$)'; then
             echo "$f"
         fi
     done < <(git -C "$REPO_ROOT" ls-files)
@@ -54,11 +59,24 @@ shell_files() {
 
     # A file list that came back empty would make this pass while checking
     # nothing -- the exact failure this rewrite exists to remove.
+    # 10 is a floor, not a count: scripts/lib/ alone holds a dozen check-*.sh,
+    # so any real state of this repo is far above it and a result below it means
+    # the discovery broke rather than that the scripts went away. Deliberately
+    # not pinned to an exact number -- that is how the old "14 tests" claim in
+    # CLAUDE.md went stale.
     [ "${#files[@]}" -gt 10 ] || fail "only ${#files[@]} shell scripts found; the discovery is broken, not the repo"
 
     if command -v shellcheck >/dev/null 2>&1; then
         run shellcheck -S error -- "${files[@]}"
     elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+        # Check the image is actually present before running it. Without this,
+        # an offline host or a registry hiccup makes this test FAIL with a pull
+        # error -- a red suite for a reason that has nothing to do with the
+        # code, which this repo has already been bitten by once in CI.
+        if ! docker image inspect koalaman/shellcheck:stable >/dev/null 2>&1 \
+           && ! docker pull -q koalaman/shellcheck:stable >/dev/null 2>&1; then
+            skip "shellcheck image is not available locally and cannot be pulled"
+        fi
         run docker run --rm -v "$REPO_ROOT:/mnt" -w /mnt \
             koalaman/shellcheck:stable -S error -- "${files[@]}"
     else

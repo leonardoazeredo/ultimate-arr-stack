@@ -72,6 +72,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NAS_STACK_DIR="$(dirname "$SCRIPT_DIR")"
 
 # Ensure critical services are running on ANY exit (normal, error, or interrupt)
+#
+# 120s: a measured full-stack `compose up -d` on this NAS settles in ~50s (see
+# the gluetun recreate timings in docs/TROUBLESHOOTING.md), so this is roughly
+# 2x headroom. It is an operator knob, not a test hook -- a NAS under heavy
+# array load can legitimately need longer, and raising it is the right response
+# to a TIMED OUT message rather than removing the bound.
 SAFETY_TIMEOUT="${SAFETY_TIMEOUT:-120}"
 ensure_services_running() {
   COMPOSE_FILE="$NAS_STACK_DIR/docker-compose.arr-stack.yml"
@@ -106,6 +112,19 @@ ensure_services_running() {
         echo "SAFETY: FAILED (exit $rc) restarting:$STOPPED" >&2
       fi
       echo "SAFETY: these services are still down - restart them by hand." >&2
+      # stderr alone is not a signal here. This runs from the EXIT trap of a
+      # script whose main caller is a root crontab that currently redirects
+      # nowhere, so the message would go straight to /dev/null on exactly the
+      # unattended run where it matters most. notify_failure is the channel
+      # every other failure in this script uses, and it is safe to call from a
+      # trap: bounded at `curl -m 10` and swallowed with `|| true`.
+      notify_failure "Backup finished but could not restart:$STOPPED"
+      # Returns 0 deliberately, and this is load-bearing. cleanup_on_exit calls
+      # this as `ensure_services_running || true` because under `set -e` a
+      # non-zero return here ABORTS the handler and BECOMES the script's exit
+      # status -- a fully successful backup exited 42 when this returned 42,
+      # which makes a `backup && prune` cron chain skip pruning for good. The
+      # alert above is the signal; the exit status is not, and must not be.
       return 0
     fi
   fi
@@ -126,7 +145,7 @@ cleanup_on_exit() {
   # it would delete that destination. BACKUP_DIR used to be reassigned to the
   # staging path further down, so which of the two meanings this trap would have
   # deleted depended on how far the run had got before it died -- see
-  # STAGING_PATH below, where the two roles were finally given two names.
+  # STAGING_CANDIDATE below, where the two roles were finally given two names.
   #
   # Only when --tar was given: without it the staging directory IS the backup.
   # Note this removes the staging DIRECTORY only, never $TARBALL -- when the move
@@ -544,7 +563,7 @@ resolve_volume() {
 # the destination. Keeping a variable whose meaning changes halfway down a
 # 900-line script, one line away from an `rm -rf`, is not worth the diff it saves.
 FINAL_DEST="${BACKUP_DIR:-}"
-STAGING_PATH="/tmp/arr-stack-backup-${RUN_TS}"
+STAGING_CANDIDATE="/tmp/arr-stack-backup-${RUN_TS}"
 
 create_staging_dir() {
   # Plain mkdir, not -p: it fails if the directory exists, which is the cheapest
@@ -567,13 +586,13 @@ create_staging_dir() {
   return 1
 }
 
-create_staging_dir "$STAGING_PATH" || exit 1
+create_staging_dir "$STAGING_CANDIDATE" || exit 1
 
 # Arm the EXIT trap's cleanup only now that the directory really exists. Set after
 # the guard, never before: on the collision branch the directory belongs to
 # ANOTHER RUNNING BACKUP, and arming beforehand would make this run delete the
 # staging copy out from under it.
-STAGING_DIR="$STAGING_PATH"
+STAGING_DIR="$STAGING_CANDIDATE"
 
 # Flat rotation at the final destination. OPT-IN ONLY (--rotate-days) and always
 # loud, because this directory may already be owned by backup-prune.sh's GFS

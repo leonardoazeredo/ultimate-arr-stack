@@ -245,8 +245,13 @@ setup() {
 load_create_staging_dir() {
     local body
     body=$(awk -v s="create_staging_dir() {" 'index($0, s) == 1, /^\}$/' "$BACKUP_SH")
-    grep -q 'return 1' <<<"$body" || {
-        echo "extraction of create_staging_dir() is TRUNCATED:"
+    # Anchored on BOTH branches, not just `return 1`. The awk range ends at the
+    # first line-start `}`, so a truncation that happened to keep one early
+    # `return 1` would still eval cleanly and silently test less than it claims.
+    grep -q 'another backup may be running' <<<"$body" \
+        && grep -q 'could not create staging dir' <<<"$body" || {
+        echo "extraction of create_staging_dir() is TRUNCATED -- it does not"
+        echo "reach both failure branches, so these tests cover less than they claim:"
         echo "$body"
         return 1
     }
@@ -476,8 +481,8 @@ load_cleanup() {
     # which means ANOTHER RUN owns it. Arming the trap before that guard would make
     # this run delete a concurrent run's staging copy on its way out.
     local mkdir_ln arm_ln
-    mkdir_ln=$(grep -n '^create_staging_dir "\$STAGING_PATH"' "$BACKUP_SH" | cut -d: -f1)
-    arm_ln=$(grep -n '^STAGING_DIR="\$STAGING_PATH"' "$BACKUP_SH" | cut -d: -f1)
+    mkdir_ln=$(grep -n '^create_staging_dir "\$STAGING_CANDIDATE"' "$BACKUP_SH" | cut -d: -f1)
+    arm_ln=$(grep -n '^STAGING_DIR="\$STAGING_CANDIDATE"' "$BACKUP_SH" | cut -d: -f1)
     [ -n "$mkdir_ln" ] || { echo "could not find the mkdir guard"; return 1; }
     [ -n "$arm_ln" ] || { echo "could not find the STAGING_DIR assignment"; return 1; }
     [ "$arm_ln" -gt "$mkdir_ln" ] || {
@@ -655,6 +660,9 @@ load_cleanup() {
     printf '#!/bin/sh\ncase "$1" in ps) exit 0 ;; *) sleep 60 ;; esac\n' > "$bin/docker"
     chmod +x "$bin/docker"
 
+    command -v timeout >/dev/null 2>&1 \
+        || skip "no timeout binary on this host - arr-backup.sh's bound needs one too"
+
     local script="$BATS_TEST_TMPDIR/hang.sh"
     {
         echo 'set -uo pipefail'
@@ -695,6 +703,11 @@ load_cleanup() {
         echo 'set -uo pipefail'
         echo 'NAS_STACK_DIR="'"$BATS_TEST_TMPDIR"'"'
         echo 'SAFETY_TIMEOUT=10'
+        # Stubbed rather than left undefined: without this the extracted
+        # function hits "notify_failure: command not found", which under this
+        # script's `set -uo pipefail` does not stop anything -- the test would
+        # still pass while the alert path was broken.
+        echo 'notify_failure() { echo "NOTIFIED: $1"; }'
         awk -v s="ensure_services_running() {" 'index($0, s) == 1, /^\}$/' "$BACKUP_SH"
         echo 'ensure_services_running'
     } > "$script"
@@ -708,6 +721,13 @@ load_cleanup() {
     }
     [[ "$output" == *"compose exploded"* ]] || {
         echo "docker's own stderr was discarded: $output"
+        return 1
+    }
+    # stderr alone is not a signal from a cron job that redirects nowhere. The
+    # failure has to reach the same alert channel every other failure uses.
+    [[ "$output" == *"NOTIFIED:"* ]] || {
+        echo "a failed restart raised no alert - stderr is all it produced,"
+        echo "and the 04:00 cron run discards that: $output"
         return 1
     }
 }

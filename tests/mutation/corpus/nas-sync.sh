@@ -120,3 +120,10 @@ mutation runner-vanished-backup-is-silent \
   --test "vanished backup is fatal" \
   --why "a backup that disappeared is treated as nothing-to-restore, so the mutated file stays in the tree unreported" \
   --apply 'sed -i "s@^    if \[\[ ! -f \"\$CURRENT_BACKUP\" \]\]; then\$@    if false; then@" "$F"'
+
+mutation runner-backup-name-gains-an-underscore \
+  --file tests/mutation/run-mutations.sh \
+  --bats tests/mutation-framework.bats \
+  --test "vanished backup is fatal" \
+  --why "echo appends a newline that tr turns into a trailing underscore, so every backup is silently named <id>_.orig and nothing that looks it up by name finds it" \
+  --apply 'sed -i "s@backup=\"\$WORK/\$(printf .%s. \"\$id\" | tr@backup=\"\$WORK/\$(echo \"\$id\" | tr@" "$F"'

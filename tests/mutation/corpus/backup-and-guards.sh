@@ -142,3 +142,10 @@ mutation backup-staging-dir-never-created \
   --test "actually creates the directory" \
   --why "create_staging_dir returns success without creating anything, so every later write lands nowhere" \
   --apply 'sed -i "s@^  if err=\"\$(mkdir \"\$1\" 2>&1)\"; then@  if err=\"\"; then@" "$F"'
+
+mutation backup-safety-restart-no-alert \
+  --file scripts/arr-backup.sh \
+  --bats tests/backup-retention.bats \
+  --test "failed service restart is reported" \
+  --why "a failed restart produces stderr only, which the 04:00 cron run discards, so the VPN stays down with no signal anywhere" \
+  --apply 'sed -i "s@^      notify_failure \"Backup finished but could not restart@      : notify_failure \"Backup finished but could not restart@" "$F"'
