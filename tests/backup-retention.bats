@@ -416,37 +416,61 @@ load_cleanup() {
     }
 }
 
-@test "cleanup waits for the copy client before removing the staging dir" {
-    # `docker rm -f` alone does NOT make the teardown safe, and the test above is
-    # therefore only half the guarantee. Measured on the NAS 2026-08-31: a SIGTERM
-    # landing between the `docker run` client's create request and the daemon acting
-    # on it left the rm -f matching nothing, the staging rm succeeding, and the
-    # daemon then creating the container anyway -- re-making the bind-mount host
-    # directory root-owned and copying a volume into it, after cleanup had already
-    # printed "Cleaned up staging dir".
+@test "an interrupt is deferred until the in-flight volume copy finishes" {
+    # This is the assertion the whole staging-leak fix rests on, and it is
+    # behavioural on purpose: it extracts the real trap lines from the script and
+    # proves an interrupt is DEFERRED, rather than grepping for a trap and assuming
+    # what it does.
     #
-    # The `wait` is the barrier that closes it: once the client has exited, nothing
-    # is left that can re-create the directory. It must sit AFTER the rm -f (which
-    # bounds how long it blocks) and BEFORE the staging rm (which is what it
-    # protects). Asserting only that a `wait` exists somewhere would not catch it
-    # being moved past the rm, which is the failure mode.
-    local kill_ln wait_ln rm_ln
-    kill_ln=$(grep -n 'docker rm -f arr-backup-worker' "$BACKUP_SH" | head -1 | cut -d: -f1)
-    wait_ln=$(grep -n '^ *wait 2>/dev/null' "$BACKUP_SH" | head -1 | cut -d: -f1)
-    rm_ln=$(grep -n 'rm -rf "\$STAGING_DIR"' "$BACKUP_SH" | head -1 | cut -d: -f1)
-    [ -n "$wait_ln" ] || {
-        echo "no 'wait' barrier in the exit handler -- an orphaned copy container"
-        echo "can re-create the staging dir after it is removed"
+    # Without these traps bash dies the instant SIGTERM arrives, while the copy
+    # container is still being created. The daemon then re-makes the staging
+    # directory root-owned after cleanup removed it. Measured on the NAS twice --
+    # once with no teardown at all, once with a `docker rm -f` that raced and lost.
+    local body traps
+    body=$(awk -v s="on_interrupt() {" 'index($0, s) == 1, /^\}$/' "$BACKUP_SH")
+    [[ -n "$body" ]] || { echo "no on_interrupt() in $BACKUP_SH -- renamed?"; return 1; }
+    traps=$(grep -E "^trap 'on_interrupt [0-9]+' (TERM|INT)$" "$BACKUP_SH")
+    grep -q "TERM$" <<<"$traps" || {
+        echo "SIGTERM is not trapped: an interrupt will kill the shell mid-copy and"
+        echo "the orphaned container will re-create the staging dir after cleanup"
         return 1
     }
-    [ -n "$kill_ln" ] && [ -n "$rm_ln" ] || { echo "could not locate rm -f / staging rm"; return 1; }
-    [ "$kill_ln" -lt "$wait_ln" ] || {
-        echo "wait at line $wait_ln runs BEFORE the rm -f at $kill_ln - it would block"
-        echo "for a full volume copy instead of a killed container"
+    grep -q "INT$" <<<"$traps" || { echo "SIGINT is not trapped (Ctrl-C leaks the same way)"; return 1; }
+
+    # Same trap lines, standing in front of a 3s "copy". Killed at 1s: a deferring
+    # trap exits at ~3s, a missing one at ~1s.
+    local tmp; tmp=$(mktemp -d)
+    { echo "$body"; echo "$traps"; echo 'sleep 3'; } > "$tmp/deferral.sh"
+    local start=$SECONDS
+    bash "$tmp/deferral.sh" >/dev/null 2>&1 &
+    local pid=$!
+    sleep 1
+    kill -TERM "$pid" 2>/dev/null
+    # `|| rc=$?` because bats runs under `set -e` and a non-zero wait would abort
+    # the test before the assertions -- which is exactly the status we want to read.
+    local rc=0
+    wait "$pid" 2>/dev/null || rc=$?
+    local elapsed=$(( SECONDS - start ))
+    rm -rf "$tmp"
+    [ "$elapsed" -ge 3 ] || {
+        echo "died ${elapsed}s in, before the 3s 'copy' returned - the interrupt was"
+        echo "NOT deferred, so cleanup would race a still-running copy container"
         return 1
     }
-    [ "$wait_ln" -lt "$rm_ln" ] || {
-        echo "wait at line $wait_ln runs AFTER the staging rm at $rm_ln - the rm is unprotected"
+    [ "$rc" -eq 143 ] || { echo "expected exit 143 (128+SIGTERM), got $rc"; return 1; }
+}
+
+@test "the interrupt traps are installed before any copy container is started" {
+    # A trap installed after the loop it protects is not a trap. The copy container
+    # is the only thing that can re-create the staging directory, so the deferral
+    # must already be in place before the first one can be launched.
+    local trap_ln run_ln
+    trap_ln=$(grep -n "^trap 'on_interrupt [0-9]\+' TERM$" "$BACKUP_SH" | head -1 | cut -d: -f1)
+    run_ln=$(grep -n 'docker run --rm --name arr-backup-worker' "$BACKUP_SH" | head -1 | cut -d: -f1)
+    [ -n "$trap_ln" ] || { echo "no SIGTERM trap in $BACKUP_SH"; return 1; }
+    [ -n "$run_ln" ] || { echo "could not find the copy container launch"; return 1; }
+    [ "$trap_ln" -lt "$run_ln" ] || {
+        echo "SIGTERM trap at line $trap_ln is installed AFTER the copy container at $run_ln"
         return 1
     }
 }

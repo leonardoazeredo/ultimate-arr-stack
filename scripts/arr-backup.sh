@@ -114,8 +114,7 @@ cleanup_on_exit() {
   # Defaulted expansions because this trap is installed before those variables
   # are initialised, and `set -u` would otherwise turn an early failure into a
   # confusing unbound-variable error inside the handler.
-  # Stop the copy container FIRST, then WAIT for its client to exit. Both halves
-  # are needed, and neither is optional.
+  # Stop any copy container still carrying this run's staging dir as a bind mount.
   #
   # Killing this script kills neither the `docker run` client it is blocked on nor
   # the container the DAEMON runs on that client's behalf. Measured on the NAS
@@ -128,19 +127,21 @@ cleanup_on_exit() {
   # account that runs the backup, which is the exact harm this cleanup exists to
   # prevent.
   #
-  # `wait` closes that race deterministically instead of probabilistically: once
-  # the client has exited, the container has either been created, run and released
-  # its mount, or will never exist -- so nothing survives that can re-create the
-  # directory after the rm. It is bounded by one volume copy, and the `rm -f` above
-  # is what keeps that bound short. The script starts no background jobs, so `wait`
-  # can only ever be waiting on that client.
+  # What actually closes that race is the TERM/INT trap installed above this
+  # function, not anything here: with it, an interrupt cannot land mid-copy at all,
+  # because bash defers the handler until the in-flight `docker run` has returned.
+  # By the time this cleanup runs there is no container left to re-create anything.
+  # `wait` was tried here first and does NOT work -- bash does not treat a
+  # foreground child interrupted by a signal as waitable, so it returned instantly
+  # and the husk reappeared exactly as before. Measured on the NAS, both ways.
   #
-  # Gated on STAGING_DIR so only a run that actually owns the staging directory can
-  # kill the worker. `|| true` on both because the container is already gone on every
-  # normal exit (it runs with --rm), and an error here must not abort this handler.
+  # The `rm -f` stays as belt-and-braces for the paths the signal trap does not
+  # cover (a worker left behind by an earlier killed run, or SIGKILL). Gated on
+  # STAGING_DIR so only a run that actually owns the staging directory can kill the
+  # worker; `|| true` because the container is already gone on every normal exit
+  # (it runs with --rm), and an error here must not abort this handler.
   if [ -n "${STAGING_DIR:-}" ]; then
     docker rm -f arr-backup-worker >/dev/null 2>&1 || true
-    wait 2>/dev/null || true
   fi
 
   if [ "${CREATE_TAR:-false}" = true ] && [ -n "${STAGING_DIR:-}" ] && [ -d "${STAGING_DIR}" ]; then
@@ -168,6 +169,31 @@ cleanup_on_exit() {
   ensure_services_running || true
 }
 trap 'cleanup_on_exit' EXIT
+
+# Deferral, not interrupt handling -- and the deferral is the entire point.
+#
+# Without a trap on these signals, bash dies the instant one arrives, WHILE the
+# `docker run` copy container it launched is still in flight. Neither the client nor
+# the daemon dies with it, so the cleanup above raced a container that was still
+# being created and lost: it removed the staging directory, and the daemon re-made
+# it root-owned moments later. Measured on the NAS 2026-08-31, twice.
+#
+# With a trap installed, bash will not run the handler while it is waiting on a
+# foreground command -- it runs it once that command returns. So the in-flight
+# volume copy always completes first, and cleanup_on_exit then runs with nothing
+# left that can re-create what it removes. The cost is bounded by a single volume
+# copy; the alternative is a guaranteed leak of RAM-backed /tmp on every interrupt.
+#
+# Distinct codes rather than one handler: 128+SIGNUM is what a shell killed by that
+# signal would have reported, and cron/systemd read it.
+on_interrupt() {
+  echo "" >&2
+  echo "Interrupted - the in-flight volume copy was allowed to finish so the" >&2
+  echo "staging directory could be cleaned up." >&2
+  exit "$1"
+}
+trap 'on_interrupt 143' TERM
+trap 'on_interrupt 130' INT
 
 # Find USB backup directory dynamically (device letters change on reboot)
 # Searches /mnt/@usb/sd*/ for a subdirectory matching the given name,
