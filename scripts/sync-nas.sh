@@ -39,22 +39,69 @@ NAS_SYNC_PATH="${NAS_SYNC_PATH:-/volume1/docker/arr-stack}"
 
 cd "$(git rev-parse --show-toplevel)"
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+LOCAL_SHA="$(git rev-parse HEAD)"
 
+# Reachability: a FAILURE, not a skip.
+#
+# This used to `exit 0` here. That made "the NAS is unreachable" and "the NAS
+# is synced" the same observable outcome, and the post-merge hook -- which is
+# the only automatic caller -- printed nothing either way. Exiting non-zero is
+# safe for that caller: it explicitly tolerates a failure and says so out loud.
 if ! ssh -o ConnectTimeout=5 -o BatchMode=yes "$NAS_SYNC_HOST" true 2>/dev/null; then
-    echo "sync-nas: ${NAS_SYNC_HOST} unreachable — skipping NAS sync" >&2
-    exit 0
+    echo "sync-nas: ${NAS_SYNC_HOST} unreachable - NAS NOT synced" >&2
+    exit 1
 fi
 
-echo "sync-nas: syncing ${BRANCH} on ${NAS_SYNC_HOST}:${NAS_SYNC_PATH} ..."
+# The NAS pulls from origin, so origin -- not the local repo -- decides what it
+# can reach. A local commit that has not been pushed is invisible to it, and the
+# remote pull then succeeds with "Already up to date." while leaving the NAS on
+# the old commit. Measured 2026-08-31: local at 90e72c4, NAS at 93c8ed4, this
+# script printed "done." and exited 0. Compare against the remote ref before
+# doing anything, so the impossible case fails before it can look like success.
+REMOTE_SHA="$(GIT_TERMINAL_PROMPT=0 timeout 20 git ls-remote origin "refs/heads/${BRANCH}" 2>/dev/null | awk '{print $1}')"
+if [[ -z "$REMOTE_SHA" ]]; then
+    echo "sync-nas: origin has no branch '${BRANCH}' - push it first, the NAS pulls from origin" >&2
+    exit 1
+fi
+if [[ "$REMOTE_SHA" != "$LOCAL_SHA" ]]; then
+    echo "sync-nas: local ${BRANCH} (${LOCAL_SHA:0:7}) != origin/${BRANCH} (${REMOTE_SHA:0:7})" >&2
+    echo "sync-nas: the NAS can only reach what origin has - NAS NOT synced" >&2
+    echo "sync-nas: push (or pull) so the two agree, then re-run this script" >&2
+    exit 1
+fi
+
+echo "sync-nas: syncing ${BRANCH} (${LOCAL_SHA:0:7}) on ${NAS_SYNC_HOST}:${NAS_SYNC_PATH} ..."
 
 ARRGIT="docker run --rm -v '${NAS_SYNC_PATH}:/repo' -w /repo alpine/git -c safe.directory=/repo"
-ssh "$NAS_SYNC_HOST" "
+
+# Every ssh below carries an explicit ConnectTimeout. The probe above proves the
+# NAS answered a moment ago, not that it still will: a NAS that stops answering
+# between the probe and here parks a bare `ssh` on the OS-default TCP connect
+# timeout for ~2 minutes. This project has already paid for that once -- a CI
+# step sat there before anyone realised the connection was never being made --
+# and it is worse in a git hook, which holds up the merge that invoked it.
+SSH_OPTS=(-o ConnectTimeout=15 -o BatchMode=yes)
+
+ssh "${SSH_OPTS[@]}" "$NAS_SYNC_HOST" "
     ${ARRGIT} fetch origin '${BRANCH}' &&
     ${ARRGIT} checkout '${BRANCH}' &&
     ${ARRGIT} pull --ff-only origin '${BRANCH}'
 "
 
-echo "sync-nas: done."
-echo "sync-nas: note — this only pulled files. If any compose/service file"
+# Verify the OUTCOME, not the exit status of the commands that were supposed to
+# produce it. Every silent-success bug this script has had shared one shape: a
+# step reported OK and nobody asked the NAS what it was actually holding. Ask.
+NAS_STATE="$(ssh "${SSH_OPTS[@]}" "$NAS_SYNC_HOST" "${ARRGIT} rev-parse HEAD && ${ARRGIT} rev-parse --abbrev-ref HEAD" 2>/dev/null || true)"
+NAS_SHA="$(sed -n 1p <<<"$NAS_STATE")"
+NAS_BRANCH="$(sed -n 2p <<<"$NAS_STATE")"
+if [[ "$NAS_SHA" != "$LOCAL_SHA" || "$NAS_BRANCH" != "$BRANCH" ]]; then
+    echo "sync-nas: VERIFICATION FAILED - the NAS did not reach the intended commit" >&2
+    echo "sync-nas:   wanted ${BRANCH} @ ${LOCAL_SHA}" >&2
+    echo "sync-nas:   got    ${NAS_BRANCH:-<none>} @ ${NAS_SHA:-<none>}" >&2
+    exit 1
+fi
+
+echo "sync-nas: verified ${NAS_SYNC_HOST} is on ${BRANCH} @ ${NAS_SHA:0:7}."
+echo "sync-nas: note - this only pulled files. If any compose/service file"
 echo "          changed, recreate the affected service manually via its own"
 echo "          compose file (see CLAUDE.md)."

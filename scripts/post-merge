@@ -1,17 +1,80 @@
 #!/bin/bash
-# post-merge hook: auto-syncs tracked files to the NAS whenever a local
-# merge/pull lands new commits on `main`. See scripts/sync-nas.sh for why
-# this exists (NAS has no git) and what it does/doesn't do. No-op on any
-# branch other than main, and non-fatal if the NAS is unreachable — this
-# must never block or fail a merge.
+# post-merge hook: after a local merge lands on `main`, get that commit onto
+# the NAS. See scripts/sync-nas.sh for why the NAS pulls rather than receives.
+#
+# Never blocks or fails the merge -- it always exits 0 -- but it is LOUD about
+# anything it could not do. A hook that reports nothing is indistinguishable
+# from a hook that is not installed, which is the bug this file used to have.
+set -uo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
-
-[[ -z "$REPO_ROOT" ]] && exit 0
+# --- Resolve the repo root ------------------------------------------------
+#
+# Git invokes hooks with the working directory at the top of the work tree, so
+# a plain `git rev-parse --show-toplevel` is the primary route.
+#
+# The obvious-looking alternative -- deriving it from ${BASH_SOURCE[0]} -- is
+# what silently broke this hook for its entire life, measured 2026-08-31: git
+# invokes the hook by its path inside the git dir (.git/hooks/post-merge), bash
+# does NOT resolve that symlink, so `dirname` yields `.git/hooks`, and
+# `git -C .git/hooks rev-parse --show-toplevel` fatals with "this operation
+# must be run in a work tree". That error was swallowed by `|| true`, the empty
+# result hit an `exit 0` guard meant for "not a git repo", and every merge
+# reported success while syncing nothing. The lesson is in the ordering below:
+# ask git where the work tree is, and only fall back to path arithmetic --
+# resolved THROUGH the symlink, so it lands in scripts/ and not .git/hooks/.
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -z "$REPO_ROOT" ]]; then
+    resolved="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || true)"
+    if [[ -n "$resolved" ]]; then
+        REPO_ROOT="$(git -C "$(dirname "$resolved")" rev-parse --show-toplevel 2>/dev/null || true)"
+    fi
+fi
+if [[ -z "$REPO_ROOT" ]]; then
+    # Loud, not silent. The previous version exited 0 here without a word,
+    # which is exactly why nobody noticed the hook had never run.
+    echo "post-merge: cannot determine the repo root - NAS NOT synced" >&2
+    exit 0
+fi
 
 BRANCH="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
 [[ "$BRANCH" != "main" ]] && exit 0
 
-"$REPO_ROOT/scripts/sync-nas.sh" || echo "post-merge: NAS sync failed (non-fatal)" >&2
+LOCAL="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo "")"
+REMOTE="$(git -C "$REPO_ROOT" rev-parse "origin/$BRANCH" 2>/dev/null || echo "")"
+
+if [[ "$LOCAL" != "$REMOTE" ]]; then
+    # The NAS pulls from origin, so it cannot reach a commit origin does not
+    # have. This hook runs DURING `git merge`, before any push -- so on a local
+    # merge this branch is always taken. Pushing here is what closes the loop;
+    # the alternative is printing a reminder and leaving the NAS on the old
+    # commit until someone acts on it, which is the divergence that cost 38
+    # hours once already.
+    #
+    # Guards, in order of what they prevent:
+    #   - a dirty tree means the merge is not actually finished; publishing it
+    #     would push something the working copy disagrees with;
+    #   - a non-fast-forward means origin moved (a `gh pr merge`, say) and this
+    #     push would either be rejected or need force. Never force from a hook.
+    if ! git -C "$REPO_ROOT" diff --quiet || ! git -C "$REPO_ROOT" diff --cached --quiet; then
+        echo "post-merge: working tree is dirty - NOT pushing, NAS NOT synced" >&2
+        echo "post-merge: commit or stash, then: git push origin $BRANCH && ./scripts/sync-nas.sh" >&2
+        exit 0
+    fi
+    if [[ -n "$REMOTE" ]] && ! git -C "$REPO_ROOT" merge-base --is-ancestor "$REMOTE" "$LOCAL"; then
+        echo "post-merge: $BRANCH has diverged from origin/$BRANCH - NOT pushing, NAS NOT synced" >&2
+        echo "post-merge: reconcile with origin first, then: ./scripts/sync-nas.sh" >&2
+        exit 0
+    fi
+    echo "post-merge: pushing $BRANCH to origin so the NAS can pull it ..."
+    if ! git -C "$REPO_ROOT" push origin "$BRANCH"; then
+        echo "post-merge: push FAILED - NAS NOT synced" >&2
+        echo "post-merge: fix the push, then: ./scripts/sync-nas.sh" >&2
+        exit 0
+    fi
+fi
+
+if ! "$REPO_ROOT/scripts/sync-nas.sh"; then
+    echo "post-merge: NAS sync FAILED (the merge itself is fine)" >&2
+    echo "post-merge: re-run manually: ./scripts/sync-nas.sh" >&2
+fi
 exit 0

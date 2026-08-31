@@ -239,14 +239,76 @@ setup() {
     assert_success
 }
 
-@test "arr-backup.sh refuses to reuse an existing staging dir" {
-    # Plain mkdir, not mkdir -p: two runs in the same second would otherwise
-    # interleave their staging files into one tarball.
-    run grep -nE '^mkdir "\$BACKUP_DIR"' "$BACKUP_SH"
-    assert_success
+# Extract create_staging_dir() and run it for real. The old version of this test
+# grepped for the literal line `mkdir "$BACKUP_DIR"`, which proved the string was
+# present and nothing about what it did on either branch.
+load_create_staging_dir() {
+    local body
+    body=$(awk -v s="create_staging_dir() {" 'index($0, s) == 1, /^\}$/' "$BACKUP_SH")
+    # Anchored on BOTH branches, not just `return 1`. The awk range ends at the
+    # first line-start `}`, so a truncation that happened to keep one early
+    # `return 1` would still eval cleanly and silently test less than it claims.
+    grep -q 'another backup may be running' <<<"$body" \
+        && grep -q 'could not create staging dir' <<<"$body" || {
+        echo "extraction of create_staging_dir() is TRUNCATED -- it does not"
+        echo "reach both failure branches, so these tests cover less than they claim:"
+        echo "$body"
+        return 1
+    }
+    eval "$body"
+}
 
-    run grep -nE '^mkdir -p "\$BACKUP_DIR"' "$BACKUP_SH"
+@test "create_staging_dir refuses to reuse an existing staging dir" {
+    # Plain mkdir, not mkdir -p: two runs landing in the same second would
+    # otherwise interleave their staging files into one tarball.
+    load_create_staging_dir
+    local dir="$BATS_TEST_TMPDIR/collide"
+    mkdir -p "$dir"
+
+    run create_staging_dir "$dir"
     assert_failure
+    [[ "$output" == *"another backup may be running"* ]] || {
+        echo "a collision must name the concurrent run: $output"
+        return 1
+    }
+}
+
+@test "create_staging_dir reports the REAL reason when it is not a collision" {
+    # Every non-collision failure -- read-only /tmp, no permission, missing
+    # parent -- used to print "already exists - another backup may be running",
+    # sending whoever read it hunting for a concurrent run that does not exist
+    # while mkdir's actual complaint went to /dev/null.
+    if [ "$(id -u)" -eq 0 ]; then
+        skip "root ignores directory permissions, so mkdir cannot be made to fail this way"
+    fi
+    load_create_staging_dir
+    local parent="$BATS_TEST_TMPDIR/locked"
+    mkdir -p "$parent"
+    chmod 500 "$parent"
+
+    run create_staging_dir "$parent/child"
+    chmod 700 "$parent"
+
+    assert_failure
+    [[ "$output" != *"another backup may be running"* ]] || {
+        echo "a permissions failure was reported as a collision: $output"
+        return 1
+    }
+    [[ "$output" == *"could not create staging dir"* && "$output" == *"ermission"* ]] || {
+        echo "mkdir's real reason was not surfaced: $output"
+        return 1
+    }
+}
+
+@test "create_staging_dir succeeds and actually creates the directory" {
+    # The refusals above would both pass against a function that never created
+    # anything. Assert the success path reaches the filesystem.
+    load_create_staging_dir
+    local dir="$BATS_TEST_TMPDIR/fresh"
+
+    run create_staging_dir "$dir"
+    assert_success
+    [ -d "$dir" ] || { echo "create_staging_dir returned 0 without creating $dir"; return 1; }
 }
 
 @test "rotation does not suppress find's errors" {
@@ -419,8 +481,8 @@ load_cleanup() {
     # which means ANOTHER RUN owns it. Arming the trap before that guard would make
     # this run delete a concurrent run's staging copy on its way out.
     local mkdir_ln arm_ln
-    mkdir_ln=$(grep -n '^mkdir "\$BACKUP_DIR"' "$BACKUP_SH" | cut -d: -f1)
-    arm_ln=$(grep -n '^STAGING_DIR="\$BACKUP_DIR"' "$BACKUP_SH" | cut -d: -f1)
+    mkdir_ln=$(grep -n '^create_staging_dir "\$STAGING_CANDIDATE"' "$BACKUP_SH" | cut -d: -f1)
+    arm_ln=$(grep -n '^STAGING_DIR="\$STAGING_CANDIDATE"' "$BACKUP_SH" | cut -d: -f1)
     [ -n "$mkdir_ln" ] || { echo "could not find the mkdir guard"; return 1; }
     [ -n "$arm_ln" ] || { echo "could not find the STAGING_DIR assignment"; return 1; }
     [ "$arm_ln" -gt "$mkdir_ln" ] || {
@@ -582,6 +644,90 @@ load_cleanup() {
     [ ! -d "$staging" ] || {
         echo "staging dir survived a failing worker teardown - the teardown aborted"
         echo "the handler under set -e before it reached the rm"
+        return 1
+    }
+}
+
+@test "ensure_services_running cannot hang the exit trap forever" {
+    # It is called FROM the EXIT trap. An unbounded `docker compose up -d` holds
+    # cleanup open for as long as docker takes, on a path whose entire job is to
+    # finish. `timeout` bounds it; SAFETY_TIMEOUT exists so this test can drive it.
+    #
+    # A real executable on PATH, not a shell function: `timeout` execs its
+    # argument, so a stubbed function would never be the thing it ran.
+    local bin="$BATS_TEST_TMPDIR/bin"
+    mkdir -p "$bin"
+    printf '#!/bin/sh\ncase "$1" in ps) exit 0 ;; *) sleep 60 ;; esac\n' > "$bin/docker"
+    chmod +x "$bin/docker"
+
+    command -v timeout >/dev/null 2>&1 \
+        || skip "no timeout binary on this host - arr-backup.sh's bound needs one too"
+
+    local script="$BATS_TEST_TMPDIR/hang.sh"
+    {
+        echo 'set -uo pipefail'
+        echo 'NAS_STACK_DIR="'"$BATS_TEST_TMPDIR"'"'
+        echo 'SAFETY_TIMEOUT=2'
+        awk -v s="ensure_services_running() {" 'index($0, s) == 1, /^\}$/' "$BACKUP_SH"
+        echo 'ensure_services_running'
+        echo 'echo RETURNED'
+    } > "$script"
+    : > "$BATS_TEST_TMPDIR/docker-compose.arr-stack.yml"
+
+    local start elapsed
+    start=$SECONDS
+    PATH="$bin:$PATH" run timeout 30 bash "$script"
+    elapsed=$((SECONDS - start))
+
+    [[ "$output" == *RETURNED* ]] || {
+        echo "ensure_services_running never returned (elapsed ${elapsed}s):"
+        echo "$output"
+        return 1
+    }
+    [ "$elapsed" -lt 20 ] || {
+        echo "it returned, but only after ${elapsed}s - the timeout is not bounding it"
+        return 1
+    }
+}
+
+@test "a failed service restart is reported, not swallowed" {
+    # `2>/dev/null` on that compose call meant a failure to restart gluetun left
+    # no trace anywhere: the backup reported success and the VPN stayed down.
+    local bin="$BATS_TEST_TMPDIR/bin2"
+    mkdir -p "$bin"
+    printf '#!/bin/sh\ncase "$1" in ps) exit 0 ;; *) echo "compose exploded" >&2; exit 7 ;; esac\n' > "$bin/docker"
+    chmod +x "$bin/docker"
+
+    local script="$BATS_TEST_TMPDIR/fail.sh"
+    {
+        echo 'set -uo pipefail'
+        echo 'NAS_STACK_DIR="'"$BATS_TEST_TMPDIR"'"'
+        echo 'SAFETY_TIMEOUT=10'
+        # Stubbed rather than left undefined: without this the extracted
+        # function hits "notify_failure: command not found", which under this
+        # script's `set -uo pipefail` does not stop anything -- the test would
+        # still pass while the alert path was broken.
+        echo 'notify_failure() { echo "NOTIFIED: $1"; }'
+        awk -v s="ensure_services_running() {" 'index($0, s) == 1, /^\}$/' "$BACKUP_SH"
+        echo 'ensure_services_running'
+    } > "$script"
+    : > "$BATS_TEST_TMPDIR/docker-compose.arr-stack.yml"
+
+    PATH="$bin:$PATH" run bash "$script"
+
+    [[ "$output" == *"FAILED (exit 7)"* ]] || {
+        echo "the compose failure was swallowed: $output"
+        return 1
+    }
+    [[ "$output" == *"compose exploded"* ]] || {
+        echo "docker's own stderr was discarded: $output"
+        return 1
+    }
+    # stderr alone is not a signal from a cron job that redirects nowhere. The
+    # failure has to reach the same alert channel every other failure uses.
+    [[ "$output" == *"NOTIFIED:"* ]] || {
+        echo "a failed restart raised no alert - stderr is all it produced,"
+        echo "and the 04:00 cron run discards that: $output"
         return 1
     }
 }
