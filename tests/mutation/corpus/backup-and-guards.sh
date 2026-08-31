@@ -105,3 +105,40 @@ mutation env-lan-subnet-is-a-list \
   --test "LAN_SUBNET is exactly one CIDR" \
   --why "the exact value that deleted the traefik-lan macvlan and took all 16 .lan hostnames down" \
   --apply 'sed -i "s@^LAN_SUBNET=.*@LAN_SUBNET=192.168.1.0/24,192.168.120.0/24@" "$F"'
+
+# --- the EXIT-trap safety net and the staging-dir guard ----------------------
+
+mutation backup-safety-restart-unbounded \
+  --file scripts/arr-backup.sh \
+  --bats tests/backup-retention.bats \
+  --test "cannot hang the exit trap forever" \
+  --why "the compose call in the EXIT trap becomes unbounded again, so cleanup hangs for as long as docker does on the one path whose whole job is to finish" \
+  --apply 'sed -i "s@^    timeout \"\$SAFETY_TIMEOUT\" docker compose@    docker compose@" "$F"'
+
+mutation backup-safety-restart-silent \
+  --file scripts/arr-backup.sh \
+  --bats tests/backup-retention.bats \
+  --test "failed service restart is reported" \
+  --why "a failure to restart gluetun leaves no trace anywhere and the backup still reports success" \
+  --apply 'sed -i "s@up -d \$STOPPED || rc=\$?@up -d \$STOPPED 2>/dev/null || rc=\$?@" "$F"'
+
+mutation backup-safety-restart-status-from-negation \
+  --file scripts/arr-backup.sh \
+  --bats tests/backup-retention.bats \
+  --test "failed service restart is reported" \
+  --why "the reported exit code comes from the negation rather than the command, so every failure prints 'exit 0'" \
+  --apply 'sed -i "s@^    timeout \"\$SAFETY_TIMEOUT\" docker compose -f \"\$COMPOSE_FILE\" up -d \$STOPPED || rc=\$?@    if ! timeout \"\$SAFETY_TIMEOUT\" docker compose -f \"\$COMPOSE_FILE\" up -d \$STOPPED; then rc=\$?; else rc=0; fi@" "$F"'
+
+mutation backup-mkdir-blames-a-collision \
+  --file scripts/arr-backup.sh \
+  --bats tests/backup-retention.bats \
+  --test "reports the REAL reason" \
+  --why "a read-only /tmp or a permissions error is reported as a concurrent backup, sending the reader after a run that does not exist" \
+  --apply 'sed -i "s@^  if \[ -d \"\$1\" \]; then\$@  if true; then@" "$F"'
+
+mutation backup-staging-dir-never-created \
+  --file scripts/arr-backup.sh \
+  --bats tests/backup-retention.bats \
+  --test "actually creates the directory" \
+  --why "create_staging_dir returns success without creating anything, so every later write lands nowhere" \
+  --apply 'sed -i "s@^  if err=\"\$(mkdir \"\$1\" 2>&1)\"; then@  if err=\"\"; then@" "$F"'

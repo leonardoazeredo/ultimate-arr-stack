@@ -72,6 +72,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NAS_STACK_DIR="$(dirname "$SCRIPT_DIR")"
 
 # Ensure critical services are running on ANY exit (normal, error, or interrupt)
+SAFETY_TIMEOUT="${SAFETY_TIMEOUT:-120}"
 ensure_services_running() {
   COMPOSE_FILE="$NAS_STACK_DIR/docker-compose.arr-stack.yml"
   [ -f "$COMPOSE_FILE" ] || return 0
@@ -88,7 +89,25 @@ ensure_services_running() {
   if [ -n "$STOPPED" ]; then
     echo ""
     echo "SAFETY: Ensuring services are running:$STOPPED"
-    docker compose -f "$COMPOSE_FILE" up -d $STOPPED 2>/dev/null
+    # Bounded, and loud. This runs from the EXIT trap, so an unbounded call holds
+    # cleanup open for as long as docker feels like taking -- and `2>/dev/null`
+    # meant a compose failure here left no trace at all: the backup would report
+    # success having silently failed to restart gluetun. The one thing that must
+    # NOT change is the `|| true` at the call site; see cleanup_on_exit.
+    # `rc=$?` inside `if ! cmd; then` reads the status of the NEGATION, which is
+    # always 0 -- the first version of this printed "FAILED (exit 0)". Capture it
+    # off the command itself.
+    local rc=0
+    timeout "$SAFETY_TIMEOUT" docker compose -f "$COMPOSE_FILE" up -d $STOPPED || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      if [ "$rc" -eq 124 ]; then
+        echo "SAFETY: TIMED OUT after ${SAFETY_TIMEOUT}s restarting:$STOPPED" >&2
+      else
+        echo "SAFETY: FAILED (exit $rc) restarting:$STOPPED" >&2
+      fi
+      echo "SAFETY: these services are still down - restart them by hand." >&2
+      return 0
+    fi
   fi
 }
 # Everything that must happen on ANY exit path -- normal, error, or interrupt.
@@ -102,10 +121,12 @@ cleanup_on_exit() {
   # each run stages ~220MB into it. Cleanup used to be inline on the happy path
   # only, so every FAILED run leaked a directory per run into RAM until reboot.
   #
-  # STAGING_DIR is deliberately a SEPARATE variable from BACKUP_DIR. BACKUP_DIR
-  # holds the user's DESTINATION until it is reassigned to the staging path
-  # further down; a trap on BACKUP_DIR would delete the destination directory
-  # if the run died before that reassignment.
+  # STAGING_DIR is deliberately a SEPARATE variable from BACKUP_DIR, and stays
+  # separate. BACKUP_DIR holds the user's DESTINATION; pointing this `rm -rf` at
+  # it would delete that destination. BACKUP_DIR used to be reassigned to the
+  # staging path further down, so which of the two meanings this trap would have
+  # deleted depended on how far the run had got before it died -- see
+  # STAGING_PATH below, where the two roles were finally given two names.
   #
   # Only when --tar was given: without it the staging directory IS the backup.
   # Note this removes the staging DIRECTORY only, never $TARBALL -- when the move
@@ -515,20 +536,44 @@ resolve_volume() {
 # Backup location handling:
 # - Always create backup in /tmp first (reliable space)
 # - If destination specified and different from /tmp, move tarball there after checking space
+# Two roles, two names. Until now both lived in $BACKUP_DIR: it held the user's
+# destination, was reassigned to the /tmp staging path here, and everything
+# downstream -- including $TARBALL and the recursive `rm -rf` in the EXIT trap --
+# read whichever meaning happened to be current at that line. STAGING_DIR already
+# existed precisely because pointing the trap at $BACKUP_DIR would have deleted
+# the destination. Keeping a variable whose meaning changes halfway down a
+# 900-line script, one line away from an `rm -rf`, is not worth the diff it saves.
 FINAL_DEST="${BACKUP_DIR:-}"
-BACKUP_DIR="/tmp/arr-stack-backup-${RUN_TS}"
-# Plain mkdir, not -p: it fails if the directory exists, which is the cheapest
-# guard against two runs landing in the same second and interleaving their
-# staging files into one tarball.
-mkdir "$BACKUP_DIR" || {
-  echo "ERROR: $BACKUP_DIR already exists - another backup may be running" >&2
-  exit 1
+STAGING_PATH="/tmp/arr-stack-backup-${RUN_TS}"
+
+create_staging_dir() {
+  # Plain mkdir, not -p: it fails if the directory exists, which is the cheapest
+  # guard against two runs landing in the same second and interleaving their
+  # staging files into one tarball.
+  local err
+  if err="$(mkdir "$1" 2>&1)"; then
+    return 0
+  fi
+  if [ -d "$1" ]; then
+    echo "ERROR: $1 already exists - another backup may be running" >&2
+  else
+    # Every OTHER reason mkdir can fail -- a read-only or full /tmp, a
+    # permissions problem, a missing parent -- used to be reported as a
+    # collision too, sending whoever read it hunting for a concurrent run that
+    # does not exist while the real cause sat in the discarded stderr.
+    echo "ERROR: could not create staging dir $1" >&2
+    echo "ERROR:   ${err:-mkdir failed without a message}" >&2
+  fi
+  return 1
 }
+
+create_staging_dir "$STAGING_PATH" || exit 1
+
 # Arm the EXIT trap's cleanup only now that the directory really exists. Set after
-# the mkdir, never before: on the collision branch above the directory belongs to
+# the guard, never before: on the collision branch the directory belongs to
 # ANOTHER RUNNING BACKUP, and arming beforehand would make this run delete the
 # staging copy out from under it.
-STAGING_DIR="$BACKUP_DIR"
+STAGING_DIR="$STAGING_PATH"
 
 # Flat rotation at the final destination. OPT-IN ONLY (--rotate-days) and always
 # loud, because this directory may already be owned by backup-prune.sh's GFS
@@ -666,7 +711,7 @@ if [ -n "$VOLUME_PREFIX" ]; then
 else
   echo "Volumes:       resolved per-name across all compose projects"
 fi
-echo "Backup dir:    $BACKUP_DIR"
+echo "Staging dir:   $STAGING_DIR"
 echo ""
 
 BACKED_UP=0
@@ -678,8 +723,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${SCRIPT_DIR}/../.env"
 if [ -f "$ENV_FILE" ]; then
   echo -n "Backing up .env... "
-  if cp "$ENV_FILE" "$BACKUP_DIR/dot-env" 2>/dev/null; then
-    chmod 600 "$BACKUP_DIR/dot-env"
+  if cp "$ENV_FILE" "$STAGING_DIR/dot-env" 2>/dev/null; then
+    chmod 600 "$STAGING_DIR/dot-env"
     echo "OK"
     BACKED_UP=$((BACKED_UP + 1))
   else
@@ -696,7 +741,7 @@ STEP="backing up volumes"
 # suffix -> resolved volume name, written into the archive. Without it a restore
 # has to guess which project each directory came from, and the guess is wrong for
 # exactly the volumes this fix is about (uptime-kuma-data is NOT arr-stack_*).
-MANIFEST="$BACKUP_DIR/volume-manifest.tsv"
+MANIFEST="$STAGING_DIR/volume-manifest.tsv"
 printf 'directory\tsource_volume\n' > "$MANIFEST"
 
 for suffix in "${VOLUME_SUFFIXES[@]}"; do
@@ -739,12 +784,12 @@ for suffix in "${VOLUME_SUFFIXES[@]}"; do
 
     if docker run --rm --name arr-backup-worker \
       -v "$vol":/source:ro \
-      -v "$BACKUP_DIR":/backup \
+      -v "$STAGING_DIR":/backup \
       alpine sh -c "$COPY_CMD && chown -R $CURRENT_UID:$CURRENT_GID /backup/$suffix" 2>/dev/null; then
 
       # Check if anything was actually copied
-      if [ -d "$BACKUP_DIR/$suffix" ] && [ "$(ls -A "$BACKUP_DIR/$suffix" 2>/dev/null)" ]; then
-        SIZE=$(du -sh "$BACKUP_DIR/$suffix" 2>/dev/null | cut -f1)
+      if [ -d "$STAGING_DIR/$suffix" ] && [ "$(ls -A "$STAGING_DIR/$suffix" 2>/dev/null)" ]; then
+        SIZE=$(du -sh "$STAGING_DIR/$suffix" 2>/dev/null | cut -f1)
         echo "OK ($SIZE)"
         BACKED_UP=$((BACKED_UP + 1))
       else
@@ -770,7 +815,7 @@ done
 
 echo ""
 echo "Summary: $BACKED_UP backed up, $SKIPPED skipped, $FAILED failed"
-TOTAL_SIZE=$(du -sh "$BACKUP_DIR" 2>/dev/null | cut -f1)
+TOTAL_SIZE=$(du -sh "$STAGING_DIR" 2>/dev/null | cut -f1)
 echo "Total size: $TOTAL_SIZE"
 
 # Warn about failures
@@ -783,7 +828,7 @@ fi
 STEP="creating tarball"
 # Create tarball if requested
 if [ "$CREATE_TAR" = true ]; then
-  TARBALL="${BACKUP_DIR}.tar.gz"
+  TARBALL="${STAGING_DIR}.tar.gz"
   echo ""
   echo "Creating tarball..."
 
@@ -793,8 +838,8 @@ if [ "$CREATE_TAR" = true ]; then
   # Exclude socket files (qbittorrent ipc-socket) - they can't be archived
   tar -czf "$TARBALL" \
     --exclude='*/ipc-socket' \
-    -C "$(dirname "$BACKUP_DIR")" \
-    "$(basename "$BACKUP_DIR")" 2>/dev/null
+    -C "$(dirname "$STAGING_DIR")" \
+    "$(basename "$STAGING_DIR")" 2>/dev/null
 
   TARBALL_SIZE_BYTES=$(stat -f%z "$TARBALL" 2>/dev/null || stat -c%s "$TARBALL" 2>/dev/null)
   TARBALL_SIZE_MB=$(( TARBALL_SIZE_BYTES / 1024 / 1024 ))
