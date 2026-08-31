@@ -1,0 +1,92 @@
+# Mutations for the NAS sync path (scripts/post-merge, scripts/sync-nas.sh).
+#
+# Each entry reintroduces a defect that path has actually had, or a near
+# neighbour of one. `tests/hooks-installed.bats` passed for the hook's whole
+# life while it was inert; nothing here is trusted until it is watched failing.
+
+mutation hook-cannot-resolve-repo-root \
+  --file scripts/post-merge \
+  --bats tests/nas-sync.bats \
+  --test "post-merge actually runs the NAS sync" \
+  --why "the original bug: the hook could not work out its own repo root, so it exited 0 having synced nothing" \
+  --apply 'sed -i -e "s@^REPO_ROOT=\"\$(git rev-parse.*@REPO_ROOT=\"\"@" -e "s@^    resolved=.*@    resolved=\"\"@" "$F"'
+
+mutation hook-skips-the-push \
+  --file scripts/post-merge \
+  --bats tests/nas-sync.bats \
+  --test "post-merge pushes an unpushed main" \
+  --why "without the push, the merge commit never reaches origin and the NAS -- which pulls from origin -- can never see it" \
+  --apply 'sed -i "s@^    if ! git -C \"\$REPO_ROOT\" push origin.*@    if false; then@" "$F"'
+
+mutation hook-pushes-a-dirty-tree \
+  --file scripts/post-merge \
+  --bats tests/nas-sync.bats \
+  --test "refuses to push a dirty tree" \
+  --why "publishes a commit the working copy disagrees with, from a hook, with no chance to look at it first" \
+  --apply 'sed -i "s@^    if ! git -C \"\$REPO_ROOT\" diff --quiet.*@    if false; then@" "$F"'
+
+mutation hook-pushes-when-diverged \
+  --file scripts/post-merge \
+  --bats tests/nas-sync.bats \
+  --test "refuses to push when main has diverged" \
+  --why "a hook that pushes into a diverged branch either fails noisily or invites a force -- neither belongs in an automatic step" \
+  --apply 'sed -i "s@^    if \[\[ -n \"\$REMOTE\" \]\] && ! git -C.*@    if false; then@" "$F"'
+
+mutation hook-runs-off-main \
+  --file scripts/post-merge \
+  --bats tests/nas-sync.bats \
+  --test "silent and inert on a branch that is not main" \
+  --why "would push and deploy every feature branch merge, which is how the NAS ends up quietly running something that was never merged" \
+  --apply 'sed -i "s@^\[\[ \"\$BRANCH\" != \"main\" \]\] && exit 0@:@" "$F"'
+
+mutation hook-swallows-sync-failure \
+  --file scripts/post-merge \
+  --bats tests/nas-sync.bats \
+  --test "reports a failed sync" \
+  --why "a failed sync that prints nothing is indistinguishable from a successful one -- the defect class this whole branch exists to remove" \
+  --apply 'sed -i "s@^if ! \"\$REPO_ROOT/scripts/sync-nas.sh\"; then@if \"\$REPO_ROOT/scripts/sync-nas.sh\"; then@" "$F"'
+
+mutation sync-exits-0-when-unreachable \
+  --file scripts/sync-nas.sh \
+  --bats tests/nas-sync.bats \
+  --test "fails when the NAS is unreachable" \
+  --why "the original behaviour: an unreachable NAS and a synced NAS produced the same exit status and the same silence" \
+  --apply 'sed -i "/unreachable - NAS NOT synced/{n;s@exit 1@exit 0@;}" "$F"'
+
+mutation sync-ignores-origin-mismatch \
+  --file scripts/sync-nas.sh \
+  --bats tests/nas-sync.bats \
+  --test "refuses when the local commit is not on origin" \
+  --why "the measured failure: local at 90e72c4, NAS at 93c8ed4, output \"Already up to date.\" and exit 0" \
+  --apply 'sed -i "s@^if \[\[ \"\$REMOTE_SHA\" != \"\$LOCAL_SHA\" \]\]; then@if false; then@" "$F"'
+
+mutation sync-ignores-missing-remote-branch \
+  --file scripts/sync-nas.sh \
+  --bats tests/nas-sync.bats \
+  --test "refuses a branch origin has never seen" \
+  --why "an unpushed feature branch would be reported as deployed" \
+  --apply 'sed -i "s@^if \[\[ -z \"\$REMOTE_SHA\" \]\]; then@if false; then@" "$F"'
+
+mutation sync-skips-verification-commit \
+  --file scripts/sync-nas.sh \
+  --bats tests/nas-sync.bats \
+  --test "fails when the NAS ends up on the wrong commit" \
+  --why "trusts the exit status of the commands that were supposed to produce the outcome, instead of asking the NAS what it holds" \
+  --apply 'sed -i "s@^if \[\[ \"\$NAS_SHA\" != \"\$LOCAL_SHA\".*@if false; then@" "$F"'
+
+mutation sync-skips-verification-branch \
+  --file scripts/sync-nas.sh \
+  --bats tests/nas-sync.bats \
+  --test "fails when the NAS ends up on the wrong branch" \
+  --why "same removal, checked from the branch side" \
+  --apply 'sed -i "s@^if \[\[ \"\$NAS_SHA\" != \"\$LOCAL_SHA\".*@if false; then@" "$F"'
+
+# Finer than the one above on purpose: verification that checks only the commit
+# still passes a NAS sitting on a feature branch, which is the exact state that
+# cost 38 hours of dead downloads and was invisible to every health check.
+mutation sync-verifies-commit-but-not-branch \
+  --file scripts/sync-nas.sh \
+  --bats tests/nas-sync.bats \
+  --test "fails when the NAS ends up on the wrong branch" \
+  --why "half a verification reads as a whole one; the branch is the half that has actually bitten" \
+  --apply 'sed -i "s@ || \"\$NAS_BRANCH\" != \"\$BRANCH\"@@" "$F"'
