@@ -152,22 +152,42 @@ docker compose -f docker-compose.arr-stack.yml start seerr
 
 Options:
   --tar           Create .tar.gz archive (recommended)
-  --prefix NAME   Override volume prefix (default: auto-detect)
+  --prefix NAME   Pin every volume to prefix NAME instead of resolving each one
 
 Examples:
   ./scripts/arr-backup.sh --tar                    # Default location
   ./scripts/arr-backup.sh --tar /path/to/backup    # Custom location
-  ./scripts/arr-backup.sh --prefix media-stack     # Custom prefix
+  ./scripts/arr-backup.sh --prefix media-stack     # Pin all volumes to one prefix
 ```
 
-### Volume Prefix Auto-Detection
+### Volume Resolution
 
-The script auto-detects your volume prefix from running containers. If you cloned the repo to a different directory (e.g., `media-stack` instead of `arr-stack`), it will detect this automatically.
+Docker names a volume `<compose-project>_<name>`, and this stack spans **four**
+compose projects — `arr-stack`, `arr-utilities`, `tailscale` and `magnetio` — so
+there is no single prefix. Each name in the script's curated list is resolved
+independently by matching `*_<name>` against `docker volume ls`.
 
-If auto-detection fails, use `--prefix`:
-```bash
-./scripts/arr-backup.sh --tar --prefix media-stack
-```
+Where a name exists under two prefixes (a live volume plus one orphaned by a past
+project rename, e.g. `arr-stack_beszel-data` and `arr-utilities_beszel-data`), the
+tie is broken by which one a **running container actually mounts**. A tie that
+cannot be broken that way is a hard error rather than a guess — restoring from an
+orphaned volume is worse than a failed backup, because it looks like it worked.
+
+A name in the curated list that resolves to nothing is a **failure**, not a skip.
+Until 2026-08-31 it was a skip: the script auto-detected one prefix (always
+`arr-stack`), so after uptime-kuma moved into the `arr-utilities` project its
+volume was never found and every nightly run reported
+`11 backed up, 1 skipped, 0 failed` while leaving it unprotected.
+
+`--prefix` restores the old exact-match behaviour for every volume. It is an
+escape hatch for a single-project deployment, not the normal path.
+
+### Restoring: read the manifest, don't assume a prefix
+
+Each archive contains `volume-manifest.tsv` mapping every directory to the volume
+it was read from. The destination volume name is not derivable from the directory
+name — `uptime-kuma-data` restores to `arr-utilities_uptime-kuma-data`, not
+`arr-stack_uptime-kuma-data`.
 
 ### Request Manager Detection
 
