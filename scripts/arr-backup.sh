@@ -226,7 +226,7 @@ MOUNTED_VOLUMES=$(docker ps -q 2>/dev/null \
 # So a tie is broken by what a running container actually mounts, and a tie that
 # cannot be broken that way is an ERROR, never a guess.
 resolve_volume() {
-  local suffix="$1" cands live v n_cands n_live
+  local suffix="$1" cands live v n_cands n_live cands_inline
   RESOLVED_VOLUME=""
   RESOLVE_ERROR=""
 
@@ -279,7 +279,13 @@ resolve_volume() {
     fi
   fi
 
-  RESOLVE_ERROR="ambiguous: $(tr '\n' ' ' <<<"$cands")- $( [ -n "$live" ] && echo "several are" || echo "none is" ) mounted by a running container. Re-run with --prefix to choose."
+  cands_inline=$(tr '\n' ' ' <<<"$cands")
+  cands_inline=${cands_inline% }
+  if [ -n "$live" ]; then
+    RESOLVE_ERROR="ambiguous: $cands_inline -- several are mounted by running containers. Re-run with --prefix to choose."
+  else
+    RESOLVE_ERROR="ambiguous: $cands_inline -- none are mounted by a running container. Re-run with --prefix to choose."
+  fi
   return 1
 }
 
@@ -384,11 +390,23 @@ declare -A VOLUME_EXCLUDES=(
 # VOLUME_SUFFIXES is required to resolve, and fails the run if it does not).
 if resolve_volume seerr-config; then
   VOLUME_SUFFIXES+=(seerr-config)
-elif resolve_volume overseerr-config; then
-  VOLUME_SUFFIXES+=(overseerr-config)
 else
-  echo "Warning: neither seerr-config nor overseerr-config found - no request manager backed up"
-  echo ""
+  seerr_err="$RESOLVE_ERROR"
+  if resolve_volume overseerr-config; then
+    VOLUME_SUFFIXES+=(overseerr-config)
+  else
+    # Print BOTH reasons rather than a canned "not found". Exactly one of these
+    # two is ever deployed, so one being absent is expected -- but an AMBIGUOUS
+    # resolution is not absence, and flattening the two into one message would
+    # hide a real fault behind an expected one. That is the same substitution of
+    # a benign report for a real failure that this whole change exists to remove;
+    # it would have hidden the uptime-kuma-data regression had that volume been
+    # optional rather than required.
+    echo "Warning: no request manager volume resolved - none backed up"
+    echo "         seerr-config:     $seerr_err"
+    echo "         overseerr-config: $RESOLVE_ERROR"
+    echo ""
+  fi
 fi
 
 # Volumes still excluded entirely, because they hold nothing a service cannot
@@ -505,11 +523,15 @@ for suffix in "${VOLUME_SUFFIXES[@]}"; do
         echo "OK (empty)"
         BACKED_UP=$((BACKED_UP + 1))
       fi
+      # Manifest entry only on a successful copy. Written unconditionally it
+      # would advertise a restore path for a directory that failed to copy --
+      # a record saying the backup worked when it did not, which is precisely
+      # the failure shape this change exists to remove.
+      printf '%s\t%s\n' "$suffix" "$vol" >> "$MANIFEST"
     else
       echo "FAILED (permission denied or volume error)"
       FAILED=$((FAILED + 1))
     fi
-    printf '%s\t%s\n' "$suffix" "$vol" >> "$MANIFEST"
   else
     # resolve_volume() found this name in `docker volume ls` moments ago, so a
     # failure here means it was removed mid-run -- a real fault, not an absence.

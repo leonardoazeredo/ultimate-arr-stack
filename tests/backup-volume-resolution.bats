@@ -294,3 +294,83 @@ curated_volumes() {
     }
     return 0
 }
+
+@test "the manifest records a volume only when its copy succeeded" {
+    # volume-manifest.tsv is how a restore learns which volume each directory came
+    # from, so an entry is a claim that the directory is restorable. Written
+    # unconditionally it would make that claim for a copy that FAILED -- a record
+    # saying the backup worked when it did not, which is the failure shape this
+    # whole file exists to catch. Line order is branch membership inside the
+    # loop's if/else, so the write must sit above the copy-failure branch.
+    local loop
+    loop=$(awk '/^for suffix in "\$\{VOLUME_SUFFIXES\[@\]\}"; do$/,/^done$/' "$BACKUP_SH")
+    [ -n "$loop" ] || {
+        echo "could not extract the volume loop from $BACKUP_SH"
+        return 1
+    }
+
+    local write fail_branch
+    write=$(grep -n 'printf .*>> "\$MANIFEST"' <<<"$loop" | cut -d: -f1)
+    fail_branch=$(grep -n 'echo "FAILED (permission denied' <<<"$loop" | cut -d: -f1)
+
+    [ -n "$write" ] || {
+        echo "the loop never writes a manifest entry -- a restore would have to guess"
+        echo "which compose project each directory came from."
+        return 1
+    }
+    [ "$(wc -l <<<"$write")" -eq 1 ] || {
+        echo "expected exactly one manifest write in the loop, found:"
+        echo "$write"
+        return 1
+    }
+    [ -n "$fail_branch" ] || {
+        echo "could not find the copy-failure branch; re-point this test at its new form"
+        return 1
+    }
+
+    [ "$write" -lt "$fail_branch" ] || {
+        echo "the manifest write (line $write of the loop) is not inside the copy-success"
+        echo "branch -- it sits at or after the failure branch (line $fail_branch), so a"
+        echo "volume whose copy failed still gets a restore entry."
+        return 1
+    }
+}
+
+@test "the manifest is created with a header before the loop runs" {
+    grep -q "printf 'directory\\\\tsource_volume" "$BACKUP_SH" || {
+        echo "no manifest header is written. Without it an empty manifest is"
+        echo "indistinguishable from a missing one."
+        return 1
+    }
+}
+
+@test "an unresolvable request manager reports why, not just 'not found'" {
+    # The request-manager pair is the one place a resolution failure is tolerated,
+    # because only one of seerr/overseerr is ever deployed. That tolerance must not
+    # extend to swallowing the REASON: "ambiguous" is a real fault and "absent" is
+    # expected, and a single canned message cannot tell them apart. Had
+    # uptime-kuma-data been optional rather than required, that flattening is
+    # exactly what would have hidden the original regression.
+    local block
+    block=$(awk '/^if resolve_volume seerr-config; then$/,/^fi$/' "$BACKUP_SH")
+    [ -n "$block" ] || {
+        echo "could not extract the request-manager block from $BACKUP_SH"
+        return 1
+    }
+
+    local code
+    code=$(grep -vE '^[[:space:]]*#' <<<"$block")
+
+    # Must be ECHOED, not merely mentioned. Grepping the block for RESOLVE_ERROR
+    # passes on the `seerr_err="$RESOLVE_ERROR"` capture alone -- proved by
+    # mutation: swapping the reporting lines for a canned "neither found" message
+    # left that grep satisfied and this test green. The assertion has to name the
+    # thing that reaches the operator.
+    grep -qE 'echo .*\$(RESOLVE_ERROR|seerr_err)' <<<"$code" || {
+        echo "the request-manager failure path never PRINTS the resolution reason, so"
+        echo "an ambiguous resolution is indistinguishable from the volume being absent."
+        echo "block was:"
+        echo "$code"
+        return 1
+    }
+}
