@@ -233,9 +233,11 @@ load_cleanup() {
         echo "$body"
         return 1
     }
-    # Stubbed: the real one shells out to docker compose, which these static tests
-    # deliberately never touch.
+    # Stubbed: the handler shells out to docker (compose up, and the worker
+    # teardown), which this file's header promises never to touch. Without these
+    # the tests would silently depend on a docker binary being present.
     ensure_services_running() { :; }
+    docker() { :; }
     eval "$body"
 }
 
@@ -323,11 +325,11 @@ load_cleanup() {
     # fixed to stop telling.
     #
     # What this does and does not cover, established by mutation rather than
-    # assumed: replacing `return $rc` with `return 0` does NOT break it, because
-    # bash preserves the pending exit status whenever an EXIT trap returns
-    # normally. What it DOES catch is a handler that calls `exit` itself -- the
-    # real EXIT-trap footgun, and the one an "always exit cleanly" edit would
-    # introduce.
+    # assumed: bash preserves the pending exit status whenever an EXIT trap
+    # returns normally, so this cannot be broken by what the handler RETURNS.
+    # What it DOES catch is a handler that calls `exit` itself -- the real
+    # EXIT-trap footgun, and the one an "always exit cleanly" edit would add.
+    # The other way to break it has its own test directly below.
     local script="$BATS_TEST_TMPDIR/exit-status.sh"
     {
         echo 'set -euo pipefail'
@@ -365,6 +367,51 @@ load_cleanup() {
     [ -n "$arm_ln" ] || { echo "could not find the STAGING_DIR assignment"; return 1; }
     [ "$arm_ln" -gt "$mkdir_ln" ] || {
         echo "STAGING_DIR armed at line $arm_ln, before the mkdir guard at $mkdir_ln"
+        return 1
+    }
+}
+
+@test "the EXIT trap preserves the exit status when ensure_services_running FAILS" {
+    # The dangerous case, and the one every other test here was blind to because
+    # they all stub ensure_services_running as a no-op.
+    #
+    # Under `set -e` a non-zero return from a bare call inside the handler ABORTS
+    # the handler and becomes the script's exit status. Measured: a script exiting
+    # 0 exited 42 when this call returned 42 -- a clean backup reported as failed,
+    # which makes a `backup && prune` cron chain skip pruning for good. The `|| true`
+    # in the handler is what prevents it.
+    local script="$BATS_TEST_TMPDIR/ensure-fails.sh"
+    {
+        echo 'set -euo pipefail'
+        awk -v s="cleanup_on_exit() {" 'index($0, s) == 1, /^\}$/' "$BACKUP_SH"
+        echo 'docker() { return 0; }'
+        echo 'ensure_services_running() { return 42; }'
+        echo 'CREATE_TAR=false'
+        echo 'STAGING_DIR=""'
+        echo 'trap cleanup_on_exit EXIT'
+        echo 'exit 0'
+    } > "$script"
+
+    run bash "$script"
+    [ "$status" -eq 0 ] || {
+        echo "a successful run exited $status because the exit handler's own call failed"
+        return 1
+    }
+}
+
+@test "cleanup stops the copy worker before removing what it writes into" {
+    # An interrupted run leaves the `arr-backup-worker` container orphaned: killing
+    # the script does not stop it, and docker re-creates a bind mount's host
+    # directory on demand. Measured on the NAS 2026-08-31 -- the staging path
+    # reappeared root-owned seconds after cleanup removed it. Order matters: killing
+    # the worker after the rm would race exactly the same way.
+    local kill_ln rm_ln
+    kill_ln=$(grep -n 'docker rm -f arr-backup-worker' "$BACKUP_SH" | head -1 | cut -d: -f1)
+    rm_ln=$(grep -n 'rm -rf "\$STAGING_DIR"' "$BACKUP_SH" | head -1 | cut -d: -f1)
+    [ -n "$kill_ln" ] || { echo "no arr-backup-worker teardown in the exit handler"; return 1; }
+    [ -n "$rm_ln" ] || { echo "could not find the staging removal"; return 1; }
+    [ "$kill_ln" -lt "$rm_ln" ] || {
+        echo "worker teardown at line $kill_ln runs AFTER the staging rm at $rm_ln"
         return 1
     }
 }

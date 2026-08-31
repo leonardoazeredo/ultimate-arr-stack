@@ -98,15 +98,6 @@ ensure_services_running() {
 # function instead of getting its own trap, and why anything added later must go
 # here too.
 cleanup_on_exit() {
-  # Capture the status the script is exiting with and hand it back at the end.
-  # Bash already preserves it when an EXIT trap returns normally -- measured, not
-  # assumed -- so this is belt-and-braces rather than load-bearing today. It is
-  # here so a later edit that ends this function with a status-changing command
-  # cannot silently turn the partial-backup `exit 1` below into a 0. That status
-  # is the only thing a `backup && prune` cron chain reads to decide whether to
-  # prune, so it is worth pinning explicitly.
-  local rc=$?
-
   # Drop the /tmp staging copy. /tmp on this NAS is tmpfs -- RAM-backed -- and
   # each run stages ~220MB into it. Cleanup used to be inline on the happy path
   # only, so every FAILED run leaked a directory per run into RAM until reboot.
@@ -123,6 +114,19 @@ cleanup_on_exit() {
   # Defaulted expansions because this trap is installed before those variables
   # are initialised, and `set -u` would otherwise turn an early failure into a
   # confusing unbound-variable error inside the handler.
+  # Stop the copy container FIRST. Killing this script does not stop it, and docker
+  # re-creates a bind mount's host directory on demand -- so on an interrupted run
+  # the staging path reappeared seconds after the rm below removed it, owned by root
+  # and therefore undeletable by the unprivileged account that runs the backup.
+  # Measured on the NAS 2026-08-31 by interrupting a real run mid-copy.
+  #
+  # Gated on STAGING_DIR so only a run that actually owns the staging directory can
+  # kill the worker. `|| true` because the container is already gone on every normal
+  # exit (it runs with --rm), and an error there must not abort this handler.
+  if [ -n "${STAGING_DIR:-}" ]; then
+    docker rm -f arr-backup-worker >/dev/null 2>&1 || true
+  fi
+
   if [ "${CREATE_TAR:-false}" = true ] && [ -n "${STAGING_DIR:-}" ] && [ -d "${STAGING_DIR}" ]; then
     if rm -rf "$STAGING_DIR"; then
       echo "Cleaned up staging dir $STAGING_DIR"
@@ -134,9 +138,18 @@ cleanup_on_exit() {
   # Deliberately after the cleanup: this call can be slow or hang (it shells out
   # to `docker compose up -d`), and the leak guarantee above must not depend on
   # it returning.
-  ensure_services_running
-
-  return $rc
+  # `|| true` is load-bearing, and this is the one line here that was measured to
+  # matter. Under `set -e` a non-zero return from this call aborts the handler and
+  # BECOMES the script's exit status: a fully successful backup exited 42 when this
+  # returned 42. That is the wrong direction -- it turns a clean run into a failed
+  # one, and a `backup && prune` cron chain then silently skips pruning forever.
+  #
+  # The bug is inherited, not introduced: the previous `trap 'ensure_services_running'
+  # EXIT` had exactly the same exposure. Fixed here because this handler now owns it.
+  #
+  # Note what does NOT fix it: capturing `$?` and ending with `return $rc`. `set -e`
+  # aborts the handler before that return is ever reached. Both were tested.
+  ensure_services_running || true
 }
 trap 'cleanup_on_exit' EXIT
 
