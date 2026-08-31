@@ -205,6 +205,54 @@ if [ -z "$ALL_VOLUMES" ]; then
   exit 1
 fi
 
+# Build the set of volumes referenced by some set of containers. Extra `docker ps`
+# args come in as "$@" (none = running only; -a = running or stopped).
+# Sets INVENTORY_VOLUMES; returns 1 with INVENTORY_ERROR set if the daemon could
+# not be asked.
+#
+# The point of this function is to tell "no container references anything" apart
+# from "I could not find out". Until 2026-08-31 both pipelines ended in
+# `2>/dev/null || true`, so a docker failure and a genuinely empty result produced
+# the same empty string. That is not a cosmetic difference: resolve_volume() reads
+# an empty ATTACHED_VOLUMES as proof that every candidate is an orphan, and the
+# volumes with more than one candidate then fail with "no container references any
+# of them, running or stopped" -- a confident, specific, wrong reason that sends
+# whoever reads it looking for a project rename that never happened.
+#
+# stderr is deliberately NOT silenced. When this fails the operator needs docker's
+# own message ("permission denied", "Cannot connect to the Docker daemon"), and
+# under cron that is the only place it can come from.
+docker_volume_inventory() {
+  local ids out
+  INVENTORY_VOLUMES=""
+  INVENTORY_ERROR=""
+
+  if ! ids=$(docker ps "$@" -q); then
+    INVENTORY_ERROR="'docker ps $* -q' failed -- cannot enumerate containers"
+    return 1
+  fi
+
+  # No containers at all is a legal state, not a failure. Distinct from the branch
+  # above precisely because this one asked successfully and the answer was "none".
+  [ -n "$ids" ] || return 0
+
+  if ! out=$(xargs docker inspect --format '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}}{{"\n"}}{{end}}{{end}}' <<<"$ids"); then
+    # A container can legitimately disappear between `ps` and `inspect` -- docker
+    # then exits non-zero having still reported on all the others. That is a race,
+    # not a broken daemon, so tolerate it as long as SOMETHING came back. Nothing
+    # at all means the question itself failed.
+    if [ -z "$out" ]; then
+      INVENTORY_ERROR="'docker inspect' failed for all $(wc -l <<<"$ids") container(s)"
+      return 1
+    fi
+  fi
+
+  # grep drops the blank lines the template emits for volume-less containers; an
+  # empty result here is legal, hence `|| true`.
+  INVENTORY_VOLUMES=$(grep . <<<"$out" || true)
+  return 0
+}
+
 # Volumes referenced by a container that EXISTS -- running OR stopped. This is the
 # PRIMARY tie-break (see resolve_volume()), and it deliberately does not ask what is
 # running. A backup whose answer changes because a container happened to be down at
@@ -212,18 +260,27 @@ fi
 # what a backup is for. A volume orphaned by a project rename is referenced by
 # nothing in ANY state -- that is what makes it an orphan, and it is precisely the
 # distinction `docker ps -a` draws and `docker ps` cannot.
-# `|| true` on both stages: an empty result is a legal state and pipefail would
-# otherwise abort the script.
-ATTACHED_VOLUMES=$(docker ps -a -q 2>/dev/null \
-  | xargs -r docker inspect --format '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}}{{"\n"}}{{end}}{{end}}' 2>/dev/null \
-  | grep . || true)
+if ! docker_volume_inventory -a; then
+  echo "ERROR: $INVENTORY_ERROR" >&2
+  echo "       Refusing to run: with no container inventory every volume that exists" >&2
+  echo "       under two project prefixes would be reported as an orphan and FAIL," >&2
+  echo "       naming a cause that is not the real one." >&2
+  notify_failure "Failed during: ${STEP}. ${INVENTORY_ERROR}"
+  exit 1
+fi
+ATTACHED_VOLUMES="$INVENTORY_VOLUMES"
 
 # Volumes a RUNNING container mounts. A strict subset of ATTACHED_VOLUMES, used
 # only as a SECOND tie-break for the case where two candidates are both attached
-# to containers that exist.
-MOUNTED_VOLUMES=$(docker ps -q 2>/dev/null \
-  | xargs -r docker inspect --format '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}}{{"\n"}}{{end}}{{end}}' 2>/dev/null \
-  | grep . || true)
+# to containers that exist. Guarded the same way and for the same reason: this one
+# is only a tie-break, but a docker failure here means the failure above was a
+# fluke of timing, and guessing after that is not better than stopping.
+if ! docker_volume_inventory; then
+  echo "ERROR: $INVENTORY_ERROR" >&2
+  notify_failure "Failed during: ${STEP}. ${INVENTORY_ERROR}"
+  exit 1
+fi
+MOUNTED_VOLUMES="$INVENTORY_VOLUMES"
 
 # Keep only the lines of $1 that also appear in $2; both newline-separated.
 # The empty-$2 early return is a fast path, NOT a correctness fix: the per-line
