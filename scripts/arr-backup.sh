@@ -227,8 +227,11 @@ docker_volume_inventory() {
   INVENTORY_VOLUMES=""
   INVENTORY_ERROR=""
 
+  # ${*:+ $*} rather than a bare $*: with no args the latter renders the message
+  # as `docker ps  -q`, and a doubled space in an operator-facing error reads as a
+  # typo in the error rather than a fact about the command that failed.
   if ! ids=$(docker ps "$@" -q); then
-    INVENTORY_ERROR="'docker ps $* -q' failed -- cannot enumerate containers"
+    INVENTORY_ERROR="'docker ps${*:+ $*} -q' failed -- cannot enumerate containers"
     return 1
   fi
 
@@ -277,6 +280,9 @@ ATTACHED_VOLUMES="$INVENTORY_VOLUMES"
 # fluke of timing, and guessing after that is not better than stopping.
 if ! docker_volume_inventory; then
   echo "ERROR: $INVENTORY_ERROR" >&2
+  echo "       Refusing to run: this inventory is only the second tie-break, but a" >&2
+  echo "       docker failure here means the one above succeeded by luck, and the" >&2
+  echo "       resolver would be guessing with no way to say so." >&2
   notify_failure "Failed during: ${STEP}. ${INVENTORY_ERROR}"
   exit 1
 fi
