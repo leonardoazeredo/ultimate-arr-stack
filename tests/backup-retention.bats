@@ -429,13 +429,18 @@ load_cleanup() {
     local body traps
     body=$(awk -v s="on_interrupt() {" 'index($0, s) == 1, /^\}$/' "$BACKUP_SH")
     [[ -n "$body" ]] || { echo "no on_interrupt() in $BACKUP_SH -- renamed?"; return 1; }
-    traps=$(grep -E "^trap 'on_interrupt [0-9]+' (TERM|INT)$" "$BACKUP_SH")
+    traps=$(grep -E "^trap 'on_interrupt [0-9]+' (TERM|INT|HUP)$" "$BACKUP_SH")
     grep -q "TERM$" <<<"$traps" || {
         echo "SIGTERM is not trapped: an interrupt will kill the shell mid-copy and"
         echo "the orphaned container will re-create the staging dir after cleanup"
         return 1
     }
     grep -q "INT$" <<<"$traps" || { echo "SIGINT is not trapped (Ctrl-C leaks the same way)"; return 1; }
+    grep -q "HUP$" <<<"$traps" || {
+        echo "SIGHUP is not trapped - a backup started over ssh leaks the staging dir"
+        echo "when the connection drops"
+        return 1
+    }
 
     # Same trap lines, standing in front of a 3s "copy". Killed at 1s: a deferring
     # trap exits at ~3s, a missing one at ~1s.

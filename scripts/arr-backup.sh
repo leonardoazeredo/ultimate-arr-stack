@@ -194,6 +194,11 @@ on_interrupt() {
 }
 trap 'on_interrupt 143' TERM
 trap 'on_interrupt 130' INT
+# HUP is here for the same reason as the other two, not for completeness: a backup
+# started over ssh that loses its connection is an ordinary way for this script to
+# die, and it would leak the staging directory exactly like a SIGTERM. Hit during
+# this branch's own NAS verification, when a timed-out ssh dropped a live run.
+trap 'on_interrupt 129' HUP
 
 # Find USB backup directory dynamically (device letters change on reboot)
 # Searches /mnt/@usb/sd*/ for a subdirectory matching the given name,
