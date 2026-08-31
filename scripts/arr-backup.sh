@@ -9,7 +9,9 @@ set -euo pipefail
 # Options:
 #   --tar           Create a .tar.gz archive (recommended for off-NAS transfer)
 #   --encrypt       Encrypt tarball with GPG symmetric encryption (requires --tar)
-#   --prefix NAME   Volume prefix (default: auto-detect from running containers)
+#   --prefix NAME   Pin every volume to the single prefix NAME instead of resolving
+#                   each one across the compose projects present. Escape hatch only:
+#                   the stack spans four projects, so one prefix cannot address it.
 #   --usb DIR_NAME  Dynamically find USB device under /mnt/@usb/sd*/ containing DIR_NAME
 #                   (device letters change on reboot, so never hardcode e.g. /mnt/@usb/sdd1)
 #   --rotate-days N Delete tarballs older than N days AT THE DESTINATION. Opt-in and
@@ -22,7 +24,7 @@ set -euo pipefail
 #   ./scripts/arr-backup.sh --tar --encrypt           # Backup + GPG encrypt
 #   ./scripts/arr-backup.sh --tar ~/backups           # Backup to custom dir with tarball
 #   ./scripts/arr-backup.sh --tar --usb arr-backups   # Auto-find USB, save to arr-backups/
-#   ./scripts/arr-backup.sh --prefix media-stack      # Use custom volume prefix
+#   ./scripts/arr-backup.sh --prefix media-stack      # Pin all volumes to one prefix
 #   ./scripts/arr-backup.sh --tar /mnt/x --rotate-days 7   # Flat 7-day rotation at /mnt/x
 #
 # Tarballs are named arr-stack-backup-YYYYMMDD-HHMMSS.tar.gz. The seconds matter:
@@ -181,25 +183,111 @@ if [ -n "$USB_DIR_NAME" ]; then
   mkdir -p "$BACKUP_DIR"
 fi
 
-STEP="detecting volume prefix"
-# Auto-detect volume prefix from running containers if not specified
-if [ -z "$VOLUME_PREFIX" ]; then
-  # Try to find prefix from gluetun container's volumes
-  VOLUME_PREFIX=$(docker inspect gluetun 2>/dev/null | grep -o '"[^"]*_gluetun-config"' | head -1 | tr -d '"' | sed 's/_gluetun-config$//' || true)
-
-  # Fallback: check for any arr-stack-like volumes
-  if [ -z "$VOLUME_PREFIX" ]; then
-    VOLUME_PREFIX=$(docker volume ls --format '{{.Name}}' | grep -o '^[^_]*' | grep -E 'arr-stack|media' | head -1 || true)
-  fi
-
-  # Final fallback
-  if [ -z "$VOLUME_PREFIX" ]; then
-    VOLUME_PREFIX="arr-stack"
-    echo "Warning: Could not auto-detect volume prefix, using '$VOLUME_PREFIX'"
-    echo "         Use --prefix to specify if your volumes have a different prefix"
-    echo ""
-  fi
+STEP="inventorying docker volumes"
+# There is no single volume prefix. The stack spans FOUR compose projects --
+# arr-stack, arr-utilities, tailscale and magnetio -- and Docker names a volume
+# `<project>_<name>`, so the prefix differs per volume.
+#
+# This script used to auto-detect ONE prefix (from gluetun, always `arr-stack`)
+# and paste it in front of every name in the curated list below. When uptime-kuma
+# moved into the arr-utilities project its volume became
+# `arr-utilities_uptime-kuma-data`; the lookup for `arr-stack_uptime-kuma-data`
+# found nothing, and the run printed "Skipping (volume not found)" and counted it
+# as a benign skip. The summary line read "11 backed up, 1 skipped, 0 failed" --
+# a clean-looking run in which a listed volume was silently unprotected. A project
+# rename is invisible to a single-prefix assumption, and the failure mode was a
+# success message with a skip in it.
+ALL_VOLUMES=$(docker volume ls --format '{{.Name}}' 2>/dev/null || true)
+if [ -z "$ALL_VOLUMES" ]; then
+  echo "ERROR: 'docker volume ls' returned nothing. Refusing to run: every volume" >&2
+  echo "       would resolve to 'not found' and the backup would be empty." >&2
+  notify_failure "Failed during: ${STEP}. docker volume ls returned no volumes."
+  exit 1
 fi
+
+# Volumes a RUNNING container actually mounts. Used only to break ties -- see
+# resolve_volume(). `|| true` on both stages because an empty result is a legal
+# state (nothing running) and pipefail would otherwise abort the script.
+MOUNTED_VOLUMES=$(docker ps -q 2>/dev/null \
+  | xargs -r docker inspect --format '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}}{{"\n"}}{{end}}{{end}}' 2>/dev/null \
+  | grep . || true)
+
+# Resolve one curated volume name to a real Docker volume.
+#
+# Sets RESOLVED_VOLUME / RESOLVE_ERROR as GLOBALS and returns 0/1 rather than
+# printing the answer. That is deliberate: `v=$(resolve_volume x)` would run the
+# function in a subshell, so RESOLVE_ERROR would be discarded and every failure
+# would report an empty reason.
+#
+# Some names exist under TWO prefixes, one live and one orphaned by a project
+# rename -- `arr-stack_beszel-data` is mounted by beszel, `arr-utilities_beszel-data`
+# is a leftover of the split. Backing up the orphan would produce a successful-looking
+# archive of an abandoned volume: the same lie as the skip above, one layer deeper.
+# So a tie is broken by what a running container actually mounts, and a tie that
+# cannot be broken that way is an ERROR, never a guess.
+resolve_volume() {
+  local suffix="$1" cands live v n_cands n_live cands_inline
+  RESOLVED_VOLUME=""
+  RESOLVE_ERROR=""
+
+  # An explicit --prefix keeps its original exact-match meaning, so an operator
+  # can always override the search.
+  if [ -n "$VOLUME_PREFIX" ]; then
+    if grep -Fxq "${VOLUME_PREFIX}_${suffix}" <<<"$ALL_VOLUMES"; then
+      RESOLVED_VOLUME="${VOLUME_PREFIX}_${suffix}"
+      return 0
+    fi
+    RESOLVE_ERROR="no volume named '${VOLUME_PREFIX}_${suffix}' (--prefix given, so no search was attempted)"
+    return 1
+  fi
+
+  # Endswith rather than a regex: volume names contain '-' and '.', and building
+  # a safe pattern from an arbitrary name is easier to get wrong than to compare
+  # the tail directly. `length > length(s)` requires at least one character of
+  # project name, so a bare unprefixed volume never matches -- there is an
+  # orphaned bare `tailscale-state` on this NAS that must not shadow
+  # `tailscale_tailscale-state`.
+  cands=$(awk -v s="_${suffix}" \
+    'length($0) > length(s) && substr($0, length($0) - length(s) + 1) == s' \
+    <<<"$ALL_VOLUMES")
+
+  if [ -z "$cands" ]; then
+    RESOLVE_ERROR="no docker volume matches *_${suffix}"
+    return 1
+  fi
+
+  n_cands=$(wc -l <<<"$cands")
+  if [ "$n_cands" -eq 1 ]; then
+    RESOLVED_VOLUME="$cands"
+    return 0
+  fi
+
+  live=""
+  while IFS= read -r v; do
+    [ -n "$v" ] || continue
+    if grep -Fxq "$v" <<<"$MOUNTED_VOLUMES"; then
+      live+="$v"$'\n'
+    fi
+  done <<<"$cands"
+  live=${live%$'\n'}
+
+  if [ -n "$live" ]; then
+    n_live=$(wc -l <<<"$live")
+    if [ "$n_live" -eq 1 ]; then
+      RESOLVED_VOLUME="$live"
+      return 0
+    fi
+  fi
+
+  cands_inline=$(tr '\n' ' ' <<<"$cands")
+  cands_inline=${cands_inline% }
+  if [ -n "$live" ]; then
+    RESOLVE_ERROR="ambiguous: $cands_inline -- several are mounted by running containers. Re-run with --prefix to choose."
+  else
+    RESOLVE_ERROR="ambiguous: $cands_inline -- none are mounted by a running container. Re-run with --prefix to choose."
+  fi
+  return 1
+}
 
 # Backup location handling:
 # - Always create backup in /tmp first (reliable space)
@@ -240,7 +328,8 @@ CURRENT_GID=$(id -g)
 
 # Volumes holding state that would require manual reconfiguration if lost.
 VOLUME_SUFFIXES=(
-  gluetun-config          # VPN provider credentials and settings
+  gluetun-config          # servers.json only - the VPN CREDENTIALS are in .env,
+                          # which is backed up separately below
   qbittorrent-config      # Client settings, categories, watched folders
   sabnzbd-config          # Usenet provider credentials and settings
   prowlarr-config         # Indexer configs and API keys
@@ -250,7 +339,21 @@ VOLUME_SUFFIXES=(
   radarr-config           # Movie DB, quality profiles, custom formats, API key
   jellyfin-config         # Users, watch history, plugin config
   pihole-etc-pihole       # pihole.toml, gravity DB, custom allow/deny lists
+  decypharr-config        # auth.json + config.json - debrid credentials
+  dnscrypt-config         # dnscrypt-proxy.toml - resolver and forwarding rules
+  beszel-data             # data.db + id_ed25519, the agent's own private key
+  tailscale-state         # node identity: see below, this one is load-bearing
+  tailscale-exit-state    # exit-node identity, same argument
+  gluetun-exit-config     # same, for the Tailscale exit-node tunnel
 )
+
+# tailscale-state is the most important entry in this list and was missing from it
+# entirely until 2026-08-31. docs/EXIT-NODE-PROJECT-LOG.md records that recreating
+# Tailscale node 1 severs EVERY path to the NAS at once -- SSH and the UGOS admin UI
+# both ride its own subnet route -- and instructs that it only be done with a
+# state-volume backup and an auto-rollback. That backup did not exist. Losing this
+# 28KB volume means the node re-registers with a new identity, the subnet routes
+# stop being advertised, and the recovery path is a physical visit.
 
 # Per-volume exclusions, relative to the volume root.
 #
@@ -272,13 +375,38 @@ declare -A VOLUME_EXCLUDES=(
   [radarr-config]="logs.db logs.db-wal logs.db-shm logs MediaCover Sentry"
   [jellyfin-config]="metadata cache log transcodes"
   [pihole-etc-pihole]="pihole-FTL.db pihole-FTL.db-wal pihole-FTL.db-shm gravity_old.db listsCache"
+  [decypharr-config]="cache logs"
 )
 
-# Request manager - detect which volume exists
-if docker volume inspect "${VOLUME_PREFIX}_seerr-config" &>/dev/null; then
+# Both gluetun-*-config volumes are deliberately NOT given a servers.json exclusion
+# even though that file is 7MB of their 7.1MB and gluetun re-fetches it. Measured
+# 2026-08-31: servers.json is the ONLY file in them, so the exclusion would reduce
+# an existing backup to an empty directory reported as "OK (empty)". Shrinking
+# coverage inside the fix for silently-lost coverage is not a trade worth 14MB of
+# a 136MB archive.
+
+# Request manager - only one of the two is ever deployed, so the one that is
+# absent is genuinely optional and must not be appended (everything that IS in
+# VOLUME_SUFFIXES is required to resolve, and fails the run if it does not).
+if resolve_volume seerr-config; then
   VOLUME_SUFFIXES+=(seerr-config)
-elif docker volume inspect "${VOLUME_PREFIX}_overseerr-config" &>/dev/null; then
-  VOLUME_SUFFIXES+=(overseerr-config)
+else
+  seerr_err="$RESOLVE_ERROR"
+  if resolve_volume overseerr-config; then
+    VOLUME_SUFFIXES+=(overseerr-config)
+  else
+    # Print BOTH reasons rather than a canned "not found". Exactly one of these
+    # two is ever deployed, so one being absent is expected -- but an AMBIGUOUS
+    # resolution is not absence, and flattening the two into one message would
+    # hide a real fault behind an expected one. That is the same substitution of
+    # a benign report for a real failure that this whole change exists to remove;
+    # it would have hidden the uptime-kuma-data regression had that volume been
+    # optional rather than required.
+    echo "Warning: no request manager volume resolved - none backed up"
+    echo "         seerr-config:     $seerr_err"
+    echo "         overseerr-config: $RESOLVE_ERROR"
+    echo ""
+  fi
 fi
 
 # Volumes still excluded entirely, because they hold nothing a service cannot
@@ -287,11 +415,29 @@ fi
 #   duc-index               - disk usage index, regenerates on restart
 #   configarr-repos         - git clones of upstream config repos, re-cloned on run
 #   magnetio-redis-data     - ephemeral cache (8KB)
-#   decypharr-config, beszel-data, dnscrypt-config - candidates, not yet assessed
+#   diun-data               - a single diun.db recording which image digests have
+#                             already been notified about. Losing it re-notifies
+#                             once and then self-heals; there is no configuration
+#                             in it (diun is configured entirely by environment).
+#
+# The three previously listed here as "candidates, not yet assessed" were assessed
+# on 2026-08-31 and all three are now backed up: decypharr-config holds auth.json,
+# beszel-data holds an id_ed25519 private key, and dnscrypt-config holds a hand-
+# edited dnscrypt-proxy.toml. None is regenerable. Together they are under 4MB.
+#
+# Orphaned volumes deliberately NOT cleaned up here (backup is not the place to
+# delete things): arr-utilities_beszel-data, magnetio_magnetio-redis-data, the
+# unprefixed tailscale-state, and both copies of configarr-repos are leftovers of
+# past project renames. resolve_volume() ignores them because no running container
+# mounts them.
 
 STEP="backing up .env"
 echo "=== Arr-Stack Backup ==="
-echo "Volume prefix: ${VOLUME_PREFIX}_*"
+if [ -n "$VOLUME_PREFIX" ]; then
+  echo "Volume prefix: ${VOLUME_PREFIX}_* (pinned via --prefix)"
+else
+  echo "Volumes:       resolved per-name across all compose projects"
+fi
 echo "Backup dir:    $BACKUP_DIR"
 echo ""
 
@@ -319,11 +465,29 @@ fi
 
 STEP="backing up volumes"
 
+# suffix -> resolved volume name, written into the archive. Without it a restore
+# has to guess which project each directory came from, and the guess is wrong for
+# exactly the volumes this fix is about (uptime-kuma-data is NOT arr-stack_*).
+MANIFEST="$BACKUP_DIR/volume-manifest.tsv"
+printf 'directory\tsource_volume\n' > "$MANIFEST"
+
 for suffix in "${VOLUME_SUFFIXES[@]}"; do
-  vol="${VOLUME_PREFIX}_${suffix}"
+  # Not `vol=$(resolve_volume ...)`: that subshell would discard RESOLVE_ERROR.
+  if ! resolve_volume "$suffix"; then
+    # A volume named in VOLUME_SUFFIXES that resolves to nothing is a FAILURE, not
+    # a skip. It used to be a skip, and that is precisely how uptime-kuma-data went
+    # unbacked-up behind a summary reading "11 backed up, 1 skipped, 0 failed".
+    # Everything in that list is there because losing it costs manual
+    # reconfiguration, so "I could not find it" is never benign. Optional volumes
+    # are handled by not appending them (see the request-manager block above).
+    echo "FAILED $suffix - $RESOLVE_ERROR"
+    FAILED=$((FAILED + 1))
+    continue
+  fi
+  vol="$RESOLVED_VOLUME"
 
   if docker volume inspect "$vol" &>/dev/null; then
-    echo -n "Backing up $suffix... "
+    echo -n "Backing up $suffix ($vol)... "
 
     # Copy files and fix ownership in one container run.
     # The chown ensures we can tar without sudo later.
@@ -359,13 +523,20 @@ for suffix in "${VOLUME_SUFFIXES[@]}"; do
         echo "OK (empty)"
         BACKED_UP=$((BACKED_UP + 1))
       fi
+      # Manifest entry only on a successful copy. Written unconditionally it
+      # would advertise a restore path for a directory that failed to copy --
+      # a record saying the backup worked when it did not, which is precisely
+      # the failure shape this change exists to remove.
+      printf '%s\t%s\n' "$suffix" "$vol" >> "$MANIFEST"
     else
       echo "FAILED (permission denied or volume error)"
       FAILED=$((FAILED + 1))
     fi
   else
-    echo "Skipping $suffix (volume not found)"
-    SKIPPED=$((SKIPPED + 1))
+    # resolve_volume() found this name in `docker volume ls` moments ago, so a
+    # failure here means it was removed mid-run -- a real fault, not an absence.
+    echo "FAILED $suffix - '$vol' disappeared between listing and inspection"
+    FAILED=$((FAILED + 1))
   fi
 done
 
@@ -476,4 +647,8 @@ if [[ "${TARBALL}" == /tmp/* ]] || [[ -z "${TARBALL}" ]]; then
   echo "      Copy the tarball off-NAS before rebooting!"
 fi
 echo ""
-echo "To restore: docker run --rm -v ./backup/VOLUME:/src:ro -v ${VOLUME_PREFIX}_VOLUME:/dst alpine cp -a /src/. /dst/"
+# The destination volume name is NOT derivable from the directory name -- the
+# stack spans four compose projects. volume-manifest.tsv inside the archive maps
+# each directory to the volume it came from; read it rather than assuming a prefix.
+echo "To restore: read volume-manifest.tsv for the source volume of each directory, then"
+echo "            docker run --rm -v ./backup/DIR:/src:ro -v SOURCE_VOLUME:/dst alpine cp -a /src/. /dst/"
