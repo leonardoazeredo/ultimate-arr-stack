@@ -198,10 +198,25 @@ rather than continuing with an empty set.
 > orphan. A docker failure that returns empty therefore does not produce a vague
 > error — it produces a *confident and specific* one, failing every multi-candidate
 > volume with `no container references any of them, running or stopped` and sending
-> whoever reads it looking for a project rename that never happened. On this NAS
-> that is `beszel-data` and `configarr-repos`; single-candidate names resolve on the
-> early return and are unaffected, which is what makes the failure look selective
-> and plausible rather than obviously systemic.
+> whoever reads it looking for a project rename that never happened. Measured on
+> this NAS by stubbing `docker ps` to fail: exactly one curated name, `beszel-data`,
+> is multi-candidate, and it failed with precisely that wrong cause while the other
+> 16 volumes backed up normally — `16 backed up, 1 failed`, which reads as a
+> selective, plausible, already-known problem rather than a broken daemon.
+> (`configarr-repos` also exists under two prefixes but is not in the curated list,
+> so it is never resolved and cannot produce this.) Single-candidate names resolve
+> on the early return and are unaffected, which is what makes the shape so
+> convincing.
+>
+> That is the *mild* case. The stub above left `docker run` working, which is not a
+> combination that occurs in practice: whatever denies the containers endpoint denies
+> container creation too, and the copy itself is a `docker run`. Stubbing both — the
+> realistic shape — gave `0 backed up, 1 skipped, 17 failed` **and still wrote a
+> 214-byte tarball into the destination**. `backup-prune.sh` tiers purely by the
+> filename's timestamp and never inspects size or contents, so that empty archive is
+> an ordinary retention candidate: inside the 7-30 day tier it is eligible to be the
+> "newest backup per calendar day" that displaces a real one. The non-zero exit is
+> the only thing distinguishing it, and only if something is reading exit codes.
 >
 > A container disappearing between `docker ps` and `docker inspect` is a race, not
 > a broken daemon: `inspect` exits non-zero having still reported every other
