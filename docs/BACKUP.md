@@ -169,9 +169,24 @@ independently by matching `*_<name>` against `docker volume ls`.
 
 Where a name exists under two prefixes (a live volume plus one orphaned by a past
 project rename, e.g. `arr-stack_beszel-data` and `arr-utilities_beszel-data`), the
-tie is broken by which one a **running container actually mounts**. A tie that
-cannot be broken that way is a hard error rather than a guess — restoring from an
-orphaned volume is worse than a failed backup, because it looks like it worked.
+tie is broken in two tiers:
+
+1. **Which one a container *references*** — running **or stopped** (`docker ps -a`).
+   A volume orphaned by a project rename is referenced by nothing in any state;
+   that is what makes it an orphan, and it is the distinction this tier draws.
+2. **Which one a running container mounts** — used only if tier 1 still leaves
+   more than one candidate.
+
+A tie that neither tier breaks is a hard error rather than a guess — restoring from
+an orphaned volume is worse than a failed backup, because it looks like it worked.
+
+> **Tier 1 asks "referenced", not "running", on purpose.** Until 2026-08-31 the only
+> tie-break was the running-container one, which made the backup's *answer* depend on
+> which containers happened to be up at 04:00. With beszel stopped, `beszel-data` had
+> two candidates and no signal to separate them, so the nightly run failed that volume
+> — a backup whose correctness depends on uptime is the opposite of what a backup is
+> for. Measured on the NAS: `arr-stack_beszel-data` is referenced by 1 container,
+> `arr-utilities_beszel-data` by 0, running or stopped.
 
 A name in the curated list that resolves to nothing is a **failure**, not a skip.
 Until 2026-08-31 it was a skip: the script auto-detected one prefix (always
@@ -181,6 +196,30 @@ volume was never found and every nightly run reported
 
 `--prefix` restores the old exact-match behaviour for every volume. It is an
 escape hatch for a single-project deployment, not the normal path.
+
+### Exit status — and what that means for callers
+
+**The script exits non-zero if any volume failed.** Before 2026-08-31 it always
+exited `0`: the loop counted the failure, printed a warning, and then ended on an
+`echo`, so `$?` was `0`. Machines read the exit status, and every one of them —
+a cron `&&` chain, a CI step, a wrapper — saw a clean run over an unprotected
+volume. That is the same lie the single-prefix bug told, moved one layer out.
+
+The archive is **still written** first. The non-zero exit comes after the tarball
+is built and moved, so everything that *did* resolve is safely archived and the
+status reports what was missed. Withholding the backup because one volume failed
+would trade a reporting bug for a data-loss one.
+
+> **Check your cron line when adopting this.** A chained command of the form
+> `arr-backup.sh … && backup-prune.sh …` will now **stop pruning** on a partial
+> failure, and the destination will grow unbounded. Separate the two commands
+> (`;`) so retention still runs, and let the non-zero status surface through the
+> log rather than through the chain.
+
+Since `HA_WEBHOOK_URL` is unset on this NAS, `notify_failure` degrades to a plain
+`echo` — so the exit status and the cron log are the only failure signals that
+actually reach anyone. Redirect cron output to a file (`>> /var/log/arr-backup.log
+2>&1`); without it a failure is written to nobody.
 
 ### Restoring: read the manifest, don't assume a prefix
 
@@ -199,13 +238,20 @@ The script auto-detects which request manager volume exists and backs it up:
 
 ## Automated Daily Backup
 
-> **NOT CURRENTLY CONFIGURED — verified on the live NAS 2026-08-30.** This section
-> used to say the cron job below was "already configured". There is no
-> `/mnt/arr-backup`, no `/var/log/arr-backup.log`, and no `arr-stack-backup-*`
-> file on any of the five mounted USB devices (`/mnt/@usb/sd{a,b,c,f,g}1`). No
-> daily USB backup has ever run. The only backups that exist are the pre-deploy
-> ones in `/volume1/docker/arr-stack-backups`. Treat the block below as the
-> procedure for setting it up, not a description of current state.
+> **A nightly job to `/volume1/docker/arr-stack-backups` DOES exist as of
+> 2026-08-31** — installed in root's crontab at 04:00, and confirmed by its first
+> unattended run (`arr-stack-backup-20260831-040002.tar.gz`, 17 volumes in the
+> manifest). It is **not** the USB job described below.
+>
+> **The USB job below is still NOT configured.** There is no `/mnt/arr-backup`, no
+> `/var/log/arr-backup.log`, and no `arr-stack-backup-*` file on any of the five
+> mounted USB devices (`/mnt/@usb/sd{a,b,c,f,g}1`). Treat the block below as the
+> procedure for setting one up, not a description of current state.
+>
+> **The 04:00 job's cron line needs one edit** — see *Exit status* above. It chains
+> `arr-backup.sh … && backup-prune.sh …`, and now that a failed volume exits
+> non-zero, a partial backup would silently stop the pruner. Change `&&` to `;`.
+> (Reading root's crontab needs `sudo`, so this has not been verified in place.)
 
 To run a daily backup to USB at 6am:
 

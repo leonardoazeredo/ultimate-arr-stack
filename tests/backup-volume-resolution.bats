@@ -55,7 +55,37 @@ tailscale_tailscale-exit-state
 tailscale_tailscale-state
 EOF
 )
-    # What running containers actually mount, same measurement.
+    # Volumes referenced by a container that EXISTS, running or stopped -- the
+    # primary tie-break. Same 2026-08-31 measurement. Note arr-stack_configarr-repos
+    # is here but NOT in MOUNTED_VOLUMES below: its container is stopped, which is
+    # exactly the distinction this set exists to draw. Anonymous volumes (64-hex
+    # names) are omitted; they can never match a curated `*_<suffix>` pattern.
+    ATTACHED_VOLUMES=$(cat <<'EOF'
+arr-stack_bazarr-config
+arr-stack_beszel-data
+arr-stack_configarr-repos
+arr-stack_decypharr-config
+arr-stack_dnscrypt-config
+arr-stack_gluetun-config
+arr-stack_jellyfin-cache
+arr-stack_jellyfin-config
+arr-stack_magnetio-redis-data
+arr-stack_pihole-etc-pihole
+arr-stack_prowlarr-config
+arr-stack_qbittorrent-config
+arr-stack_radarr-config
+arr-stack_sabnzbd-config
+arr-stack_seerr-config
+arr-stack_sonarr-config
+arr-utilities_diun-data
+arr-utilities_duc-index
+arr-utilities_uptime-kuma-data
+tailscale_gluetun-exit-config
+tailscale_tailscale-exit-state
+tailscale_tailscale-state
+EOF
+)
+    # What RUNNING containers mount, same measurement. A strict subset of the above.
     MOUNTED_VOLUMES=$(cat <<'EOF'
 arr-stack_bazarr-config
 arr-stack_beszel-data
@@ -89,18 +119,22 @@ EOF
 # rather than assumed: a silently-empty eval would make every test below pass
 # vacuously, which is the exact failure this file exists to prevent.
 load_resolver() {
-    local body
-    body=$(awk '/^resolve_volume\(\) \{$/,/^\}$/' "$BACKUP_SH")
-    [[ -n "$body" ]] || {
-        echo "could not extract resolve_volume() from $BACKUP_SH -- was it renamed?"
-        return 1
-    }
-    grep -qx '}' <<<"$body" || {
-        echo "extraction never reached a closing brace; got:"
-        echo "$body"
-        return 1
-    }
-    eval "$body"
+    local fn body
+    # resolve_volume() delegates to two helpers; loading only the resolver would
+    # make every test below die on "command not found" rather than assert anything.
+    for fn in intersect_lines join_inline resolve_volume; do
+        body=$(awk -v s="$fn() {" 'index($0, s) == 1, /^\}$/' "$BACKUP_SH")
+        [[ -n "$body" ]] || {
+            echo "could not extract $fn() from $BACKUP_SH -- was it renamed?"
+            return 1
+        }
+        grep -qx '}' <<<"$body" || {
+            echo "extraction of $fn() never reached a closing brace; got:"
+            echo "$body"
+            return 1
+        }
+        eval "$body"
+    done
 }
 
 # The curated list, minus comments. Conditional appends (seerr/overseerr) are not
@@ -123,7 +157,7 @@ curated_volumes() {
     }
 }
 
-@test "resolve_volume breaks a two-prefix tie using the mounted volume" {
+@test "resolve_volume breaks a two-prefix tie using a STOPPED container's volume" {
     # beszel-data exists twice: arr-stack_ (live) and arr-utilities_ (orphaned by
     # the project split). Backing up the orphan would produce a successful-looking
     # archive of an abandoned volume.
@@ -132,24 +166,75 @@ curated_volumes() {
     # on this NAS the live volume also happens to sort first, so this assertion
     # would pass against a resolver that simply took the first candidate and
     # ignored the tie-break entirely -- proved by mutation, it did. The inventory
-    # below is inverted so only a resolver actually consulting MOUNTED_VOLUMES
+    # below is inverted so only a resolver actually consulting the tie-break sets
     # can get it right.
+    #
+    # MOUNTED_VOLUMES is EMPTY here on purpose: this is the 04:00 case. The live
+    # container is stopped, so nothing is mounted, and a resolver that tie-breaks
+    # on "what is running" has no answer -- it must either fail the backup or guess.
+    # Tie-breaking on what a container REFERENCES is independent of uptime, which
+    # is the property a backup actually needs.
     load_resolver
     ALL_VOLUMES=$(printf '%s\n' aa-orphan_beszel-data zz-live_beszel-data)
-    MOUNTED_VOLUMES="zz-live_beszel-data"
+    ATTACHED_VOLUMES="zz-live_beszel-data"
+    MOUNTED_VOLUMES=""
 
     resolve_volume beszel-data
     [ "$RESOLVED_VOLUME" = "zz-live_beszel-data" ] || {
-        echo "expected the mounted zz-live_beszel-data, got '$RESOLVED_VOLUME'"
-        echo "(a resolver taking the first candidate would return aa-orphan_beszel-data)"
+        echo "expected zz-live_beszel-data (referenced by a stopped container),"
+        echo "got '$RESOLVED_VOLUME' -- reason: '$RESOLVE_ERROR'"
+        echo "(first-candidate-wins would return aa-orphan_beszel-data; a resolver"
+        echo " tie-breaking only on running containers would fail outright)"
+        return 1
+    }
+}
+
+@test "resolve_volume falls back to the running container when both are attached" {
+    # Tier 2. If two candidates are each referenced by a container that exists,
+    # attachment cannot separate them and liveness is the next best signal.
+    # Inverted fixture again, so first-candidate-wins cannot pass.
+    load_resolver
+    ALL_VOLUMES=$(printf '%s\n' aa-stopped_beszel-data zz-running_beszel-data)
+    ATTACHED_VOLUMES=$(printf '%s\n' aa-stopped_beszel-data zz-running_beszel-data)
+    MOUNTED_VOLUMES="zz-running_beszel-data"
+
+    resolve_volume beszel-data
+    [ "$RESOLVED_VOLUME" = "zz-running_beszel-data" ] || {
+        echo "expected zz-running_beszel-data, got '$RESOLVED_VOLUME' (err: '$RESOLVE_ERROR')"
+        return 1
+    }
+}
+
+@test "resolve_volume never picks a volume no container references at all" {
+    # The orphan case asserted directly, against the MEASURED inventory, rather
+    # than inferred from a synthetic tie-break. arr-utilities_beszel-data is a
+    # leftover of the project split: nothing references it running or stopped.
+    # Restoring from it would look exactly like success.
+    load_resolver
+    MOUNTED_VOLUMES=""
+
+    resolve_volume beszel-data
+    [ "$RESOLVED_VOLUME" = "arr-stack_beszel-data" ] || {
+        echo "expected arr-stack_beszel-data with nothing running, got '$RESOLVED_VOLUME'"
+        echo "reason: '$RESOLVE_ERROR'"
         return 1
     }
 }
 
 @test "resolve_volume refuses to guess when a tie cannot be broken" {
-    # configarr-repos exists under both prefixes and neither is mounted. Picking
-    # one at random is worse than failing: the archive would look complete.
+    # Two candidates, each referenced by an existing container AND each running.
+    # Neither tie-break separates them, so no signal is left. Picking one at random
+    # is worse than failing: the archive would look complete.
+    #
+    # This used the measured configarr-repos pair until 2026-08-31. It no longer
+    # can: arr-stack_configarr-repos is referenced by a stopped container and the
+    # arr-utilities one by nothing, so the resolver now separates them correctly.
+    # Keeping the old fixture would have left a test of a case that no longer
+    # exists -- i.e. one that cannot fail.
     load_resolver
+    ALL_VOLUMES=$(printf '%s\n' proj-a_configarr-repos proj-b_configarr-repos)
+    ATTACHED_VOLUMES=$(printf '%s\n' proj-a_configarr-repos proj-b_configarr-repos)
+    MOUNTED_VOLUMES=$(printf '%s\n' proj-a_configarr-repos proj-b_configarr-repos)
 
     run resolve_volume configarr-repos
     [ "$status" -ne 0 ] || {
@@ -180,6 +265,7 @@ curated_volumes() {
     # has to be right. Proved by mutation: relaxing the matcher's length guard
     # passes the mounted variant of this test and fails this one.
     load_resolver
+    ATTACHED_VOLUMES=""
     MOUNTED_VOLUMES=""
 
     resolve_volume tailscale-state
@@ -371,6 +457,107 @@ curated_volumes() {
         echo "an ambiguous resolution is indistinguishable from the volume being absent."
         echo "block was:"
         echo "$code"
+        return 1
+    }
+}
+
+@test "a run with failures exits non-zero" {
+    # Until 2026-08-31 the script counted failures, printed a warning, and then
+    # ended on an echo -- so $? was 0. Every machine reading the result (a cron
+    # `&&` chain, a CI step, a wrapper checking status) saw a clean run over an
+    # unprotected volume: the same lie the single-prefix bug told, one layer out
+    # and at the layer machines actually read.
+    local blk
+    blk=$(awk '/^if \[ "\$FAILED" -gt 0 \]; then$/,/^fi$/' "$BACKUP_SH")
+    [ -n "$blk" ] || {
+        echo "no \$FAILED-gated exit block found in $BACKUP_SH"
+        return 1
+    }
+    grep -qE '^[[:space:]]*exit 1$' <<<"$blk" || {
+        echo "the \$FAILED-gated block does not exit non-zero:"
+        echo "$blk"
+        return 1
+    }
+}
+
+@test "the non-zero exit runs after the tarball, so a partial backup is still archived" {
+    # Placement is the whole point. Exiting the moment a volume failed would trade
+    # a reporting bug for a data-loss one: every volume that DID resolve would go
+    # unarchived. A partial backup that reports itself as partial is useful;
+    # withholding the archive is not. A guard in the wrong place is not a guard.
+    local tar_line exit_line
+    tar_line=$(grep -n '^STEP="creating tarball"$' "$BACKUP_SH" | cut -d: -f1)
+    exit_line=$(grep -n '^if \[ "\$FAILED" -gt 0 \]; then$' "$BACKUP_SH" | cut -d: -f1)
+    [ -n "$tar_line" ] || { echo "could not find the tarball step"; return 1; }
+    [ -n "$exit_line" ] || { echo "could not find the \$FAILED-gated exit"; return 1; }
+    [ "$exit_line" -gt "$tar_line" ] || {
+        echo "the failure exit (line $exit_line) precedes tarball creation (line $tar_line)"
+        echo "-- a failed volume would suppress the archive of every volume that worked"
+        return 1
+    }
+}
+
+@test "two attached candidates with nothing running is ambiguous, not a guess" {
+    # Exercises the empty-MOUNTED_VOLUMES path through the tier-2 intersect, which
+    # no other test reaches: every other fixture either resolves at tier 1 or has
+    # something running. Without it, intersect_lines' behaviour against an empty
+    # set is asserted nowhere -- and "returns nothing" vs "returns everything" is
+    # the difference between a refused backup and a silently wrong one.
+    load_resolver
+    ALL_VOLUMES=$(printf '%s\n' proj-a_beszel-data proj-b_beszel-data)
+    ATTACHED_VOLUMES=$(printf '%s\n' proj-a_beszel-data proj-b_beszel-data)
+    MOUNTED_VOLUMES=""
+
+    run resolve_volume beszel-data
+    [ "$status" -ne 0 ] || {
+        echo "picked a candidate with no running-container signal to separate them"
+        return 1
+    }
+
+    resolve_volume beszel-data || true
+    [ -z "$RESOLVED_VOLUME" ] || {
+        echo "RESOLVED_VOLUME set on a failed resolution: '$RESOLVED_VOLUME'"
+        return 1
+    }
+}
+
+@test "ATTACHED_VOLUMES is built from containers that exist, not just running ones" {
+    # STATIC assertion, and deliberately so -- stated rather than dressed up as
+    # more than it is. Every functional test above supplies its own inventories so
+    # the resolver can be exercised without docker, which means none of them can
+    # see a change to the code that BUILDS those inventories. Proved by mutation:
+    # replacing the real ATTACHED_VOLUMES with "" was caught by nothing.
+    #
+    # A `docker ps` here instead of `docker ps -a` makes the whole backup's answer
+    # depend on which containers happen to be up at 04:00 -- the defect this
+    # branch exists to remove.
+    grep -qE '^ATTACHED_VOLUMES=\$\(docker ps -a -q' "$BACKUP_SH" || {
+        echo "ATTACHED_VOLUMES is not built from 'docker ps -a -q'. Found:"
+        grep -nE '^(ATTACHED|MOUNTED)_VOLUMES=' "$BACKUP_SH" || echo "  (no such assignment at all)"
+        return 1
+    }
+}
+
+@test "intersect_lines matches WHOLE lines, so a substring name cannot false-match" {
+    # Found by mutation testing (universalmutator), not by review: replacing
+    # `grep -Fxq` with `grep -Fq` survived all 18 tests above. Nothing here proved
+    # the -x was load-bearing, so the exact-match property was uncovered.
+    #
+    # It is load-bearing. Volume names nest: a candidate `old_seerr-config` is a
+    # substring of an unrelated `xold_seerr-config-v2`. Without -x the orphan
+    # matches a live volume it has nothing to do with, both candidates survive
+    # tier 1, and a name that resolves cleanly today becomes ambiguous -- i.e. a
+    # FAILED volume, silently, the moment someone creates a longer-named volume.
+    load_resolver
+
+    local cands=$'old_seerr-config\nnew_seerr-config'
+    local attached=$'xold_seerr-config-v2\nnew_seerr-config'
+
+    run intersect_lines "$cands" "$attached"
+    [ "$output" = "new_seerr-config" ] || {
+        echo "expected only the exactly-matching new_seerr-config, got:"
+        echo "$output"
+        echo "(a substring match would also return old_seerr-config)"
         return 1
     }
 }
