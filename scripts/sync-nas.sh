@@ -58,7 +58,7 @@ fi
 # the old commit. Measured 2026-08-31: local at 90e72c4, NAS at 93c8ed4, this
 # script printed "done." and exited 0. Compare against the remote ref before
 # doing anything, so the impossible case fails before it can look like success.
-REMOTE_SHA="$(GIT_TERMINAL_PROMPT=0 git ls-remote origin "refs/heads/${BRANCH}" 2>/dev/null | awk '{print $1}')"
+REMOTE_SHA="$(GIT_TERMINAL_PROMPT=0 timeout 20 git ls-remote origin "refs/heads/${BRANCH}" 2>/dev/null | awk '{print $1}')"
 if [[ -z "$REMOTE_SHA" ]]; then
     echo "sync-nas: origin has no branch '${BRANCH}' - push it first, the NAS pulls from origin" >&2
     exit 1
@@ -73,7 +73,16 @@ fi
 echo "sync-nas: syncing ${BRANCH} (${LOCAL_SHA:0:7}) on ${NAS_SYNC_HOST}:${NAS_SYNC_PATH} ..."
 
 ARRGIT="docker run --rm -v '${NAS_SYNC_PATH}:/repo' -w /repo alpine/git -c safe.directory=/repo"
-ssh "$NAS_SYNC_HOST" "
+
+# Every ssh below carries an explicit ConnectTimeout. The probe above proves the
+# NAS answered a moment ago, not that it still will: a NAS that stops answering
+# between the probe and here parks a bare `ssh` on the OS-default TCP connect
+# timeout for ~2 minutes. This project has already paid for that once -- a CI
+# step sat there before anyone realised the connection was never being made --
+# and it is worse in a git hook, which holds up the merge that invoked it.
+SSH_OPTS=(-o ConnectTimeout=15 -o BatchMode=yes)
+
+ssh "${SSH_OPTS[@]}" "$NAS_SYNC_HOST" "
     ${ARRGIT} fetch origin '${BRANCH}' &&
     ${ARRGIT} checkout '${BRANCH}' &&
     ${ARRGIT} pull --ff-only origin '${BRANCH}'
@@ -82,7 +91,7 @@ ssh "$NAS_SYNC_HOST" "
 # Verify the OUTCOME, not the exit status of the commands that were supposed to
 # produce it. Every silent-success bug this script has had shared one shape: a
 # step reported OK and nobody asked the NAS what it was actually holding. Ask.
-NAS_STATE="$(ssh "$NAS_SYNC_HOST" "${ARRGIT} rev-parse HEAD && ${ARRGIT} rev-parse --abbrev-ref HEAD" 2>/dev/null || true)"
+NAS_STATE="$(ssh "${SSH_OPTS[@]}" "$NAS_SYNC_HOST" "${ARRGIT} rev-parse HEAD && ${ARRGIT} rev-parse --abbrev-ref HEAD" 2>/dev/null || true)"
 NAS_SHA="$(sed -n 1p <<<"$NAS_STATE")"
 NAS_BRANCH="$(sed -n 2p <<<"$NAS_STATE")"
 if [[ "$NAS_SHA" != "$LOCAL_SHA" || "$NAS_BRANCH" != "$BRANCH" ]]; then

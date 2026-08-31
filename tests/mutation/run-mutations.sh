@@ -115,7 +115,10 @@ mutation() {
         ERRORED=$((ERRORED + 1)); return 0
     fi
 
-    local backup="$WORK/$(echo "$id" | tr -c 'A-Za-z0-9._-' '_').orig"
+    # Split declaration from assignment (SC2155): `local x=$(cmd)` takes the
+    # exit status of `local`, not of the command.
+    local backup
+    backup="$WORK/$(echo "$id" | tr -c 'A-Za-z0-9._-' '_').orig"
     cp "$file" "$backup"
     CURRENT_FILE="$file"; CURRENT_BACKUP="$backup"
 
