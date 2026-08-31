@@ -338,6 +338,21 @@ backup aborts the deploy before `main` is touched. The exit-status work is
 load-bearing there. It is specifically the unattended nightly run that is blind,
 and `>> /var/log/arr-backup.log 2>&1` is what closes it.
 
+**On the log's growth, since nothing rotates it.** There is no `logrotate` binary on
+this NAS (`/etc/logrotate.d` exists but is unused), so the file grows without bound
+once the redirection is added. Measured: a successful run prints **2053 bytes over
+41 lines**, so ~0.75 MB/year, against 14 GB free on the 16 GB overlay root that
+holds `/var`. That is small enough to leave alone; it is recorded so the decision is
+a decision rather than an oversight. A failing run prints more, but a NAS failing
+every night has a louder problem than its log size.
+
+Note the division of responsibility, because either half alone leaves failures
+silent: the **script** must not swallow stderr, and the **caller** must capture it.
+`arr-backup.sh` cannot verify the second half — nothing in a process can tell
+whether its stderr reaches a human — which is why that fact lives in this file,
+dated, instead of being asserted in a source comment that would quietly go stale
+the day the cron line is fixed.
+
 To run a daily backup to USB at 6am:
 
 ```bash

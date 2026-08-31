@@ -227,17 +227,13 @@ fi
 # own message ("permission denied", "Cannot connect to the Docker daemon"), which
 # no error string reconstructed here can substitute for.
 #
-# Do NOT read that as "cron will show it". Measured 2026-08-31: the 04:00 entry in
-# root's crontab has no redirection, the crontab sets no MAILTO, the NAS has no MTA
-# on PATH and an empty /var/mail, and notify_failure() no-ops because
-# HA_WEBHOOK_URL is unset and this script never sources .env. Every failure signal
-# this script emits -- this message, the summary, notify_failure, and the exit
-# status -- is discarded on the nightly run. It reaches a human only via an
-# interactive run or .github/workflows/nas-auto-deploy.yml, which runs both scripts
-# under `set -e` with the output in the job log.
-#
-# The cron entry needs `>> /var/log/arr-backup.log 2>&1` to close that. See
-# docs/BACKUP.md "Nightly run has no failure signal".
+# Do NOT read that as "whoever runs this will see it". This script emits; it cannot
+# make anyone listen. Whether stderr reaches a human is a property of the CALLER --
+# a terminal, a CI job log, a cron entry's redirection -- and this script has no way
+# to check which it got. Deployment-side, that guarantee has been broken before.
+# docs/BACKUP.md "Nightly run has no failure signal" carries the current measurement;
+# it is dated there rather than asserted here, because it describes the environment
+# and will change the day someone fixes it.
 docker_volume_inventory() {
   local ids out
   INVENTORY_VOLUMES=""
