@@ -205,12 +205,49 @@ if [ -z "$ALL_VOLUMES" ]; then
   exit 1
 fi
 
-# Volumes a RUNNING container actually mounts. Used only to break ties -- see
-# resolve_volume(). `|| true` on both stages because an empty result is a legal
-# state (nothing running) and pipefail would otherwise abort the script.
+# Volumes referenced by a container that EXISTS -- running OR stopped. This is the
+# PRIMARY tie-break (see resolve_volume()), and it deliberately does not ask what is
+# running. A backup whose answer changes because a container happened to be down at
+# 04:00 is a backup whose correctness depends on uptime, which is the opposite of
+# what a backup is for. A volume orphaned by a project rename is referenced by
+# nothing in ANY state -- that is what makes it an orphan, and it is precisely the
+# distinction `docker ps -a` draws and `docker ps` cannot.
+# `|| true` on both stages: an empty result is a legal state and pipefail would
+# otherwise abort the script.
+ATTACHED_VOLUMES=$(docker ps -a -q 2>/dev/null \
+  | xargs -r docker inspect --format '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}}{{"\n"}}{{end}}{{end}}' 2>/dev/null \
+  | grep . || true)
+
+# Volumes a RUNNING container mounts. A strict subset of ATTACHED_VOLUMES, used
+# only as a SECOND tie-break for the case where two candidates are both attached
+# to containers that exist.
 MOUNTED_VOLUMES=$(docker ps -q 2>/dev/null \
   | xargs -r docker inspect --format '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}}{{"\n"}}{{end}}{{end}}' 2>/dev/null \
   | grep . || true)
+
+# Keep only the lines of $1 that also appear in $2; both newline-separated.
+# The empty-$2 early return is a fast path, NOT a correctness fix: the per-line
+# `grep -Fxq` below already returns nothing against an empty set, verified rather
+# than assumed. It is spelled out because an empty tie-break set is a normal state
+# (nothing running) and a reader should not have to derive that it is safe.
+intersect_lines() {
+  local list="$1" want="$2" line out=""
+  [ -n "$want" ] || { printf ''; return 0; }
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    if grep -Fxq "$line" <<<"$want"; then
+      out+="$line"$'\n'
+    fi
+  done <<<"$list"
+  printf '%s' "${out%$'\n'}"
+}
+
+# Newline-separated list -> single space-separated line, for error messages.
+join_inline() {
+  local s
+  s=$(tr '\n' ' ' <<<"$1")
+  printf '%s' "${s% }"
+}
 
 # Resolve one curated volume name to a real Docker volume.
 #
@@ -220,13 +257,14 @@ MOUNTED_VOLUMES=$(docker ps -q 2>/dev/null \
 # would report an empty reason.
 #
 # Some names exist under TWO prefixes, one live and one orphaned by a project
-# rename -- `arr-stack_beszel-data` is mounted by beszel, `arr-utilities_beszel-data`
+# rename -- `arr-stack_beszel-data` is used by beszel, `arr-utilities_beszel-data`
 # is a leftover of the split. Backing up the orphan would produce a successful-looking
 # archive of an abandoned volume: the same lie as the skip above, one layer deeper.
-# So a tie is broken by what a running container actually mounts, and a tie that
-# cannot be broken that way is an ERROR, never a guess.
+# A tie is broken by which candidate a container REFERENCES (running or stopped),
+# falling back to which one is currently mounted only if that leaves more than one.
+# A tie that cannot be broken either way is an ERROR, never a guess.
 resolve_volume() {
-  local suffix="$1" cands live v n_cands n_live cands_inline
+  local suffix="$1" cands attached live n_cands
   RESOLVED_VOLUME=""
   RESOLVE_ERROR=""
 
@@ -262,30 +300,30 @@ resolve_volume() {
     return 0
   fi
 
-  live=""
-  while IFS= read -r v; do
-    [ -n "$v" ] || continue
-    if grep -Fxq "$v" <<<"$MOUNTED_VOLUMES"; then
-      live+="$v"$'\n'
-    fi
-  done <<<"$cands"
-  live=${live%$'\n'}
+  # Tier 1: which candidates does a container reference at all? Not "is running":
+  # see ATTACHED_VOLUMES above. An orphan is referenced by nothing in any state.
+  attached=$(intersect_lines "$cands" "$ATTACHED_VOLUMES")
 
-  if [ -n "$live" ]; then
-    n_live=$(wc -l <<<"$live")
-    if [ "$n_live" -eq 1 ]; then
-      RESOLVED_VOLUME="$live"
-      return 0
-    fi
+  if [ -z "$attached" ]; then
+    RESOLVE_ERROR="ambiguous: $(join_inline "$cands") -- no container references any of them, running or stopped. Re-run with --prefix to choose."
+    return 1
   fi
 
-  cands_inline=$(tr '\n' ' ' <<<"$cands")
-  cands_inline=${cands_inline% }
-  if [ -n "$live" ]; then
-    RESOLVE_ERROR="ambiguous: $cands_inline -- several are mounted by running containers. Re-run with --prefix to choose."
-  else
-    RESOLVE_ERROR="ambiguous: $cands_inline -- none are mounted by a running container. Re-run with --prefix to choose."
+  if [ "$(wc -l <<<"$attached")" -eq 1 ]; then
+    RESOLVED_VOLUME="$attached"
+    return 0
   fi
+
+  # Tier 2: two or more are genuinely in use by containers that exist. Only now
+  # does it matter which is running -- and if that still does not separate them,
+  # refuse rather than guess.
+  live=$(intersect_lines "$attached" "$MOUNTED_VOLUMES")
+  if [ -n "$live" ] && [ "$(wc -l <<<"$live")" -eq 1 ]; then
+    RESOLVED_VOLUME="$live"
+    return 0
+  fi
+
+  RESOLVE_ERROR="ambiguous: $(join_inline "$attached") -- each is referenced by an existing container. Re-run with --prefix to choose."
   return 1
 }
 
@@ -652,3 +690,21 @@ echo ""
 # each directory to the volume it came from; read it rather than assuming a prefix.
 echo "To restore: read volume-manifest.tsv for the source volume of each directory, then"
 echo "            docker run --rm -v ./backup/DIR:/src:ro -v SOURCE_VOLUME:/dst alpine cp -a /src/. /dst/"
+
+# A volume that could not be resolved or copied is a FAILURE, and the exit status
+# has to say so. Until 2026-08-31 this script exited 0 whatever FAILED was: the loop
+# counted it, printed a warning, and then the last statement was an echo -- so $? was
+# 0. That is the same lie the single-prefix bug told, moved one layer out, and it is
+# the layer that machines read. A cron `&&` chain, a CI step and `notify_failure`'s
+# unconfigured webhook all saw a clean run.
+#
+# This is deliberately the LAST statement, after the tarball is built and moved:
+# everything that DID resolve is still archived. A partial backup that reports
+# itself as partial is useful; withholding the archive because one volume failed
+# would trade a reporting bug for a data-loss one.
+#
+# CALLERS MUST BE CHECKED when this changes: a `backup && prune` chain will now stop
+# pruning on a partial failure. See docs/BACKUP.md.
+if [ "$FAILED" -gt 0 ]; then
+  exit 1
+fi
