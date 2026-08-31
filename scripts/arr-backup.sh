@@ -61,7 +61,11 @@ notify_failure() {
   fi
 }
 STEP="initialising"
-trap 'notify_failure "Failed during: ${STEP}. Check /var/log/arr-backup.log"' ERR
+# No "check /var/log/arr-backup.log" here: that file does not exist on this NAS
+# and nothing creates it. The cron entry would have to redirect into it first
+# (see docs/BACKUP.md "Nightly run has no failure signal"). Naming a log that is
+# never written sends whoever reads this alert to an empty path.
+trap 'notify_failure "Failed during: ${STEP}"' ERR
 
 # Derive stack directory from script location (scripts/ is one level below stack root)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -225,7 +229,7 @@ fi
 #
 # Do NOT read that as "cron will show it". Measured 2026-08-31: the 04:00 entry in
 # root's crontab has no redirection, the crontab sets no MAILTO, the NAS has no MTA
-# on PATH and an empty /var/mail, and notify_failure() below no-ops because
+# on PATH and an empty /var/mail, and notify_failure() no-ops because
 # HA_WEBHOOK_URL is unset and this script never sources .env. Every failure signal
 # this script emits -- this message, the summary, notify_failure, and the exit
 # status -- is discarded on the nightly run. It reaches a human only via an
