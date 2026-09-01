@@ -2,6 +2,15 @@
 # YAML syntax validation for compose files
 # Uses python (usually available) or docker compose config
 
+# Parse one YAML file, quietly. The path goes through argv, NOT into the -c
+# string: it used to be interpolated into a single-quoted python literal, so a
+# path holding a quote ended the literal and anything after it was executed as
+# code. Paths here come from `git diff --cached`, which is to say from whatever
+# anyone was able to stage.
+_yaml_parses() {
+    python3 -c 'import sys, yaml; yaml.safe_load(open(sys.argv[1]))' "$1"
+}
+
 check_yaml_syntax() {
     local errors=0
     local repo_root
@@ -22,29 +31,46 @@ check_yaml_syntax() {
         has_pyyaml=true
     fi
 
-    # Try python with PyYAML first (most reliable)
+    # Both arms iterate with `while read`, not `for file in $staged_compose`.
+    # Word splitting turns one staged path containing a space into two paths
+    # that do not exist, and the `-f ... || continue` on the next line then
+    # turns THAT into a silent pass -- an unparseable file waved through
+    # because its name had a space in it.
+    #
+    # The parser is asked twice on failure by design: once quietly for the
+    # verdict, once with stderr shown so the user gets the parser's own message
+    # rather than a bare "invalid".
     if $has_pyyaml; then
-        for file in $staged_compose; do
+        while IFS= read -r file; do
+            [[ -n "$file" ]] || continue
             [[ -f "$repo_root/$file" ]] || continue
-            if ! python3 -c "import yaml; yaml.safe_load(open('$repo_root/$file'))" 2>/dev/null; then
+            if ! _yaml_parses "$repo_root/$file"; then
                 echo "    ERROR: Invalid YAML syntax in $file"
-                # Show the actual error
-                python3 -c "import yaml; yaml.safe_load(open('$repo_root/$file'))" 2>&1 | head -3 | sed 's/^/      /'
+                _yaml_parses "$repo_root/$file" 2>&1 | head -3 | sed 's/^/      /'
                 errors=$((errors + 1))
             fi
-        done
+        done <<< "$staged_compose"
     else
         # Fallback: basic check with grep for common YAML errors
-        for file in $staged_compose; do
+        while IFS= read -r file; do
+            [[ -n "$file" ]] || continue
             [[ -f "$repo_root/$file" ]] || continue
             # Check for tabs (YAML uses spaces)
             if grep -qP '^\t' "$repo_root/$file" 2>/dev/null; then
                 echo "    ERROR: Tab characters found in $file (YAML requires spaces)"
                 errors=$((errors + 1))
             fi
-        done
+        done <<< "$staged_compose"
         echo "    NOTE: Install PyYAML for full validation: pip install pyyaml"
     fi
 
-    return $errors
+    if [[ $errors -eq 0 ]]; then
+        return 0
+    fi
+
+    # Count in the message, boolean in the status -- `return $errors` truncates
+    # to one byte, and scripts/pre-commit:91 is `if check_yaml_syntax; then`, so
+    # the count was only ever a liability there.
+    echo "    ERROR: $errors file(s) with invalid YAML"
+    return 1
 }

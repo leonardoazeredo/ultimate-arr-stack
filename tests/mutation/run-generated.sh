@@ -67,6 +67,7 @@ TARGETS=(
   "scripts/lib/check-image-versions.sh:tests/lib-image-versions.bats:^image-versions: "
   "scripts/lib/configure-helpers.sh:tests/lib-configure-helpers.bats:^configure-helpers: "
   "scripts/lib/check-doc-links.sh:tests/lib-doc-links.bats:^doc-links: "
+  "scripts/lib/check-yaml-syntax.sh:tests/lib-yaml-syntax.bats:^yaml-syntax: "
   # scripts/lib/common.sh is deliberately NOT here. It was swept once, on the
   # theory that being sourced by three tested files made it covered: 78 mutants
   # generated, 78 survived, 0 killed. Sourced is not covered -- the four tests
