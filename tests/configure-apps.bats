@@ -199,10 +199,18 @@ EOF
     assert_output "s3cret"
 }
 
+# Every fake password below spells "example" on purpose, and the pre-commit
+# hook is why. check-secrets.sh Pattern 9 flags `_PASSWORD=<15+ non-space
+# chars>` in any tracked file, and it exempts only `tests/fixtures/*`, not
+# `tests/*.bats` -- so a plausible-looking fixture value here blocks every
+# later commit in the repo, not just this file's. The pattern's own escape
+# hatch is the placeholder allowlist `(your|here|example|placeholder|xxx)`,
+# so naming the values as examples keeps the guard armed at full strength
+# everywhere instead of widening the exemption to all of tests/.
 @test "configure-apps: env_value matches the key at the start of the line only" {
-    printf 'OLD_QBIT_PASSWORD=wrong\nQBIT_PASSWORD=right\n' > "$ENV_FILE"
+    printf 'OLD_QBIT_PASSWORD=example-wrong\nQBIT_PASSWORD=example-right\n' > "$ENV_FILE"
     run "$DRIVER" env_value QBIT_PASSWORD "$ENV_FILE"
-    assert_output "right"
+    assert_output "example-right"
 }
 
 @test "configure-apps: env_value fails on a missing key and a missing file" {
@@ -321,17 +329,17 @@ EOF
 }
 
 @test "configure-apps: a QBIT_PASSWORD in the environment wins over everything else" {
-    printf 'QBIT_PASSWORD=from-env-file\n' > "$ENV_FILE"
-    QBIT_PASSWORD=from-environment \
+    printf 'QBIT_PASSWORD=example-env-file\n' > "$ENV_FILE"
+    QBIT_PASSWORD=example-environment \
         run "$DRIVER" eval 'discover_api_keys >/dev/null 2>&1; echo "PW=[$QBIT_PASSWORD]"'
-    assert_output --partial "PW=[from-environment]"
+    assert_output --partial "PW=[example-environment]"
     assert_stub_not_called docker "logs"
 }
 
 @test "configure-apps: the .env password is unquoted before use" {
-    printf 'QBIT_PASSWORD="quoted-secret"\n' > "$ENV_FILE"
+    printf 'QBIT_PASSWORD="example-quoted"\n' > "$ENV_FILE"
     run "$DRIVER" eval 'discover_api_keys >/dev/null 2>&1; echo "PW=[$QBIT_PASSWORD]"'
-    assert_output --partial "PW=[quoted-secret]"
+    assert_output --partial "PW=[example-quoted]"
     assert_stub_not_called docker "logs"
 }
 
@@ -339,10 +347,10 @@ EOF
     # The old code read the bare relative path `.env`, so running from anywhere
     # but the repo root silently skipped this lookup and fell through to the
     # log scrape. Running from / is the cheapest way to prove it no longer does.
-    printf 'QBIT_PASSWORD=found-anyway\n' > "$ENV_FILE"
+    printf 'QBIT_PASSWORD=example-anyway\n' > "$ENV_FILE"
     cd /
     run "$DRIVER" eval 'discover_api_keys >/dev/null 2>&1; echo "PW=[$QBIT_PASSWORD]"'
-    assert_output --partial "PW=[found-anyway]"
+    assert_output --partial "PW=[example-anyway]"
 }
 
 @test "configure-apps: with no env and no .env the temp password is scraped from the logs" {

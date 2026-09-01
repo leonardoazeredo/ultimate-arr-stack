@@ -35,17 +35,89 @@ setup() {
     # wait_for_service's only real cost. Its loop is bounded by $SECONDS, not by
     # an iteration count, so a no-op sleep spins rather than hangs.
     sleep() { :; }
+
+    declare -gA ROUTE_BODY=() ROUTE_CODE=()
 }
 
 # Emit exactly what curl -w '\n%{http_code}' -o - would: body, newline, code.
 # CURL_BODY may contain newlines; CURL_CODE is written verbatim, so a test can
 # hand over "000" or "" the way curl really does.
+#
+# configure_arr_service talks to fifteen endpoints in one call, so a single
+# CURL_BODY cannot describe it. When a test has registered a route for
+# "<METHOD> <path>", that route answers; otherwise the CURL_BODY/CURL_CODE pair
+# above does, unchanged, for every test written before routing existed.
 curl() {
     printf '%s\t%s\n' curl "$*" >> "$CURL_LOG"
+    local method=GET url="" prev="" a
+    for a in "$@"; do
+        [[ "$prev" == "-X" ]] && method="$a"
+        [[ "$a" == http* ]] && url="$a"
+        prev="$a"
+    done
+    local path="${url#http://}"; path="/${path#*/}"
+    local key="$method $path"
+    if [[ -n "${ROUTE_CODE[$key]+set}" ]]; then
+        [[ -n "${ROUTE_BODY[$key]}" ]] && printf '%s\n' "${ROUTE_BODY[$key]}"
+        printf '%s\n' "${ROUTE_CODE[$key]}"
+        return 0
+    fi
     if [[ -n "${CURL_BODY:-}" ]]; then printf '%s\n' "$CURL_BODY"; fi
     printf '%s' "${CURL_CODE-200}"
     printf '\n'
     return "${CURL_RC:-0}"
+}
+
+# route "<METHOD> <path>" "<body>" [code]
+route() { ROUTE_BODY["$1"]="${2-}"; ROUTE_CODE["$1"]="${3:-200}"; }
+
+assert_curl() {
+    grep -qF -- "$1" "$CURL_LOG" || {
+        echo "expected a curl call containing: $1"
+        cat "$CURL_LOG"; return 1
+    }
+}
+
+refute_curl() {
+    if grep -qF -- "$1" "$CURL_LOG"; then
+        echo "curl was called with '$1' and should not have been"
+        cat "$CURL_LOG"; return 1
+    fi
+}
+
+# bats-assert reports every failure by calling bats-support's `fail`, which
+# returns 1. The unit under test DEFINES `fail` -- it is one of this library's
+# output helpers (configure-helpers.sh:34), and it returns 0. setup() sources
+# the library into the bats shell, so bats-support's `fail` is shadowed and
+# EVERY assert_output/assert_success in this file becomes incapable of failing.
+# Proven: two identical `run echo hello; assert_output --partial "not-present"`
+# tests, one with the library sourced and one without -- the clean one goes red,
+# the sourced one reports ok.
+#
+# So this file asserts through helpers that return 1 themselves. The tests
+# written before configure_arr_service was covered already used plain `[ ... ]`
+# and were never affected. tests/shellcheck.bats carries a standing guard so the
+# next test file to source a `fail`-defining library cannot rediscover this the
+# hard way.
+out_has() {
+    [[ "$output" == *"$1"* ]] || {
+        echo "expected in output: $1"
+        echo "--- actual output ---"; echo "$output"; return 1
+    }
+}
+
+out_lacks() {
+    [[ "$output" != *"$1"* ]] || {
+        echo "must NOT be in output: $1"
+        echo "--- actual output ---"; echo "$output"; return 1
+    }
+}
+
+status_is() {
+    [[ "$status" -eq "$1" ]] || {
+        echo "expected status $1, got $status"
+        echo "--- actual output ---"; echo "$output"; return 1
+    }
 }
 
 # --- _api_request: the status contract -------------------------------------
@@ -302,4 +374,291 @@ curl() {
     run json_extract 'not json' "print(data)"
     [ "$status" -ne 0 ]
     [ -z "$output" ]
+}
+
+# --- configure_arr_service --------------------------------------------------
+#
+# 250 lines, eight sections, fifteen endpoints, and until now not one test. It
+# is also the only function here that WRITES: every section is a read, a
+# comparison, and a conditional POST or PUT. So the property worth pinning
+# hardest is the negative one — given an *arr that is already configured, it
+# must issue no write at all. That is what makes the script's "safe to re-run"
+# claim true.
+#
+# The baseline below is a fully-configured Sonarr. Each test perturbs exactly
+# one thing about it, which keeps the assertion about that thing rather than
+# about the fixture.
+
+META_FIELDS='[{"name":"episodeMetadata","value":true}]'
+NAMING_PAYLOAD='{"renameEpisodes":true,"standardEpisodeFormat":"{Series Title}"}'
+
+arr_setup() {
+    NAS_IP=10.0.0.1
+    DRY_RUN=false
+    VERBOSE=false
+    QBIT_USERNAME=admin
+    QBIT_PASSWORD=hunter2
+    SABNZBD_RUNNING=false
+    SABNZBD_API_KEY=""
+    CONFIGURED=0; SKIPPED=0; FAILED=0
+
+    route "GET /api/v3/health" "" 200
+    route "GET /api/v3/rootfolder"       '[{"path":"/data/media/tv"}]'
+    route "GET /api/v3/downloadclient"   '[{"name":"qBittorrent"},{"name":"SABnzbd"}]'
+    route "GET /api/v3/metadata"         '[{"id":3,"implementation":"XbmcMetadata","enable":true}]'
+    route "GET /api/v3/config/naming"    '{"renameEpisodes":true}'
+    route "GET /api/v3/customformat"     '[{"id":9,"name":"Reject ISO"}]'
+    route "GET /api/v3/qualityprofile"   '[{"id":1}]'
+    route "GET /api/v3/qualityprofile/1" '{"id":1,"formatItems":[{"format":9,"name":"Reject ISO","score":-10000}]}'
+    route "GET /api/v3/delayprofile"     '[{"preferredProtocol":"usenet"}]'
+
+    route "POST /api/v3/rootfolder"      '{"id":1}' 201
+    route "POST /api/v3/downloadclient"  '{"id":2}' 201
+    route "PUT /api/v3/metadata/3"       '{}'
+    route "PUT /api/v3/config/naming"    '{}'
+    route "POST /api/v3/customformat"    '{"id":9}' 201
+    route "PUT /api/v3/qualityprofile/1" '{}'
+    route "POST /api/v3/delayprofile"    '{}' 201
+}
+
+sonarr() {
+    configure_arr_service Sonarr 8989 sonarr-key /data/media/tv tv \
+        renameEpisodes "$META_FIELDS" "$NAMING_PAYLOAD"
+    echo "COUNTS ${CONFIGURED} ${SKIPPED} ${FAILED}"
+}
+
+radarr() {
+    configure_arr_service Radarr 7878 radarr-key /data/media/movies movies \
+        renameMovies "$META_FIELDS" "$NAMING_PAYLOAD"
+    echo "COUNTS ${CONFIGURED} ${SKIPPED} ${FAILED}"
+}
+
+@test "configure-helpers: an already-configured arr issues no write at all" {
+    arr_setup
+    run sonarr
+    status_is 0
+    refute_curl "-X POST"
+    refute_curl "-X PUT"
+    out_has "COUNTS 0 5 0"
+}
+
+@test "configure-helpers: no API key stops before any HTTP call" {
+    arr_setup
+    run configure_arr_service Sonarr 8989 "" /data/media/tv tv \
+        renameEpisodes "$META_FIELDS" "$NAMING_PAYLOAD"
+    out_has "Sonarr: no API key, skipping"
+    [ ! -s "$CURL_LOG" ]
+}
+
+@test "configure-helpers: a service that never answers is not configured anyway" {
+    arr_setup
+    ROUTE_CODE["GET /api/v3/health"]=404
+    WAIT_TIMEOUT=1 run sonarr
+    out_has "Sonarr not responding"
+    refute_curl "-X POST"
+    refute_curl "-X PUT"
+}
+
+@test "configure-helpers: a missing root folder is created at the path it was given" {
+    arr_setup
+    route "GET /api/v3/rootfolder" '[]'
+    run sonarr
+    assert_curl '{"path":"/data/media/tv"}'
+    out_has "added root folder /data/media/tv"
+}
+
+@test "configure-helpers: a rejected root-folder write is counted, not swallowed" {
+    arr_setup
+    route "GET /api/v3/rootfolder" '[]'
+    route "POST /api/v3/rootfolder" '{"message":"nope"}' 400
+    run sonarr
+    out_has "✗ Sonarr: add root folder"
+    out_has "COUNTS 0 4 1"
+}
+
+@test "configure-helpers: the qBittorrent client carries tv's field names for Sonarr" {
+    arr_setup
+    route "GET /api/v3/downloadclient" '[]'
+    run sonarr
+    assert_curl '"name": "tvCategory", "value": "tv"'
+    assert_curl '"name": "recentTvPriority"'
+    assert_curl '"name": "olderTvPriority"'
+    assert_curl '"value": "hunter2"'
+}
+
+@test "configure-helpers: the same call for Radarr derives movie field names instead" {
+    arr_setup
+    route "GET /api/v3/downloadclient" '[]'
+    run radarr
+    assert_curl '"name": "movieCategory", "value": "movies"'
+    assert_curl '"name": "recentMoviePriority"'
+    refute_curl "tvCategory"
+}
+
+@test "configure-helpers: the download-client match is case-insensitive on the name" {
+    # The *arr UI title-cases what the user typed, so an existing client can
+    # come back as "QBittorrent". Matching case-sensitively would add a second
+    # copy of the same client on every run.
+    arr_setup
+    route "GET /api/v3/downloadclient" '[{"name":"QBITTORRENT"}]'
+    run sonarr
+    refute_curl "QBittorrentSettings"
+    out_has "qBittorrent download client (already configured)"
+}
+
+@test "configure-helpers: SABnzbd is added only when it is running and has a key" {
+    arr_setup
+    route "GET /api/v3/downloadclient" '[{"name":"qBittorrent"}]'
+    run sonarr
+    refute_curl "SabnzbdSettings"
+
+    : > "$CURL_LOG"
+    SABNZBD_RUNNING=true SABNZBD_API_KEY="" run sonarr
+    refute_curl "SabnzbdSettings"
+
+    : > "$CURL_LOG"
+    SABNZBD_RUNNING=true SABNZBD_API_KEY=sabkey run sonarr
+    assert_curl "SabnzbdSettings"
+    assert_curl '"name": "apiKey", "value": "sabkey"'
+}
+
+@test "configure-helpers: disabled NFO metadata is enabled at its own id" {
+    arr_setup
+    route "GET /api/v3/metadata" '[{"id":3,"implementation":"XbmcMetadata","enable":false}]'
+    run sonarr
+    assert_curl "http://10.0.0.1:8989/api/v3/metadata/3"
+    assert_curl '"id":3,"fields":[{"name":"episodeMetadata","value":true}]'
+    out_has "enabled NFO metadata"
+}
+
+@test "configure-helpers: an arr with no XbmcMetadata entry is left alone, not failed" {
+    arr_setup
+    route "GET /api/v3/metadata" '[{"id":1,"implementation":"MediaBrowserMetadata"}]'
+    run sonarr
+    refute_curl "/api/v3/metadata/"
+    out_lacks "✗ Sonarr: enable NFO metadata"
+}
+
+@test "configure-helpers: the naming check reads the field it was told to read" {
+    # Sonarr's flag is renameEpisodes and Radarr's is renameMovies. Reading the
+    # wrong one always finds nothing, so naming is rewritten on every run.
+    arr_setup
+    route "GET /api/v3/config/naming" '{"renameEpisodes":false,"renameMovies":true}'
+    run sonarr
+    out_has "set TRaSH naming scheme"
+    assert_curl '"standardEpisodeFormat":"{Series Title}"'
+
+    # Radarr reads renameMovies, which this fixture has set, so the same
+    # response leaves it alone. Everything else in the baseline is already
+    # configured, so `-X PUT` appearing at all would be the naming write.
+    : > "$CURL_LOG"
+    run radarr
+    out_has "TRaSH naming (already customised)"
+    refute_curl "-X PUT"
+}
+
+@test "configure-helpers: a missing Reject ISO format is created and its id captured" {
+    arr_setup
+    route "GET /api/v3/customformat" '[]'
+    route "POST /api/v3/customformat" '{"id":42,"name":"Reject ISO"}' 201
+    route "GET /api/v3/qualityprofile/1" '{"id":1,"formatItems":[]}'
+    run sonarr
+    out_has "added Reject ISO custom format"
+    # The captured id is what the scoring pass then writes against.
+    assert_curl '{"format": 42, "name": "Reject ISO", "score": -10000}'
+}
+
+@test "configure-helpers: a custom-format response with no id is a failure, not a silent skip" {
+    arr_setup
+    route "GET /api/v3/customformat" '[]'
+    route "POST /api/v3/customformat" '{"message":"validation failed"}' 400
+    run sonarr
+    out_has "✗ Sonarr: add Reject ISO custom format"
+    # And with no id there is nothing to score, so the profile pass is skipped
+    # rather than writing a null format id into every quality profile.
+    refute_curl "-X PUT"
+}
+
+@test "configure-helpers: a profile scoring Reject ISO correctly is not rewritten" {
+    arr_setup
+    run sonarr
+    assert_curl "http://10.0.0.1:8989/api/v3/qualityprofile/1"
+    refute_curl "-X PUT"
+}
+
+@test "configure-helpers: a wrong score is replaced rather than duplicated" {
+    arr_setup
+    route "GET /api/v3/qualityprofile/1" \
+        '{"id":1,"formatItems":[{"format":9,"name":"Reject ISO","score":0},{"format":5,"name":"Other","score":10}]}'
+    run sonarr
+    out_has "scored Reject ISO at -10000 in profile 1"
+    assert_curl '{"format": 9, "name": "Reject ISO", "score": -10000}'
+    # The stale entry is gone, not left beside the new one.
+    refute_curl '"format": 9, "name": "Reject ISO", "score": 0'
+    # ...and an unrelated format is preserved.
+    assert_curl '{"format": 5, "name": "Other", "score": 10}'
+}
+
+@test "configure-helpers: every quality profile is visited, not just the first" {
+    arr_setup
+    route "GET /api/v3/qualityprofile" '[{"id":1},{"id":2},{"id":3}]'
+    route "GET /api/v3/qualityprofile/1" '{"id":1,"formatItems":[]}'
+    route "GET /api/v3/qualityprofile/2" '{"id":2,"formatItems":[]}'
+    route "GET /api/v3/qualityprofile/3" '{"id":3,"formatItems":[]}'
+    route "PUT /api/v3/qualityprofile/2" '{}'
+    route "PUT /api/v3/qualityprofile/3" '{}'
+    run sonarr
+    out_has "in profile 1"
+    out_has "in profile 2"
+    out_has "in profile 3"
+}
+
+@test "configure-helpers: one unreadable profile does not abandon the rest" {
+    arr_setup
+    route "GET /api/v3/qualityprofile" '[{"id":1},{"id":2}]'
+    route "GET /api/v3/qualityprofile/1" '' 500
+    route "GET /api/v3/qualityprofile/2" '{"id":2,"formatItems":[]}'
+    route "PUT /api/v3/qualityprofile/2" '{}'
+    run sonarr
+    out_has "in profile 2"
+    out_lacks "in profile 1"
+}
+
+@test "configure-helpers: the delay profile is added only when SABnzbd is running" {
+    arr_setup
+    route "GET /api/v3/delayprofile" '[{"preferredProtocol":"torrent"}]'
+    run sonarr
+    # Not even read: the whole section sits behind the SABnzbd flag.
+    refute_curl "/api/v3/delayprofile"
+
+    : > "$CURL_LOG"
+    SABNZBD_RUNNING=true run sonarr
+    assert_curl '"preferredProtocol":"usenet","usenetDelay":0,"torrentDelay":30'
+    out_has "added delay profile"
+}
+
+@test "configure-helpers: an existing usenet delay profile is left alone" {
+    arr_setup
+    SABNZBD_RUNNING=true run sonarr
+    out_has "delay profile (already configured)"
+    refute_curl "torrentDelay"
+}
+
+@test "configure-helpers: a dry run reads nothing past the health check and writes nothing" {
+    arr_setup
+    DRY_RUN=true SABNZBD_RUNNING=true SABNZBD_API_KEY=sabkey run sonarr
+    out_has "Would: Add root folder /data/media/tv"
+    out_has "Would: Add qBittorrent download client (category: tv)"
+    out_has "Would: Add SABnzbd download client (category: tv)"
+    out_has "Would: Add delay profile (Usenet 0, Torrent 30)"
+    refute_curl "-X POST"
+    refute_curl "-X PUT"
+    refute_curl "/api/v3/rootfolder"
+}
+
+@test "configure-helpers: a dry run omits the two SABnzbd steps when it is not running" {
+    arr_setup
+    DRY_RUN=true run sonarr
+    out_lacks "Would: Add SABnzbd"
+    out_lacks "Would: Add delay profile"
 }

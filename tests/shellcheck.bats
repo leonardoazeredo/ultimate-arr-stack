@@ -141,3 +141,94 @@ sweep_targets() {
         fail "no-sweep list is out of date"
     fi
 }
+
+# Function names bats-support and bats-assert define -- and therefore depend on
+# being callable. Derived from the submodules rather than listed, so a rename or
+# an added helper upstream widens this guard for free.
+bats_helper_functions() {
+    grep -hoE '^[a-zA-Z_][a-zA-Z0-9_]*\(\)' \
+        "$REPO_ROOT"/tests/bats-support/src/*.bash \
+        "$REPO_ROOT"/tests/bats-assert/src/*.bash 2>/dev/null \
+        | tr -d '()' | sort -u
+}
+
+# Repo shell files a given .bats sources into the bats shell itself. Only the
+# ones a literal path resolves for -- a `source "$SOME_VAR"` is invisible here
+# and deliberately not guessed at.
+sourced_repo_files() {
+    local b="$1" raw p
+    grep -hoE '(^|[[:space:]])(source|\.)[[:space:]]+"[^"]+"' "$REPO_ROOT/$b" \
+        | grep -oE '"[^"]+"' | tr -d '"' \
+    | while read -r raw; do
+        p="${raw//\$\{REPO_ROOT\}/$REPO_ROOT}"
+        p="${p//\$REPO_ROOT/$REPO_ROOT}"
+        p="${p//\$\{BATS_TEST_DIRNAME\}\/../$REPO_ROOT}"
+        p="${p//\$BATS_TEST_DIRNAME\/../$REPO_ROOT}"
+        case "$p" in
+            *'$'*) continue ;;                 # unresolved variable, skip
+            "$REPO_ROOT"/tests/*) continue ;;  # test infrastructure, not a unit
+        esac
+        [ -f "$p" ] && echo "$p"
+    done | sort -u
+}
+
+@test "no test file sources a unit that shadows a function bats-assert reports through" {
+    # WHY THIS EXISTS
+    #
+    # bats-assert reports every failure by calling bats-support's `fail`, which
+    # returns 1. scripts/lib/configure-helpers.sh:34 defines its own `fail` --
+    # an output helper that prints a red cross and returns 0.
+    # tests/lib-configure-helpers.bats sources that library into the bats shell,
+    # so bats-support's `fail` was shadowed and every assert_output in the file
+    # became INCAPABLE OF FAILING. Twenty-two tests reported ok against output
+    # that plainly contradicted them, and two recorded defects survived the
+    # mutation corpus because the tests meant to kill them could not go red.
+    #
+    # Nothing about that is specific to `fail`, to this library, or to this test
+    # file. Any unit under test that happens to define a name bats-assert calls
+    # silently disarms an entire file's assertions, and the file still reports
+    # green -- so no amount of running the suite reveals it. The collision is
+    # statically decidable, so it is decided statically here.
+    local helpers b unit collisions=""
+    helpers="$(bats_helper_functions)"
+    [ -n "$helpers" ] || fail "found no bats-support/bats-assert functions; the discovery is broken"
+
+    # A file is only at risk if it calls one of bats-assert's OWN assertions.
+    # A test file's private helper that merely happens to be named assert_curl
+    # reports its own failure with `return 1` and is unaffected -- matching on
+    # the name prefix would flag exactly the files that already did the right
+    # thing.
+    local assertions_re
+    assertions_re="$(grep -hoE '^[a-zA-Z_][a-zA-Z0-9_]*\(\)' \
+                        "$REPO_ROOT"/tests/bats-assert/src/*.bash 2>/dev/null \
+                     | tr -d '()' | sort -u | paste -sd'|')"
+    [ -n "$assertions_re" ] || fail "found no bats-assert assertions; the discovery is broken"
+
+    for b in $(cd "$REPO_ROOT" && git ls-files 'tests/*.bats'); do
+        # Full-line comments are stripped first: the file that discovered this
+        # trap documents it by name, and prose about an assertion is not a call
+        # to one. A trailing comment cannot hide a real call, which sits to the
+        # left of the `#`.
+        grep -v '^[[:space:]]*#' "$REPO_ROOT/$b" \
+            | grep -qE "(^|[^[:alnum:]_])(${assertions_re})([[:space:]]|\$)" || continue
+        for unit in $(sourced_repo_files "$b"); do
+            local shadowed
+            shadowed="$(grep -oE '^[a-zA-Z_][a-zA-Z0-9_]*\(\)' "$unit" | tr -d '()' \
+                        | sort -u | comm -12 - <(echo "$helpers"))"
+            if [ -n "$shadowed" ]; then
+                collisions+="$b sources ${unit#$REPO_ROOT/} which redefines: $(echo $shadowed)"$'\n'
+            fi
+        done
+    done
+
+    if [ -n "$collisions" ]; then
+        {
+            echo "A sourced unit redefines a function bats-assert reports failures through."
+            echo "Every bats-assert assertion in that test file is incapable of failing."
+            echo "$collisions"
+            echo "Fix: assert through helpers local to the test file that 'return 1'"
+            echo "themselves (see tests/lib-configure-helpers.bats's out_has/out_lacks)."
+        } >&2
+        fail "assertion-shadowing collision"
+    fi
+}

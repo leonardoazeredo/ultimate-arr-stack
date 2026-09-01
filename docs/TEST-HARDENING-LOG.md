@@ -459,6 +459,25 @@ write-up in `tests/mutation/README.md`; these are the one-line forms.
   matter how the walk is written. Only a multi-word rule with argv in between
   (`compose -f x.yml up`) exercises the property. The test read as though it covered
   it — the mutation is what said otherwise.
+- ▸ **A unit that defines `fail()` silently disarms every bats-assert assertion in the
+  file that sources it.** bats-assert reports every failure by piping its diagnostic to
+  bats-support's `fail`, which returns 1. `scripts/lib/configure-helpers.sh:34` defines
+  its own `fail` — an output helper that prints a red cross, increments a counter and
+  returns 0 — and `tests/lib-configure-helpers.bats` sources the library into the bats
+  shell in `setup()`. Twenty-two `assert_output` calls therefore reported `ok` against
+  output that plainly contradicted them, and two entries in
+  `corpus/configure-helpers.sh` SURVIVED because the tests written to kill them could
+  not go red. Running the suite can never reveal this: the file is green either way.
+  Proof is two identical `run echo hello; assert_output --partial "not-present"` tests,
+  one with the library sourced and one without — the clean one fails, the sourced one
+  reports `ok`. Nothing about it is specific to `fail` or to this library: any name
+  bats-assert calls is a live collision. `tests/shellcheck.bats` now derives the
+  bats-support/bats-assert name set from the submodules, derives what each test file
+  sources, and fails on any intersection — with a corpus entry per direction, including
+  one for the discovery returning nothing and "passing" by comparing empty against
+  empty. The repair is not to rename the library's function but to assert through
+  helpers local to the test file that `return 1` themselves; the 33 tests written
+  before this used plain `[ ... ]` and were never affected.
 
 - **Two tests that each assert something is NOT reported are both satisfied by a check
   that reports nothing.** Tightening `check-dns-duplicates`'s match produced exactly that
