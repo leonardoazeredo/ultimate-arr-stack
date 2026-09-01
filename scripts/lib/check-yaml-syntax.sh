@@ -30,7 +30,7 @@ check_yaml_syntax() {
                 echo "    ERROR: Invalid YAML syntax in $file"
                 # Show the actual error
                 python3 -c "import yaml; yaml.safe_load(open('$repo_root/$file'))" 2>&1 | head -3 | sed 's/^/      /'
-                ((errors++))
+                errors=$((errors + 1))
             fi
         done
     else
@@ -40,7 +40,7 @@ check_yaml_syntax() {
             # Check for tabs (YAML uses spaces)
             if grep -qP '^\t' "$repo_root/$file" 2>/dev/null; then
                 echo "    ERROR: Tab characters found in $file (YAML requires spaces)"
-                ((errors++))
+                errors=$((errors + 1))
             fi
         done
         echo "    NOTE: Install PyYAML for full validation: pip install pyyaml"

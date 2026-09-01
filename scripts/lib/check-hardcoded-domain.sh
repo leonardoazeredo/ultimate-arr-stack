@@ -35,7 +35,7 @@ check_hardcoded_domain() {
                 local count
                 count=$(echo "$content" | grep -ci "$domain" 2>/dev/null || echo 0)
                 files_with_domain+="      - $file ($count occurrences)"$'\n'
-                ((warnings++))
+                warnings=$((warnings + 1))
             fi
         done
 
@@ -57,8 +57,13 @@ check_hardcoded_domain() {
 
     # Check for NAS hostname (BLOCKS - this should never be committed)
     if [[ -n "$nas_hostname" ]]; then
+        # No counter here: the report is built in files_with_hostname and the
+        # emptiness of that string is what decides. A `hostname_errors` tally
+        # used to sit alongside it, written and never once read -- its only
+        # observable effect was that `((hostname_errors++))` returned 1 on the
+        # first hit and killed the whole hook under `set -e`, mid-loop, before
+        # this report could be printed.
         local files_with_hostname=""
-        local hostname_errors=0
         for file in $files_to_check; do
             is_binary_file "$file" && continue
 
@@ -70,7 +75,6 @@ check_hardcoded_domain() {
                 local count
                 count=$(echo "$content" | grep -ci "$nas_hostname" 2>/dev/null || echo 0)
                 files_with_hostname+="      - $file ($count occurrences)"$'\n'
-                ((hostname_errors++))
             fi
         done
 

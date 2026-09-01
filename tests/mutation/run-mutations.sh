@@ -98,8 +98,8 @@ mutation() {
     backup="$BACKUP_PATH"
 
     # 1. Control.
-    local res st count
-    res=$(run_tests "$batsfile" "$testre"); st=${res% *}; count=${res#* }
+    local res st count skipped
+    res=$(run_tests "$batsfile" "$testre"); read -r st count skipped <<<"$res"
     if [[ "$count" -eq 0 ]]; then
         echo "ERROR  $id"
         echo "       --test '$testre' matched NO tests in $(basename "$batsfile")."
@@ -114,6 +114,16 @@ mutation() {
         sed 's/^/       | /' "$WORK/last-output.txt" | head -20
         ERRORED=$((ERRORED + 1)); restore_current || exit 3; return 0
     fi
+    if [[ "$skipped" -eq "$count" ]]; then
+        # Every test in the oracle skipped, so running it against a mutant would
+        # compare nothing to nothing and report SURVIVED -- a coverage gap
+        # invented out of an environment condition. Say what actually happened.
+        echo "SKIPPED $id"
+        echo "        the whole oracle skipped, so it cannot judge this mutant:"
+        grep -m1 -E '^ok [0-9]+ .*# skip' "$WORK/last-output.txt" \
+            | sed 's/^/        | /'
+        SKIPPED=$((SKIPPED + 1)); restore_current || exit 3; return 0
+    fi
 
     # 2. Apply, 3. assert it actually landed.
     ( cd "$ROOT" && F="$file" bash -c "$apply" ) >/dev/null 2>&1
@@ -126,7 +136,7 @@ mutation() {
     fi
 
     # 4. The test must now fail.
-    res=$(run_tests "$batsfile" "$testre"); st=${res% *}; count=${res#* }
+    res=$(run_tests "$batsfile" "$testre"); read -r st count skipped <<<"$res"
 
     # 5. Restore, verified. If it did not work, stop the entire run here --
     # mutating the next target on top of a tree we could not put back turns one

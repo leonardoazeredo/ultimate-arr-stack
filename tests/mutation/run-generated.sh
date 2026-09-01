@@ -31,7 +31,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck source=tests/mutation/lib-mutate.sh
 source "$ROOT/tests/mutation/lib-mutate.sh"
 
-LEDGER="$ROOT/tests/mutation/survivors.tsv"
+# Overridable so a test can exercise the ledger-merge rules without writing to
+# the repo's real one. It used to be hardcoded, and tests/mutation-framework.bats
+# had to overwrite the tracked file in place and copy it back afterwards. That
+# restore is a bare `cp` with nothing guarding it, so an interrupt anywhere in
+# the sweep -- a timeout, a Ctrl-C -- left the committed ledger holding the
+# test's sentinel rows. Observed, not theorised: a 2-minute timeout during this
+# work did exactly that, and the wreckage looked enough like real triage output
+# to be committed by accident.
+LEDGER="${MUTATION_LEDGER:-$ROOT/tests/mutation/survivors.tsv}"
 MUTANT_DIR="$ROOT/tests/mutation/.mutants"
 
 # target file : bats oracle : test-name regex
@@ -73,11 +81,33 @@ else
     for t in "${TARGETS[@]}"; do SELECTED+=("${t%%:*}"); done
 fi
 
+# Apply -k HERE, not only in the sweep loop below. The dirty-tree guard that
+# follows reads SELECTED, so a SELECTED holding every target made the guard
+# refuse on files the run was never going to touch -- and `-k` exists precisely
+# to narrow a run down to one target while the rest of the tree is mid-edit.
+#
+# That cost three corpus entries at once, and two of them failed in the shape
+# worth remembering: the guard refused identically with and without the defect,
+# so the oracle could not distinguish them and they were scored SURVIVED -- a
+# coverage gap reported against tests that were in fact never reached. An
+# over-broad precondition does not merely block a run, it can launder itself
+# into a false measurement downstream.
+if [[ -n "$FILTER" ]]; then
+    _kept=()
+    for t in "${SELECTED[@]}"; do [[ "$t" == *"$FILTER"* ]] && _kept+=("$t"); done
+    SELECTED=(${_kept+"${_kept[@]}"})
+fi
+
 # This overwrites tracked files in place. On a dirty tree a failed restore is
 # indistinguishable from the user's own uncommitted work, and `git checkout --`
 # -- the documented recovery -- would destroy that work. Refuse.
 cd "$ROOT" || exit 2
-DIRTY="$(git status --porcelain -- "${SELECTED[@]}" 2>/dev/null)"
+# An empty SELECTED must not reach `git status --porcelain --`: with no pathspec
+# git reports the ENTIRE tree, so a filter matching no target would trip a guard
+# about files the run had already decided to ignore. Empty means nothing to
+# sweep, which means nothing to protect.
+DIRTY=""
+[[ ${#SELECTED[@]} -gt 0 ]] && DIRTY="$(git status --porcelain -- "${SELECTED[@]}" 2>/dev/null)"
 if [[ -n "$DIRTY" ]]; then
     echo "run-generated: refusing to start - these targets have uncommitted changes:" >&2
     sed 's/^/  /' <<<"$DIRTY" >&2
@@ -144,7 +174,7 @@ for target in "${SELECTED[@]}"; do
 
     # Control, once per target rather than once per mutant. A suite that is
     # already red would score every mutant KILLED and report a perfect sweep.
-    res=$(run_tests "$ROOT/$batsfile" "$testre"); st=${res% *}; count=${res#* }
+    res=$(run_tests "$ROOT/$batsfile" "$testre"); read -r st count _skipped <<<"$res"
     if [[ "$count" -eq 0 ]]; then
         echo "   ERROR: -f '$testre' matched NO tests. bats exits 0 having run"
         echo "          nothing, which reads exactly like a pass. Fix the regex."
@@ -192,7 +222,7 @@ for target in "${SELECTED[@]}"; do
             ERRORED=$((ERRORED + 1)); restore_current || exit 3; continue
         fi
 
-        res=$(run_tests "$ROOT/$batsfile" "$testre"); st=${res% *}
+        res=$(run_tests "$ROOT/$batsfile" "$testre"); read -r st _count _skipped <<<"$res"
 
         # Restore before classifying. Stop the whole run if it failed: mutating
         # the next target on top of a tree we could not put back turns one

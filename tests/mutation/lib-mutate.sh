@@ -99,8 +99,18 @@ run_tests() {
     plan="$(grep -m1 -E '^1\.\.[0-9]+$' <<<"$out" || true)"
     count="${plan#1..}"
     [[ "$count" =~ ^[0-9]+$ ]] || count=0
+    # TAP reports a skipped test as `ok N name # skip reason` -- a PASS as far as
+    # the exit status is concerned. So an oracle whose tests all skip looks
+    # exactly like an oracle that ran and passed, and a mutant it never examined
+    # gets scored SURVIVED: a coverage gap reported against a test that was
+    # never reached. Two corpus entries read that way during this work, both
+    # because an environment guard skipped them on a dirty tree. Count skips so
+    # the caller can tell "passed" from "did not run".
+    local skipped
+    skipped="$(grep -cE '^ok [0-9]+ .*# skip' <<<"$out" || true)"
+    [[ "$skipped" =~ ^[0-9]+$ ]] || skipped=0
     printf '%s\n' "$out" > "$WORK/last-output.txt"
-    echo "$st $count"
+    echo "$st $count $skipped"
 }
 
 # Take the pristine copy and arm the restore path. Callers must pair this with

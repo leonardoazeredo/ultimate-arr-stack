@@ -55,7 +55,7 @@ check_doc_links() {
         local in_code_block=false
         local line_num=0
         while IFS= read -r line; do
-            ((line_num++))
+            line_num=$((line_num + 1))
 
             # Track fenced code blocks
             if [[ "$line" == '```'* ]]; then
@@ -123,7 +123,7 @@ check_doc_links() {
                 if [[ -n "$target_file" ]]; then
                     if [[ ! -f "$repo_root/$check_file" ]]; then
                         echo "    ERROR: $md_file:$line_num — broken link to '$target_file' (file not found)"
-                        ((errors++))
+                        errors=$((errors + 1))
                         continue
                     fi
                 fi
@@ -134,7 +134,7 @@ check_doc_links() {
                     anchors=$(_get_file_anchors "$repo_root/$check_file")
                     if ! echo "$anchors" | grep -qFx -- "$target_anchor"; then
                         echo "    ERROR: $md_file:$line_num — broken anchor '#$target_anchor' in '$(basename "$check_file")'"
-                        ((errors++))
+                        errors=$((errors + 1))
                     fi
                 fi
             done <<< "$targets"

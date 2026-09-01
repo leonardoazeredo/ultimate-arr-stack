@@ -35,6 +35,9 @@ setup() { TARGET="${BATS_TEST_FILENAME%/*}/target.sh"; }
     run bash "$TARGET" ok
     [ "$status" -eq 0 ]
 }
+@test "fixture skips for an environment reason" {
+    skip "no widget on this machine"
+}
 FXB
 }
 
@@ -50,6 +53,32 @@ CORPUS
     run "$RUNNER" "$FX/corpus.sh"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [[ "$output" == *"KILLED demo-killed"* ]] || { echo "$output"; return 1; }
+}
+
+@test "reports SKIPPED, not SURVIVED, when the whole oracle skipped" {
+    # TAP spells a skipped test `ok N name # skip reason`, so to anything
+    # reading the exit status it is a PASS. An oracle that skipped therefore
+    # looks exactly like one that ran and did not notice the defect, and the
+    # mutant gets scored SURVIVED -- a coverage gap invented out of an
+    # environment condition, filed against a test that never executed.
+    #
+    # This is not hypothetical. Two entries in tests/mutation/corpus/generative.sh
+    # read as SURVIVED during this work because their oracle skips while
+    # scripts/lib is dirty, which it was, because the run was measuring a fix to
+    # scripts/lib. The tool reported a coverage regression caused by nothing but
+    # its own working tree.
+    write_corpus <<CORPUS
+mutation demo-skipped \
+  --file "$FX/target.sh" --bats "$FX/fixture.bats" \
+  --test "skips for an environment reason" --why "x" \
+  --apply 'sed -i s@yes@nope@ "\$F"'
+CORPUS
+    run "$RUNNER" "$FX/corpus.sh"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"SKIPPED demo-skipped"* ]] || { echo "$output"; return 1; }
+    [[ "$output" != *"SURVIVED"* ]] || { echo "$output"; return 1; }
+    # and it says WHY, so the reader is not left to guess which guard fired
+    [[ "$output" == *"no widget on this machine"* ]] || { echo "$output"; return 1; }
 }
 
 @test "reports SURVIVED when the test cannot detect the mutation" {
@@ -348,6 +377,35 @@ CORPUS
     }
 }
 
+@test "the ledger path is overridable so a test never writes to the repo's own" {
+    # The seam that makes the test below safe to interrupt. Without it that test
+    # has to overwrite the tracked survivors.tsv and copy it back at the end,
+    # and anything that kills the sweep in between -- a timeout, a Ctrl-C --
+    # leaves the repo holding sentinel rows that look enough like real triage
+    # output to be committed by accident. That is not hypothetical: it happened
+    # during the session that added this test.
+    #
+    # A -k that matches no target sweeps nothing, so this needs no docker and
+    # costs nothing, while still exercising the one line that decides where the
+    # ledger is written.
+    local probe="$FX/probe-ledger.tsv"
+    local real="$REPO_ROOT/tests/mutation/survivors.tsv"
+    cp "$real" "$FX/real.before"
+
+    MUTATION_LEDGER="$probe" run "$REPO_ROOT/tests/mutation/run-generated.sh" -k zzz-no-such-target
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+
+    [ -f "$probe" ] || {
+        echo "MUTATION_LEDGER was ignored - the runner wrote somewhere else."
+        return 1
+    }
+    diff -q "$FX/real.before" "$real" || {
+        echo "the runner wrote the REPO's ledger despite MUTATION_LEDGER being set."
+        echo "every test that exercises ledger merging now corrupts tracked state."
+        return 1
+    }
+}
+
 @test "a partial sweep does not delete ledger rows for targets it did not sweep" {
     # The regression this exists for: the ledger used to be rebuilt from the
     # current run's survivors alone. Any run that did not sweep everything -- a
@@ -365,8 +423,13 @@ CORPUS
     [ -z "$(cd "$REPO_ROOT" && git status --porcelain -- scripts/lib/)" ] \
         || skip "scripts/lib is dirty; the runner refuses to sweep it (by design)"
 
-    local ledger="$REPO_ROOT/tests/mutation/survivors.tsv"
-    cp "$ledger" "$FX/ledger.orig"
+    # A throwaway ledger, NOT the repo's. This test used to overwrite the
+    # tracked survivors.tsv and copy it back at the end; an interrupt between
+    # those two points left the sentinel rows committed-ready in the working
+    # tree, which is exactly what happened once during this work. $MUTATION_LEDGER
+    # is the seam that removes the shared-state mutation altogether, so there is
+    # no window to interrupt and no restore that can be skipped.
+    local ledger="$FX/survivors.tsv"
 
     # One row for a target this run will NOT sweep, carrying a hand verdict...
     # ...and one for a target it WILL sweep, describing a mutation that does not
@@ -377,11 +440,10 @@ CORPUS
         printf 'scripts/lib/check-env-vars.sh\t1\tSENTINEL_STALE ==> x\tequivalent\tdrop me\n'
     } > "$ledger"
 
-    run "$REPO_ROOT/tests/mutation/run-generated.sh" -k check-env-vars
+    MUTATION_LEDGER="$ledger" run "$REPO_ROOT/tests/mutation/run-generated.sh" -k check-env-vars
     local rc="$status" out="$output"
     local after
     after="$(cat "$ledger")"
-    cp "$FX/ledger.orig" "$ledger"
 
     [ "$rc" -eq 0 ] || { echo "the runner must always exit 0:"; echo "$out"; return 1; }
 

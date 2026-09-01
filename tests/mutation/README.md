@@ -166,6 +166,34 @@ test whatsoever:**
 That is a bigger finding than anything the sweep produced, and writing those
 tests is separate work.
 
+## The stub harness, and why it has its own corpus entries
+
+`tests/helpers/stubs.bash` puts real executables named `docker`, `curl`, `ssh` and
+`git` at the front of `$PATH` so a test can drive an operational script without the
+script reaching a live daemon. It is the only thing standing between
+`tests/restart-stack.bats` and a `docker compose up` against the NAS that serves the
+house's DNS.
+
+That makes it a guard, and this repo's whole reason for owning a mutation framework is
+that four guards were merged here while being incapable of failing. So the harness is
+mutated too, in `corpus/stub-harness.sh`: neuter `forbid()`, remove the absolute-path
+rule, silence the breadcrumb, require adjacency in the verb matcher — each one must
+turn a named test red. Mutating it is safe to run, because with the denylist disabled
+the `docker` stub still runs and that stub does nothing but print and exit 1.
+
+Two rules that are easy to get wrong, both learned here:
+
+- **Match the argv array, not the joined command line.** Word comparison is what lets
+  `docker  compose   up` (doubled spaces) trip while `./scripts/restart-stack.sh` does
+  not. A substring denylist would refuse to let a test so much as name the script it
+  is testing.
+- **Reserve an exit status.** `forbid()` exits 99, which none of these tools return. A
+  test that means to reach a forbidden call asserts 99 *and* the breadcrumb file; a
+  bare `assert_failure` would pass if the script had died for any reason at all.
+
+The breadcrumb exists because the status alone is not enough: a `|| true` or an `if`
+in the script under test swallows it. The file does not get swallowed.
+
 ## What the runner refuses to do
 
 Each of these is a way a mutation run can report a green result while proving

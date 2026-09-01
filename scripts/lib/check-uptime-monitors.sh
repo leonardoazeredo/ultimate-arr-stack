@@ -64,7 +64,7 @@ check_uptime_monitors() {
         done <<< "$actual"
         if [[ $found -eq 0 ]]; then
             echo "    WARNING: Missing monitor for '$service'"
-            ((warnings++))
+            warnings=$((warnings + 1))
         fi
     done
 
@@ -83,7 +83,7 @@ check_uptime_monitors() {
         done
         if [[ $found -eq 0 ]]; then
             echo "    WARNING: Unknown monitor '$monitor' (removed service?)"
-            ((warnings++))
+            warnings=$((warnings + 1))
         fi
     done <<< "$actual"
 

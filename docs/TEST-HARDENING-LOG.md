@@ -267,6 +267,29 @@ write-up in `tests/mutation/README.md`; these are the one-line forms.
   it refuse to run where they go nowhere (`[[ "$BASHPID" != "$$" ]]`).
 - **`trap` replaces, it does not accumulate**, so sourcing a file that installs an EXIT
   trap twice orphans the first one's cleanup. Guard the file against double-sourcing.
+- **A `$PATH` stub cannot intercept an absolute path.** `/usr/bin/curl` reaches the real
+  binary however carefully `curl` was stubbed. It matters most for the *delegating*
+  tools: `ssh host /usr/bin/docker restart x` runs unstubbed on the far side, where the
+  harness has no reach at all. `tests/helpers/stubs.bash` refuses any argv word matching
+  `^/(usr/)?(local/)?s?bin/` for exactly this reason.
+- **`((n++))` returns exit status 1 when `n` is 0**, because a post-increment evaluates
+  to the value *before* incrementing and `((0))` is a failure. Under `set -e` the first
+  increment of a counter starting at zero therefore kills the shell — and only the
+  first, which is why it reads as an intermittent, input-dependent crash rather than a
+  syntax error. Use `n=$((n + 1))`, which is always status 0.
+- **`set -e` is suppressed for the entire body of a function invoked as an `if`
+  condition.** So the same `((n++))` is harmless in `if check_x; then` and fatal in a
+  bare `check_x`. A library's correctness ends up decided by a property of its *call
+  site* that is invisible where the function is defined — `scripts/pre-commit` had 18
+  safe sites and 9 live bugs, identical code in both. Pin the contract the library owes
+  *any* caller.
+- **Every idiom for CATCHING an errexit abort also PREVENTS it.** `run` clears errexit,
+  `if` suppresses it in the callee, and `( set -e; f ) || rc=$?` suppresses it too — a
+  subshell that is the left operand of `||` runs with errexit disabled no matter what
+  `set -e` it contains. A first probe of this bug "disproved" it three ways for that
+  reason. Only a separate process (`bash -c '...'`, status read afterwards) observes it.
+- **Command substitution strips trailing newlines**, so `x=$(cmd)` can never end in a
+  blank line and a fixture appending one to test a blank-line guard never reaches it.
 
 **Test**
 
@@ -281,6 +304,18 @@ write-up in `tests/mutation/README.md`; these are the one-line forms.
   Match the interpreter *word*: `^#!.*\b(ba|da|k|z)?sh([[:space:]]|$)`.
 - **`sed -i` is rename-based**, so a running bash keeps its original inode — the
   mutation runner can safely mutate itself.
+- **An exit code can be right for the wrong reason.** The pre-commit hook rejected bad
+  commits with status 1 for as long as anyone had looked, while every explanation of the
+  rejection — the message naming the leaking file, the summary, the error count, the
+  later checks — was unreachable. Asserting the status alone would have passed forever;
+  what caught it was asserting on *output* and on *how far the run got*.
+- **A counter that is written and never read is not bookkeeping, it is a latent abort.**
+  `check-hardcoded-domain.sh` kept a `hostname_errors` tally whose only observable effect
+  was killing the hook. Deleting it was the fix.
+- **Content filters silently exempt fixtures.** `check-secrets.sh:27` skips `*.md`, so a
+  planted secret in a markdown fixture is reported "OK" and the test then asserts against
+  a check that never ran. Confirm the fixture's *extension* is one the code under test
+  actually scans.
 
 **Tests**
 
@@ -292,6 +327,19 @@ write-up in `tests/mutation/README.md`; these are the one-line forms.
 - ▸ **A test extracted from a script with `awk` inherits none of its callees.** Anything
   the extracted body calls must be stubbed, or it dies `command not found` while the
   test reports success.
+- ▸ **A test that mutates tracked repo state and restores it with a bare `cp` has a
+  window.** `tests/mutation-framework.bats`'s ledger-merge test overwrote the real
+  `survivors.tsv` and copied it back at the end. A 2026-09-01 timeout killed the sweep
+  in between and left two sentinel rows in the working tree that looked enough like
+  real triage output to be committed by accident. The fix is a seam, not a trap:
+  `MUTATION_LEDGER` lets the test point the runner somewhere disposable, so there is no
+  window to interrupt and no restore that can be skipped.
+- ▸ **A single-word denylist rule cannot test an ordered-subsequence matcher.** The
+  first mutation written against `forbid()`'s subsequence walk targeted the one-word
+  `restart` rule and SURVIVED: a one-word rule matches wherever the word appears, no
+  matter how the walk is written. Only a multi-word rule with argv in between
+  (`compose -f x.yml up`) exercises the property. The test read as though it covered
+  it — the mutation is what said otherwise.
 
 **Operational**
 

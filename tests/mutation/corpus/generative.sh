@@ -60,3 +60,23 @@ mutation gen-mktemp-failure-unchecked \
   --test "arms the restore path when called plainly" \
   --why "an unchecked mktemp -d leaves WORK empty, so every backup path becomes /<tag>.orig at the filesystem root and the real fault (a full /tmp) is reported as 'could not copy the target aside'" \
   --apply 'sed -i "s@^WORK=\"\$(mktemp -d)\"\$@WORK=\"\"@" "$F"'
+
+# --- The runner's own verdict integrity ------------------------------------
+#
+# Both of these exist because the runner reported a wrong verdict during the
+# 2026-09-01 coverage work, and in both cases the wrongness was silent: it
+# looked exactly like a real finding.
+
+mutation runner-scores-a-skipped-oracle-as-survived \
+  --file tests/mutation/run-mutations.sh \
+  --bats tests/mutation-framework.bats \
+  --test "reports SKIPPED, not SURVIVED, when the whole oracle skipped" \
+  --why "TAP spells a skip as 'ok N name # skip', so an oracle that skipped is indistinguishable from one that passed and the mutant is scored SURVIVED - a coverage gap invented out of an environment condition. Two entries in this very file read that way, because their oracle skips on a dirty scripts/lib and the run was measuring a fix to scripts/lib" \
+  --apply 'sed -i "s@^    if \[\[ \"\$skipped\" -eq \"\$count\" \]\]; then\$@    if false; then@" "$F"'
+
+mutation gen-dirty-guard-ignores-the-filter \
+  --file tests/mutation/run-generated.sh \
+  --bats tests/mutation-framework.bats \
+  --test "the ledger path is overridable so a test never writes to the repo's own" \
+  --why "the dirty-tree guard reads SELECTED, so building SELECTED before applying -k made it refuse over files the run would never touch - and -k exists precisely to sweep one target while the rest of the tree is mid-edit. An over-broad precondition does not just block a run, it launders itself into false SURVIVED readings downstream" \
+  --apply 'perl -0pi -e "s/^if \[\[ -n \\\"\\\$FILTER\\\" \]\]; then\n    _kept=\(\)\n/if false; then\n    _kept=()\n/m" "$F"'

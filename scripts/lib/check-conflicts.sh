@@ -25,7 +25,7 @@ check_conflicts() {
             echo "$dup_ports" | while read -r port; do
                 echo "      - Port $port is used multiple times"
             done
-            ((errors++))
+            errors=$((errors + 1))
         fi
 
         # Extract static IPs (ipv4_address: X.X.X.X)
@@ -41,7 +41,7 @@ check_conflicts() {
             echo "$dup_ips" | while read -r ip; do
                 echo "      - IP $ip is assigned to multiple services"
             done
-            ((errors++))
+            errors=$((errors + 1))
         fi
     done
 
@@ -88,7 +88,7 @@ check_conflicts() {
             echo "$files_with_port" | while read -r f; do
                 echo "      - $f"
             done
-            ((errors++))
+            errors=$((errors + 1))
         fi
     done <<< "$dup_cross_ports"
 
@@ -106,7 +106,7 @@ check_conflicts() {
             echo "$files_with_ip" | while read -r f; do
                 echo "      - $f"
             done
-            ((errors++))
+            errors=$((errors + 1))
         fi
     done <<< "$dup_cross_ips"
 
