@@ -68,6 +68,8 @@ TARGETS=(
   "scripts/lib/configure-helpers.sh:tests/lib-configure-helpers.bats:^configure-helpers: "
   "scripts/lib/check-doc-links.sh:tests/lib-doc-links.bats:^doc-links: "
   "scripts/lib/check-yaml-syntax.sh:tests/lib-yaml-syntax.bats:^yaml-syntax: "
+  "scripts/lib/check-env-backup.sh:tests/lib-env-backup.bats:^env-backup: "
+  "scripts/lib/check-dns-duplicates.sh:tests/lib-dns-duplicates.bats:^dns-duplicates: "
   # scripts/lib/common.sh is deliberately NOT here. It was swept once, on the
   # theory that being sourced by three tested files made it covered: 78 mutants
   # generated, 78 survived, 0 killed. Sourced is not covered -- the four tests

@@ -46,7 +46,10 @@ check_env_backup() {
         return 0
     fi
 
-    # Compare
+    # Compare. local_env goes through $( ) for the same reason nas_env did:
+    # command substitution strips trailing newlines, so both sides are stripped
+    # the same way. Reading the local file raw would make a file that merely
+    # ends in a newline -- which is most of them -- differ from itself forever.
     local local_env nas_host nas_user
     local_env=$(cat "$backup_file")
     nas_host=$(get_nas_host)
@@ -54,7 +57,12 @@ check_env_backup() {
 
     if [[ "$nas_env" != "$local_env" ]]; then
         echo "    WARNING: .env.nas.backup differs from NAS .env"
-        echo "             Run: scp $nas_user@$nas_host:$stack_dir/.env .env.nas.backup"
+        # NOT scp. This function fetches the same file with ssh + cat two lines
+        # above, and CLAUDE.md records scp failing opaquely against this NAS's
+        # BusyBox sftp-server -- the recorded workaround is exactly this pipe.
+        # A remediation that names the one transport known not to work here,
+        # printed by a check that just used the working one, is a trap.
+        echo "             Run: ssh $nas_user@$nas_host 'cat $stack_dir/.env' > .env.nas.backup"
         return 0  # Warning only, don't block
     fi
 
