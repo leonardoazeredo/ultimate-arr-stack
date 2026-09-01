@@ -34,11 +34,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${SCRIPT_DIR}/.."
 
+# shellcheck source=scripts/lib/env-file.sh
+. "${SCRIPT_DIR}/lib/env-file.sh"
+
 # Find API key
 SONARR_API_KEY=""
 for f in "${REPO_ROOT}/.env" "${REPO_ROOT}/.env.nas.backup"; do
   if [ -f "$f" ]; then
-    SONARR_API_KEY=$(grep "^SONARR_API_KEY=" "$f" | cut -d= -f2 | tr -d '"' | tr -d "'")
+    SONARR_API_KEY=$(env_value "$f" SONARR_API_KEY || true)
     [ -n "$SONARR_API_KEY" ] && break
   fi
 done

@@ -211,11 +211,8 @@ old "14 tests" claim went stale.
 - `scripts/backup-prune.sh`
 - `scripts/detect-credential-drift.sh`
 - `scripts/detect-vpn-zombies.sh`
-- `scripts/fix-radarr-paths.sh`
-- `scripts/fix-sonarr-folders.sh`
 - `scripts/post-merge`
 - `scripts/pre-commit`
-- `scripts/queue-cleanup.sh`
 - `scripts/sync-nas.sh`
 - `terraform/apply.sh`
 <!-- /NO-SWEEP-ORACLE -->

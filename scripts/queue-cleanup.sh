@@ -116,10 +116,19 @@ if $APPLY && [[ -n "${HA_WEBHOOK_URL:-}" ]]; then
 fi
 
 # --- Trim log file ---
-if [[ -f "$LOG_FILE" ]]; then
+# Gated on --apply. This used to run in both modes, which made it the one thing
+# a dry run changed on disk -- and what it changed was the operator's record of
+# previous runs, i.e. exactly what someone is reading when they dry-run to
+# decide whether to apply.
+if $APPLY && [[ -f "$LOG_FILE" ]]; then
   LINES=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
   if [[ "$LINES" -gt "$MAX_LOG_LINES" ]]; then
-    TMPLOG=$(mktemp)
+    # Beside the log rather than in /tmp: on the NAS those are different
+    # filesystems, so `mv` was a copy-then-unlink that can leave the log
+    # half-written if it dies partway, not the atomic rename it looks like.
+    # The trap is why a failing `tail` no longer leaks a temp file per run.
+    TMPLOG=$(mktemp "${LOG_FILE}.XXXXXX")
+    trap 'rm -f "$TMPLOG"' EXIT
     tail -n "$MAX_LOG_LINES" "$LOG_FILE" > "$TMPLOG" && mv "$TMPLOG" "$LOG_FILE"
   fi
 fi

@@ -26,18 +26,21 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${SCRIPT_DIR}/../.env"
 
+# shellcheck source=scripts/lib/env-file.sh
+. "${SCRIPT_DIR}/lib/env-file.sh"
+
 if [ ! -f "$ENV_FILE" ]; then
   echo "ERROR: .env not found at $ENV_FILE"
   exit 1
 fi
 
-RADARR_API_KEY=$(grep "^RADARR_API_KEY=" "$ENV_FILE" | cut -d= -f2)
+RADARR_API_KEY=$(env_value "$ENV_FILE" RADARR_API_KEY || true)
 if [ -z "$RADARR_API_KEY" ]; then
   echo "ERROR: RADARR_API_KEY not found in .env"
   exit 1
 fi
 
-MEDIA_ROOT=$(grep "^MEDIA_ROOT=" "$ENV_FILE" | cut -d= -f2)
+MEDIA_ROOT=$(env_value "$ENV_FILE" MEDIA_ROOT || true)
 MOVIES_DIR="${MEDIA_ROOT}/media/movies"
 
 if [ ! -d "$MOVIES_DIR" ]; then

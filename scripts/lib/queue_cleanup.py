@@ -1,73 +1,124 @@
-import json, sys, subprocess, time
+"""Remove stuck Sonarr/Radarr queue items and re-search what was removed.
+
+Invoked by scripts/queue-cleanup.sh; see that file for the why. This was a
+heredoc until 2026-09-01. The pure parts -- the stuck classifier, the URL
+builder, the search-payload shape -- are lifted out so they can be imported and
+tested, and every side effect (HTTP, the clock, the inter-delete sleep) is
+injected so a test can never reach a live Sonarr or Radarr.
+"""
+
+import json
+import subprocess
+import sys
+import time
 from datetime import datetime, timezone
 
-APPLY = sys.argv[1] == "true"
-VERBOSE = sys.argv[2] == "true"
-SONARR_KEY = sys.argv[3]
-RADARR_KEY = sys.argv[4]
+PAGE_SIZE = 50
 
-SERVICES = []
-if SONARR_KEY:
-    SERVICES.append({
-        "name": "Sonarr",
-        "port": 8989,
-        "key": SONARR_KEY,
-        "id_field": "seriesId",
-        "search_cmd": "SeriesSearch",
-        "search_key": "seriesId",
-    })
-if RADARR_KEY:
-    SERVICES.append({
-        "name": "Radarr",
-        "port": 7878,
-        "key": RADARR_KEY,
-        "id_field": "movieId",
-        "search_cmd": "MoviesSearch",
-        "search_key": "movieIds",
-    })
+# A queue of 5,000 items is already far past anything this stack produces; the
+# bound exists to stop a service that reports a growing totalRecords from
+# looping forever, not to ration real work. Hitting it is reported, never
+# silent -- a truncation nobody is told about reads as a complete run.
+MAX_PAGES = 100
 
-total_removed = 0
-total_searches = 0
 
-def api_get(port, path, key):
+def build_url(port, path, key):
+    """Append the apikey with the right separator.
+
+    The path already carries a query string for the paginated and the
+    parameterised-delete calls, and does not for the rest.
+    """
     url = f"http://localhost:{port}{path}"
     if "?" in url:
-        url += f"&apikey={key}"
-    else:
-        url += f"?apikey={key}"
-    result = subprocess.run(
-        ["curl", "-s", "-f", url],
-        capture_output=True, text=True, timeout=30
-    )
-    if result.returncode != 0:
+        return url + f"&apikey={key}"
+    return url + f"?apikey={key}"
+
+
+class ArrApi:
+    """The real side effects, behind a seam."""
+
+    def get(self, port, path, key):
+        result = subprocess.run(
+            ["curl", "-s", "-f", build_url(port, path, key)],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode != 0:
+            return None
+        return json.loads(result.stdout)
+
+    def delete(self, port, path, key):
+        result = subprocess.run(
+            ["curl", "-s", "-f", "-X", "DELETE", build_url(port, path, key)],
+            capture_output=True, text=True, timeout=30
+        )
+        return result.returncode == 0
+
+    def post_json(self, port, path, key, data):
+        url = f"http://localhost:{port}{path}?apikey={key}"
+        result = subprocess.run(
+            ["curl", "-s", "-f", "-X", "POST",
+             "-H", "Content-Type: application/json",
+             "-d", json.dumps(data), url],
+            capture_output=True, text=True, timeout=30
+        )
+        return result.returncode == 0
+
+
+def services(sonarr_key, radarr_key):
+    out = []
+    if sonarr_key:
+        out.append({
+            "name": "Sonarr",
+            "port": 8989,
+            "key": sonarr_key,
+            "id_field": "seriesId",
+            "search_cmd": "SeriesSearch",
+            "search_key": "seriesId",
+        })
+    if radarr_key:
+        out.append({
+            "name": "Radarr",
+            "port": 7878,
+            "key": radarr_key,
+            "id_field": "movieId",
+            "search_cmd": "MoviesSearch",
+            "search_key": "movieIds",
+        })
+    return out
+
+
+def search_payload(svc, target_id):
+    """Radarr's MoviesSearch takes a list; Sonarr's SeriesSearch takes a scalar.
+
+    An asymmetry in the two APIs, not a mistake here -- posting a scalar to
+    Radarr or a list to Sonarr is rejected.
+    """
+    if svc["search_key"] == "movieIds":
+        return {"name": svc["search_cmd"], svc["search_key"]: [target_id]}
+    return {"name": svc["search_cmd"], svc["search_key"]: target_id}
+
+
+def _age_hours(added_str, now):
+    """Hours since `added`, or None if it is missing or unparseable."""
+    if not added_str:
         return None
-    return json.loads(result.stdout)
+    try:
+        added = datetime.fromisoformat(added_str.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    try:
+        return (now - added).total_seconds() / 3600
+    except TypeError:
+        # A naive timestamp cannot be subtracted from an aware one. The heredoc
+        # let this raise out of the try above only by accident of ordering.
+        return None
 
-def api_delete(port, path, key):
-    url = f"http://localhost:{port}{path}"
-    if "?" in url:
-        url += f"&apikey={key}"
-    else:
-        url += f"?apikey={key}"
-    result = subprocess.run(
-        ["curl", "-s", "-f", "-X", "DELETE", url],
-        capture_output=True, text=True, timeout=30
-    )
-    return result.returncode == 0
 
-def api_post_json(port, path, key, data):
-    url = f"http://localhost:{port}{path}?apikey={key}"
-    result = subprocess.run(
-        ["curl", "-s", "-f", "-X", "POST",
-         "-H", "Content-Type: application/json",
-         "-d", json.dumps(data), url],
-        capture_output=True, text=True, timeout=30
-    )
-    return result.returncode == 0
-
-def is_stuck(record):
+def is_stuck(record, now=None):
     """Determine if a queue record is stuck and should be removed."""
-    status = record.get("status", "")
+    if now is None:
+        now = datetime.now(timezone.utc)
+
     tracked_status = record.get("trackedDownloadStatus", "")
     tracked_state = record.get("trackedDownloadState", "")
     error_msg = (record.get("errorMessage", "") or "").lower()
@@ -87,17 +138,13 @@ def is_stuck(record):
 
     # Import blocked (already imported, not an upgrade, etc.)
     if tracked_state == "importBlocked":
-        msgs = []
-        for sm in record.get("statusMessages", []):
-            msgs.extend(sm.get("messages", []))
+        msgs = _status_messages(record)
         reason = "; ".join(msgs[:2]) if msgs else "import blocked"
         return "import_blocked", reason
 
     # Import pending with warnings (e.g. executable files, not an upgrade)
     if tracked_state == "importPending" and tracked_status == "warning":
-        msgs = []
-        for sm in record.get("statusMessages", []):
-            msgs.extend(sm.get("messages", []))
+        msgs = _status_messages(record)
         all_msgs = " ".join(msgs).lower()
         if "executable" in all_msgs or "not an upgrade" in all_msgs:
             reason = "; ".join(msgs[:2]) if msgs else "import pending with warnings"
@@ -109,63 +156,81 @@ def is_stuck(record):
 
     # Age-based: 0% progress for 24+ hours
     if size > 0 and sizeleft == size:
-        added_str = record.get("added", "")
-        if added_str:
-            try:
-                added = datetime.fromisoformat(added_str.replace("Z", "+00:00"))
-                age_hours = (datetime.now(timezone.utc) - added).total_seconds() / 3600
-                if age_hours > 24:
-                    return "stale", f"0% progress for {age_hours:.0f}h"
-            except (ValueError, TypeError):
-                pass
+        age_hours = _age_hours(record.get("added", ""), now)
+        if age_hours is not None and age_hours > 24:
+            return "stale", f"0% progress for {age_hours:.0f}h"
     elif size == 0:
         # No size info at all — likely metadata-only, check age
-        added_str = record.get("added", "")
-        if added_str:
-            try:
-                added = datetime.fromisoformat(added_str.replace("Z", "+00:00"))
-                age_hours = (datetime.now(timezone.utc) - added).total_seconds() / 3600
-                if age_hours > 24:
-                    return "stale", f"no size info for {age_hours:.0f}h"
-            except (ValueError, TypeError):
-                pass
+        age_hours = _age_hours(record.get("added", ""), now)
+        if age_hours is not None and age_hours > 24:
+            return "stale", f"no size info for {age_hours:.0f}h"
 
     return None, None
 
-for svc in SERVICES:
-    print(f"\n--- {svc['name']} (port {svc['port']}) ---")
 
-    # Paginate through queue
+def _status_messages(record):
+    msgs = []
+    for sm in record.get("statusMessages", []):
+        msgs.extend(sm.get("messages", []))
+    return msgs
+
+
+def fetch_queue(api, svc, out=print, max_pages=MAX_PAGES):
+    """Page through the queue, and stop even when the service says not to.
+
+    The heredoc version looped on `page * 50 >= totalRecords` alone. A service
+    reporting a totalRecords that grows at least as fast as the pages are
+    consumed -- or one that keeps answering with an empty `records` list --
+    never satisfied that condition, and the script hung with no output and no
+    timeout, inside a systemd unit.
+    """
     all_records = []
     page = 1
     while True:
-        data = api_get(svc["port"], f"/api/v3/queue?page={page}&pageSize=50", svc["key"])
+        data = api.get(svc["port"],
+                       f"/api/v3/queue?page={page}&pageSize={PAGE_SIZE}",
+                       svc["key"])
         if data is None:
-            print(f"  ✗ Failed to fetch queue")
+            out(f"  ✗ Failed to fetch queue")
             break
         records = data.get("records", [])
+        if not records:
+            # Nothing on this page: whatever totalRecords claims, there is no
+            # further work to collect and another request would repeat this one.
+            break
         all_records.extend(records)
         total_records = data.get("totalRecords", 0)
-        if page * 50 >= total_records:
+        if page * PAGE_SIZE >= total_records:
+            break
+        if page >= max_pages:
+            out(f"  ! Stopped after {max_pages} pages ({len(all_records)} items);"
+                f" {svc['name']} reported {total_records} total."
+                f" The rest of the queue was not examined.")
             break
         page += 1
+    return all_records
 
-    print(f"  Queue size: {len(all_records)} items")
+
+def process_service(svc, api, apply_changes, verbose, out=print,
+                    now=None, sleep=time.sleep, max_pages=MAX_PAGES):
+    out(f"\n--- {svc['name']} (port {svc['port']}) ---")
+
+    all_records = fetch_queue(api, svc, out=out, max_pages=max_pages)
+    out(f"  Queue size: {len(all_records)} items")
 
     stuck_items = []
     for record in all_records:
-        reason_type, reason_msg = is_stuck(record)
+        reason_type, reason_msg = is_stuck(record, now)
         if reason_type:
             stuck_items.append((record, reason_type, reason_msg))
 
     if not stuck_items:
-        print(f"  - No stuck items found")
-        continue
+        out(f"  - No stuck items found")
+        return 0, 0
 
-    print(f"  Found {len(stuck_items)} stuck item(s):")
+    out(f"  Found {len(stuck_items)} stuck item(s):")
 
-    removed_ids = set()   # queue IDs successfully removed
-    search_targets = set()  # unique series/movie IDs to re-search
+    search_targets = set()
     removed_count = 0
 
     for record, reason_type, reason_msg in stuck_items:
@@ -173,61 +238,79 @@ for svc in SERVICES:
         qid = record.get("id")
         target_id = record.get(svc["id_field"])
 
-        if APPLY:
-            success = api_delete(
+        if apply_changes:
+            success = api.delete(
                 svc["port"],
                 f"/api/v3/queue/{qid}?removeFromClient=true&blocklist=true",
                 svc["key"]
             )
             if success:
-                print(f"  ✓ Removed: {title}")
-                print(f"    Reason: {reason_msg}")
-                removed_ids.add(qid)
+                out(f"  ✓ Removed: {title}")
+                out(f"    Reason: {reason_msg}")
                 removed_count += 1
                 if target_id:
                     search_targets.add(target_id)
-                time.sleep(0.5)
+                sleep(0.5)
             else:
-                print(f"  ✗ Failed to remove: {title}")
+                out(f"  ✗ Failed to remove: {title}")
         else:
-            print(f"  [dry-run] Would remove: {title}")
-            print(f"    Reason: {reason_msg}")
+            out(f"  [dry-run] Would remove: {title}")
+            out(f"    Reason: {reason_msg}")
             removed_count += 1
             if target_id:
                 search_targets.add(target_id)
 
-        if VERBOSE:
+        if verbose:
             pct = 0
             if record.get("size", 0) > 0:
                 pct = round((1 - record.get("sizeleft", 0) / record["size"]) * 100, 1)
-            print(f"    [verbose] Status: {record.get('status')} | "
-                  f"Tracked: {record.get('trackedDownloadStatus')} | "
-                  f"State: {record.get('trackedDownloadState')} | "
-                  f"Progress: {pct}% | Type: {reason_type}")
+            out(f"    [verbose] Status: {record.get('status')} | "
+                f"Tracked: {record.get('trackedDownloadStatus')} | "
+                f"State: {record.get('trackedDownloadState')} | "
+                f"Progress: {pct}% | Type: {reason_type}")
 
-    # Trigger re-searches
     if search_targets:
-        action = "Triggering" if APPLY else "Would trigger"
-        print(f"\n  {action} searches for {len(search_targets)} {svc['name'].lower()} item(s):")
+        action = "Triggering" if apply_changes else "Would trigger"
+        out(f"\n  {action} searches for {len(search_targets)} {svc['name'].lower()} item(s):")
         for target_id in sorted(search_targets):
-            if svc["search_key"] == "movieIds":
-                payload = {"name": svc["search_cmd"], svc["search_key"]: [target_id]}
-            else:
-                payload = {"name": svc["search_cmd"], svc["search_key"]: target_id}
-
-            if APPLY:
-                success = api_post_json(svc["port"], "/api/v3/command", svc["key"], payload)
+            payload = search_payload(svc, target_id)
+            if apply_changes:
+                success = api.post_json(svc["port"], "/api/v3/command", svc["key"], payload)
                 status = "queued" if success else "FAILED"
-                print(f"    ✓ Search {svc['id_field']}={target_id}: {status}")
+                out(f"    ✓ Search {svc['id_field']}={target_id}: {status}")
             else:
-                print(f"    [dry-run] Search {svc['id_field']}={target_id}")
+                out(f"    [dry-run] Search {svc['id_field']}={target_id}")
 
-    total_removed += removed_count
-    total_searches += len(search_targets)
+    return removed_count, len(search_targets)
 
-# --- Summary ---
-print(f"\n{'=' * 40}")
-mode = "APPLIED" if APPLY else "DRY RUN"
-print(f"Summary ({mode}): {total_removed} items removed, {total_searches} searches triggered")
-if not APPLY and total_removed > 0:
-    print("Run with --apply to actually remove stuck items")
+
+def run(svcs, api, apply_changes, verbose, out=print, now=None, sleep=time.sleep,
+        max_pages=MAX_PAGES):
+    total_removed = 0
+    total_searches = 0
+    for svc in svcs:
+        removed, searches = process_service(svc, api, apply_changes, verbose,
+                                            out=out, now=now, sleep=sleep,
+                                            max_pages=max_pages)
+        total_removed += removed
+        total_searches += searches
+
+    out(f"\n{'=' * 40}")
+    mode = "APPLIED" if apply_changes else "DRY RUN"
+    out(f"Summary ({mode}): {total_removed} items removed, {total_searches} searches triggered")
+    if not apply_changes and total_removed > 0:
+        out("Run with --apply to actually remove stuck items")
+    return total_removed, total_searches
+
+
+def main(argv):
+    apply_changes = argv[1] == "true"
+    verbose = argv[2] == "true"
+    sonarr_key = argv[3]
+    radarr_key = argv[4]
+    run(services(sonarr_key, radarr_key), ArrApi(), apply_changes, verbose)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
