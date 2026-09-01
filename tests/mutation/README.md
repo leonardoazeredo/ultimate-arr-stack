@@ -189,7 +189,6 @@ old "14 tests" claim went stale.
 - `scripts/backup-prune.sh`
 - `scripts/boot-compose-up.sh`
 - `scripts/check-network.sh`
-- `scripts/check-vpn.sh`
 - `scripts/configure-apps.sh`
 - `scripts/detect-credential-drift.sh`
 - `scripts/detect-vpn-zombies.sh`
