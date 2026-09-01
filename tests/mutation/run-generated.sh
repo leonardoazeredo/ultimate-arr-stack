@@ -78,6 +78,7 @@ TARGETS=(
   # say nothing beyond "this file has no tests" - something README.md's derived
   # no-sweep list already says, for free.
   "scripts/lib/common.sh:tests/lib-common.bats:^common: "
+  "scripts/lib/check-domains.sh:tests/lib-domains.bats:^domains: "
 )
 
 FILTER=""

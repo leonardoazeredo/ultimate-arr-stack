@@ -188,7 +188,6 @@ old "14 tests" claim went stale.
 - `scripts/ensure-tailscale-relay-port.sh`
 - `scripts/fix-radarr-paths.sh`
 - `scripts/fix-sonarr-folders.sh`
-- `scripts/lib/check-domains.sh`
 - `scripts/post-merge`
 - `scripts/pre-commit`
 - `scripts/queue-cleanup.sh`
