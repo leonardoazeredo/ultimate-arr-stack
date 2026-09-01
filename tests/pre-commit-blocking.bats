@@ -96,7 +96,15 @@ run_hook() {
 # the test would be asserting against a check that never ran.
 # Its own `.conf` spelling (`PrivateKey = ...`, spaces round the `=`) does NOT
 # match that pattern -- worth knowing before writing a fixture for it.
-SECRET_LINE='WIREGUARD_PRIVATE_KEY=wOEI9rqqbDwnN8xBpp22sVz48T71vJ4fYmFWujulwUU='
+#
+# It is read from tests/fixtures/ rather than written inline, because the check
+# under test scans this repo too: an inline copy made check_secrets flag THIS
+# FILE, so every later commit here would have been blocked by the test for the
+# blocking check. check-secrets.sh:26 exempts tests/fixtures/* precisely so that
+# intentional fake secrets have somewhere to live -- use it, rather than widening
+# the exemption to all bats files and blinding the check to a real key pasted
+# into some future test.
+secret_line() { cat "$REPO_ROOT/tests/fixtures/fake-wireguard-key.env"; }
 
 @test "pre-commit: a clean tree runs every check and reports PASSED" {
     run_hook clean.md 'nothing interesting here'
@@ -106,7 +114,7 @@ SECRET_LINE='WIREGUARD_PRIVATE_KEY=wOEI9rqqbDwnN8xBpp22sVz48T71vJ4fYmFWujulwUU='
 }
 
 @test "pre-commit: a staged secret is reported by the summary, not by dying" {
-    run_hook leaky.conf "$SECRET_LINE"
+    run_hook leaky.conf "$(secret_line)"
     [ "$status" -eq 1 ]
     [[ "$output" == *"Possible WireGuard private key"* ]]
     # The point of the test: it got all the way to the end.
@@ -140,7 +148,7 @@ SECRET_LINE='WIREGUARD_PRIVATE_KEY=wOEI9rqqbDwnN8xBpp22sVz48T71vJ4fYmFWujulwUU='
     # a hook that dies at its first finding: reaching "2" requires surviving
     # error #1. A secret (check 1) and a hostname (check 5) are independent
     # failures in different checks.
-    run_hook secret.conf "$SECRET_LINE" host.md 'deploy to zqxhost tonight'
+    run_hook secret.conf "$(secret_line)" host.md 'deploy to zqxhost tonight'
     [ "$status" -eq 1 ]
     [[ "$output" == *"2 error(s) found"* ]]
     [ "$checks_run" -eq 11 ]
