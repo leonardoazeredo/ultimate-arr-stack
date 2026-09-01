@@ -368,6 +368,23 @@ write-up in `tests/mutation/README.md`; these are the one-line forms.
   so every service that simply was not up was reported to the user as `✓ added`. An HTTP
   code is not a status; keep it in a variable.
 
+- **An awk *pattern* with no action is a print filter, not a predicate.**
+  `echo "$SCHEDULE" | awk 'NF==5'` prints the matching lines and exits 0 whatever it
+  matched, so `duc-service/app/startup.sh`'s "invalid schedule" fallback was unreachable
+  code and any value at all went into `/etc/cron.d`, where cron ignores a malformed line
+  in silence. A predicate needs an action and an `END`: `awk 'NF==5 {ok=1} END {exit
+  !(ok && NR==1)}'` — and `NR==1` matters as much as the field count wherever the value
+  lands in a newline-delimited file.
+- **A cleanup `trap` armed before the resource is acquired cleans up somebody else's
+  resource.** `scan.sh` takes a lock with `mkdir` and removes it on EXIT; arm the trap
+  one line earlier and the invocation that was correctly turned away deletes the
+  *running* scan's lock on its way out. Arm it after the acquisition succeeds, never
+  before.
+- **`read -p` writes no prompt at all unless stdin is a terminal.** The text is real,
+  the branch is real, and no test that feeds stdin from a file or a here-string will
+  ever see it — so a test asserting on the prompt fails for a reason that has nothing
+  to do with the code.
+
 **Test**
 
 - ▸ **`tests/shellcheck.bats` only sees *tracked* files.** A newly written script passes
@@ -451,7 +468,28 @@ write-up in `tests/mutation/README.md`; these are the one-line forms.
   the NAS is down, and whether the answer came from Pi-hole or from the machine's own
   resolver. Assert on what was *asked for* — that is what `$STUB_LOG` is for.
 
+- **A corpus file is *sourced*, so its prose fields are shell.** An unescaped backtick
+  inside a double-quoted `--why` runs as a command before any mutation is applied: two
+  entries shipped that way and one of them executed `check-vpn.sh || notify` on every
+  full corpus run. It found neither name on `PATH`. A prose field naming a real command
+  would not have been so lucky. `tests/mutation-framework.bats` now refuses any
+  unescaped `` ` `` or `$(` outside `--apply`, which is the one field that is meant to
+  be code.
+- **`[[ -t 0 ]]` cannot be made true from a test without allocating a pty.** The choice
+  is a one-line seam (`stdin_is_tty()`) or leaving the interactive branch — which in
+  `check-network.sh` is the one that reaches `docker network rm` — with no test at all.
+- **`@` is a poor `sed` delimiter for shell source**, because `"${ARR[@]}"` contains
+  one. A mutation whose `s@@@` silently failed to match reported as an ERROR rather than
+  a false KILLED only because `run-mutations.sh` checks that the file actually changed.
+
 **Operational**
+
+- **A no-op that returns success is indistinguishable from work completed.**
+  `duc-service`'s poller deleted the "scan requested" marker and then called `scan.sh`,
+  which exited 0 without scanning whenever a scheduled scan happened to hold the lock.
+  The request was gone, no error was produced anywhere, and the user's manual scan
+  simply never happened. Give "I did nothing" its own exit status and let the caller
+  clear the claim by the *outcome*, not on the way in.
 
 - **`backup-prune.sh` uses `find "$DIR" -maxdepth 1`** and never descends. Anything
   written to a *subdirectory* of the backup root is retained forever by nobody's

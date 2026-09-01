@@ -85,6 +85,13 @@ TARGETS=(
   "scripts/check-vpn.sh:tests/check-vpn.bats:^check-vpn: "
   "scripts/boot-compose-up.sh:tests/boot-compose-up.bats:^boot-compose-up: "
   "scripts/check-network.sh:tests/check-network.bats:^check-network: "
+  # The four duc files share one oracle because they are one protocol: the cgi
+  # produces a request marker, the poller consumes it, scan.sh holds the lock
+  # both of them branch on. A mutant in any of them is scored against all of it.
+  "duc-service/app/scan.sh:tests/duc-service.bats:^duc: "
+  "duc-service/app/manual_scan.sh:tests/duc-service.bats:^duc: "
+  "duc-service/app/manual_scan.cgi:tests/duc-service.bats:^duc: "
+  "duc-service/app/startup.sh:tests/duc-service.bats:^duc: "
 )
 
 FILTER=""

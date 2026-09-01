@@ -181,10 +181,6 @@ old "14 tests" claim went stale.
 <!-- NO-SWEEP-ORACLE: asserted by tests/shellcheck.bats; do not edit by hand -->
 - `duc-service/app/duc.cgi`
 - `duc-service/app/log.cgi`
-- `duc-service/app/manual_scan.cgi`
-- `duc-service/app/manual_scan.sh`
-- `duc-service/app/scan.sh`
-- `duc-service/app/startup.sh`
 - `scripts/arr-backup.sh`
 - `scripts/backup-prune.sh`
 - `scripts/configure-apps.sh`
