@@ -52,7 +52,26 @@ setup() {
             *) echo "unexpected docker argv: $*" >&2; exit 125 ;;
         esac
     '
-    stub_curl 'cat "$FIX/curl-out"'
+    # qBittorrent's real (non-dry) path talks to four endpoints with four
+    # different response shapes, so the curl stub dispatches on the URL. Anything
+    # else — every wait_for_service health poll — gets the default.
+    printf 'Ok.\n200\n' > "$FIX/qbit-auth"
+    echo 200 > "$FIX/qbit-category-code"
+    echo 200 > "$FIX/qbit-setprefs-code"
+    # The preference set the script considers already-correct. Identical to the
+    # payload it would POST, which is the property the check exists to have.
+    printf '%s\n' '{"auto_tmm_enabled":true,"upnp":false,"limit_utp_rate":true,"limit_lan_peers":true,"encryption":1,"max_inactive_seeding_time_enabled":true,"max_inactive_seeding_time":30,"max_ratio_act":0,"max_active_downloads":5,"max_active_torrents":10,"max_active_uploads":5}' > "$FIX/qbit-prefs.json"
+    stub_curl '
+        for a in "$@"; do
+            case "$a" in
+                */api/v2/auth/login)              cat "$FIX/qbit-auth";          exit 0 ;;
+                */api/v2/torrents/createCategory) cat "$FIX/qbit-category-code"; exit 0 ;;
+                */api/v2/app/preferences)         cat "$FIX/qbit-prefs.json";    exit 0 ;;
+                */api/v2/app/setPreferences)      cat "$FIX/qbit-setprefs-code"; exit 0 ;;
+            esac
+        done
+        cat "$FIX/curl-out"
+    '
     stub_tool hostname 'cat "$FIX/hostname"'
 
     # mktemp -t honours TMPDIR, so pointing it at a per-test directory makes
@@ -447,4 +466,125 @@ EOF
     assert_output --partial "Gluetun is 'unhealthy'"
     refute_output --partial "Discovering API keys"
     assert_nothing_forbidden
+}
+
+# ------------------------------------------------ configure_qbittorrent, for real
+#
+# The only place in this file that drives a configure_* function with DRY_RUN
+# off. These endpoints are not on the denylist (they carry no -X POST), which is
+# deliberate: the harness stops the operations a test must never perform, and
+# qBittorrent's own API against a stub is not one of them.
+
+# Set up the globals configure_qbittorrent reads and run it. The cookie file is
+# created first so its removal at the end is observable.
+run_qbit() {
+    COOKIE="$BATS_TEST_TMPDIR/cookie"
+    export COOKIE
+    : > "$COOKIE"
+    DRIVER_PRE='NAS_IP=10.0.0.1; QBIT_PASSWORD=pw; QBIT_COOKIE="$COOKIE"' \
+        run "$DRIVER" configure_qbittorrent
+}
+
+@test "configure-apps: a successful qBittorrent login proceeds to configure it" {
+    run_qbit
+    assert_output --partial "created category 'tv'"
+    assert_output --partial "created category 'movies'"
+    refute_output --partial "authentication failed"
+}
+
+@test "configure-apps: a rejected qBittorrent login is reported and stops the service" {
+    printf 'Fails.\n200\n' > "$FIX/qbit-auth"
+    run_qbit
+    assert_output --partial "authentication failed (check QBIT_USERNAME/QBIT_PASSWORD)"
+    assert_stub_not_called curl "createCategory"
+    assert_stub_not_called curl "setPreferences"
+}
+
+@test "configure-apps: each category is created at its own save path" {
+    run_qbit
+    assert_stub_called curl "category=tv"
+    assert_stub_called curl "savePath=/data/torrents/tv"
+    assert_stub_called curl "category=movies"
+    assert_stub_called curl "savePath=/data/torrents/movies"
+}
+
+@test "configure-apps: a category that already exists is a skip, not a failure" {
+    echo 409 > "$FIX/qbit-category-code"
+    run_qbit
+    assert_output --partial "category 'tv' (already configured)"
+    refute_output --partial "✗ qBittorrent: create category"
+}
+
+@test "configure-apps: any other category status is a counted failure naming the code" {
+    echo 403 > "$FIX/qbit-category-code"
+    DRIVER_PRE='NAS_IP=10.0.0.1; QBIT_PASSWORD=pw; QBIT_COOKIE=$(mktemp)' \
+        run "$DRIVER" eval 'configure_qbittorrent; echo "FAILED=$FAILED"'
+    assert_output --partial "create category 'tv' (HTTP 403)"
+    assert_output --partial "FAILED=2"
+}
+
+@test "configure-apps: preferences already at the target values are left alone" {
+    # Kills the whole block of !=-comparisons at once: flip any one of them and
+    # an already-correct client gets its preferences rewritten on every run.
+    run_qbit
+    assert_output --partial "qBittorrent: preferences (already configured)"
+    assert_stub_not_called curl "setPreferences"
+}
+
+@test "configure-apps: one wrong preference is enough to rewrite the whole set" {
+    # Every field in the block is load bearing, so wrecking any single one must
+    # trigger the write. Looping over all eleven is what makes flipping one
+    # comparison from != to == a failing test rather than a survivor.
+    #
+    # The wrong value is named per field rather than shared: the flags are
+    # checked for truthiness and the numbers for equality, so one sentinel
+    # cannot break both — a truthy string sails straight through `if not
+    # p.get(...)` and the test would silently cover only half the block.
+    cp "$FIX/qbit-prefs.json" "$FIX/prefs-correct.json"
+    local pair field wrong
+    for pair in auto_tmm_enabled=false upnp=true limit_utp_rate=false \
+                limit_lan_peers=false encryption=0 \
+                max_inactive_seeding_time_enabled=false \
+                max_inactive_seeding_time=31 max_ratio_act=1 \
+                max_active_downloads=6 max_active_torrents=11 \
+                max_active_uploads=6; do
+        field="${pair%%=*}"
+        wrong="${pair#*=}"
+        python3 -c "
+import json, sys
+p = json.load(open(sys.argv[1]))
+p[sys.argv[3]] = json.loads(sys.argv[4])
+json.dump(p, open(sys.argv[2], 'w'))
+" "$FIX/prefs-correct.json" "$FIX/qbit-prefs.json" "$field" "$wrong"
+        : > "$STUB_LOG"
+        run_qbit
+        # Named in the failure message, or eleven identical failures tell you
+        # nothing about which field stopped being checked.
+        [[ "$output" == *"set preferences"* ]] || {
+            echo "a wrong $field did not trigger a preferences write"
+            echo "$output"
+            return 1
+        }
+        assert_stub_called curl "setPreferences"
+    done
+}
+
+@test "configure-apps: a rejected preferences write is a counted failure" {
+    python3 -c "
+import json
+p = json.load(open('$FIX/qbit-prefs.json'))
+p['encryption'] = 0
+json.dump(p, open('$FIX/qbit-prefs.json', 'w'))
+"
+    echo 500 > "$FIX/qbit-setprefs-code"
+    DRIVER_PRE='NAS_IP=10.0.0.1; QBIT_PASSWORD=pw; QBIT_COOKIE=$(mktemp)' \
+        run "$DRIVER" eval 'configure_qbittorrent; echo "FAILED=$FAILED"'
+    assert_output --partial "set preferences (HTTP 500)"
+    assert_output --partial "FAILED=1"
+}
+
+@test "configure-apps: the session cookie is removed once qBittorrent is configured" {
+    run_qbit
+    assert_success
+    [ ! -e "$COOKIE" ]
 }

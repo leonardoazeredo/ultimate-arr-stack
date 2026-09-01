@@ -7,6 +7,11 @@
 # Rows are keyed on (file, mutation); the line number is informational and may
 # be stale. Only targets swept by the last run are rewritten.
 #file	line	mutation	verdict	note
+scripts/configure-apps.sh	107	 [[ -f "$file" ]] || return 1 ==> [[ -e "$file" ]] || return 1	wontfix	-e also accepts a directory, but grep then fails on it and the || return 1 fires anyway. Only a line of grep stderr differs; there is no status or stdout to assert on.
+scripts/configure-apps.sh	208	 | grep -oP '(?<=<ApiKey>)[^<]+' || true ==> | grep -oP '(?<=<ApiKey>)[^<]+' && true	equivalent	the substitution is assigned and its status never read, so both forms yield the same empty string. Nothing can distinguish them.
+scripts/configure-apps.sh	227	 | head -1 | sed 's/.*apikey:\s*//' | tr -d ' ' || true) ==> | head -1 | sed 's/.*apikey:\s*//' | tr -d ' ' && true)	equivalent	as 208 - assigned to BAZARR_API_KEY, status discarded, same empty string either way.
+scripts/configure-apps.sh	237	 | head -1 | sed 's/^api_key = //' | tr -d ' ' || true) ==> | head -1 | sed 's/^api_key = //' | tr -d ' ' && true)	equivalent	as 208 - assigned to SABNZBD_API_KEY, status discarded.
+scripts/configure-apps.sh	249	 | grep -oP 'temporary password is provided.*: \K\S+' | tail -1 || true) ==> | grep -oP 'temporary password is provided.*: \K\S+' | tail -1 && true)	equivalent	as 208 - assigned to QBIT_PASSWORD, status discarded; the caller tests the value with -z, never $?.
 scripts/lib/check-conflicts.sh	11	 [[ -f "$compose_file" ]] || continue ==> [[ -e "$compose_file" ]] || continue	wontfix	-f vs -e differs only if a DIRECTORY is named docker-compose*.yml; not a state this repo can reach
 scripts/lib/check-conflicts.sh	54	 [[ -f "$compose_file" ]] || continue ==> [[ -e "$compose_file" ]] || continue	wontfix	same as :11 - would need a directory matching the compose glob
 scripts/lib/check-env-vars.sh	13	 [[ -f "$f" ]] && compose_files+=("$f") ==> [[ -e "$f" ]] && compose_files+=("$f")	wontfix	same class - a directory named docker-compose*.yml

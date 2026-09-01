@@ -134,3 +134,36 @@ mutation configure-apps-pihole-dry-run-gate-removed \
   --test "configure-apps: --dry-run touches nothing in qBittorrent, the arrs, Bazarr or Pi-hole" \
   --why "drops the dry-run early return out of configure_pihole, which rewrites upstream DNS and then restarts the container serving the whole house's DNS. Kept separate from the qBittorrent gate above because each configure_* function carries its own copy of the check - one gate being right says nothing about the other five" \
   --apply 'sed -i "/^configure_pihole()/,/^}/ s@if \[\[ \"\$DRY_RUN\" == true \]\]; then@if false; then@" "$F"'
+
+# --- Entries below close gaps the generative sweep found, not gaps anyone
+# --- thought of first. run-generated.sh reported them as survivors against the
+# --- first 44 tests in tests/configure-apps.bats; each one is here because a
+# --- test was then written for it.
+
+mutation configure-apps-qbit-auth-inverted \
+  --file scripts/configure-apps.sh \
+  --bats tests/configure-apps.bats \
+  --test "configure-apps: a successful qBittorrent login proceeds to configure it" \
+  --why "drops the negation on the auth check, so a successful login is reported as an authentication failure and every later step is skipped. Survived the first pass because the only tests reaching configure_qbittorrent were dry runs, which return before authenticating at all" \
+  --apply 'sed -i "s@if ! qbit_auth @if qbit_auth @" "$F"'
+
+mutation configure-apps-qbit-encryption-check-inverted \
+  --file scripts/configure-apps.sh \
+  --bats tests/configure-apps.bats \
+  --test "configure-apps: preferences already at the target values are left alone" \
+  --why "inverts one comparison in the already-configured check, so a client that is already correct gets its whole preference set rewritten on every run. The script advertises itself as idempotent; this is the check that makes that true" \
+  --apply 'sed -i "s@if p.get(.encryption., 0) != 1@if p.get(.encryption., 0) == 1@" "$F"'
+
+mutation configure-apps-qbit-preference-stops-being-checked \
+  --file scripts/configure-apps.sh \
+  --bats tests/configure-apps.bats \
+  --test "configure-apps: one wrong preference is enough to rewrite the whole set" \
+  --why "removes one field from the already-configured check. The script then reports the preferences as correct while that setting stays wrong forever, and re-running - the documented remedy - fixes nothing. Kept separate from the inverted comparison above because a dropped field fails in the opposite direction: silence rather than churn" \
+  --apply 'sed -i "/^if p.get(.max_active_uploads., -1) != 5: sys.exit(1)\$/d" "$F"'
+
+mutation configure-apps-qbit-cookie-left-behind \
+  --file scripts/configure-apps.sh \
+  --bats tests/configure-apps.bats \
+  --test "configure-apps: the session cookie is removed once qBittorrent is configured" \
+  --why "leaves the live session cookie on disk once qBittorrent is configured. main's EXIT trap is the backstop, not the plan - configure_qbittorrent is also called on its own, and a cleanup that only happens when someone else remembers is not a cleanup" \
+  --apply 'sed -i "/^    rm -f \"\$QBIT_COOKIE\"\$/d" "$F"'
