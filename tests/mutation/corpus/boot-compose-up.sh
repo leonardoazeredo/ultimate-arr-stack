@@ -45,7 +45,7 @@ mutation boot-failures-exit-zero \
   --file scripts/boot-compose-up.sh \
   --bats tests/boot-compose-up.bats \
   --test "boot-compose-up: one failing stack does not stop the rest" \
-  --why "drops the non-zero exit after failures, which is how this script shipped: `failed` was accumulated, printed, and then could not affect the outcome. Running it by hand to check a reboot went cleanly gave 0 either way" \
+  --why "drops the non-zero exit after failures, which is how this script shipped: \`failed\` was accumulated, printed, and then could not affect the outcome. Running it by hand to check a reboot went cleanly gave 0 either way" \
   --apply 'sed -i "/=== finished WITH FAILURES/,/^fi\$/{/^    exit 1\$/d}" "$F"'
 
 mutation boot-readiness-give-up-falls-through \

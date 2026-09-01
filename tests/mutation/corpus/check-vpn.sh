@@ -31,7 +31,7 @@ mutation check-vpn-leaked-flag-never-read \
   --file scripts/check-vpn.sh \
   --bats tests/check-vpn.bats \
   --test "check-vpn: one leaking dependent fails the run and names it" \
-  --why "compares the accumulator against a value it can never hold, so a detected leak is printed and then exits 0. The script still says LEAK DETECTED in its output; the only consumer that matters, `check-vpn.sh || notify`, never fires" \
+  --why "compares the accumulator against a value it can never hold, so a detected leak is printed and then exits 0. The script still says LEAK DETECTED in its output; the only consumer that matters, a \`|| notify\` wrapper in cron, never fires" \
   --apply 'sed -i "s@if \[\[ \"\$leaked\" -eq 1 \]\]@if [[ \"\$leaked\" -eq 2 ]]@" "$F"'
 
 mutation check-vpn-empty-answer-is-a-pass \

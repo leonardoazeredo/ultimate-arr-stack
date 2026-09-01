@@ -84,6 +84,7 @@ TARGETS=(
   "scripts/ensure-tailscale-relay-port.sh:tests/ensure-relay-port.bats:^ensure-relay-port: "
   "scripts/check-vpn.sh:tests/check-vpn.bats:^check-vpn: "
   "scripts/boot-compose-up.sh:tests/boot-compose-up.bats:^boot-compose-up: "
+  "scripts/check-network.sh:tests/check-network.bats:^check-network: "
 )
 
 FILTER=""

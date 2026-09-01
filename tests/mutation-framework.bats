@@ -506,3 +506,52 @@ CORPUS
         echo "$after"; return 1
     }
 }
+
+# Fields whose contents are PROSE and are therefore never allowed to be
+# evaluated. --apply is deliberately absent: it is single-quoted shell by
+# design and is the one field that is supposed to contain code.
+scan_corpus_prose() {
+    grep -n '^  --\(why\|test\|file\|bats\) ' "$1"/*.sh \
+        | grep -P '(?<!\\)(`|\$\()' || true
+}
+
+@test "no corpus prose field can execute anything when the file is sourced" {
+    # Corpus files are SOURCED by run-mutations.sh, so a backtick or $( ) left
+    # unescaped inside a double-quoted --why or --test runs as a command before
+    # any mutation is applied. This was not hypothetical: two entries shipped
+    # that way and one of them executed `check-vpn.sh || notify` on every run of
+    # the whole corpus. It found neither name on PATH; a prose field that
+    # happened to name a real command would not have been so lucky.
+    local bad
+    bad=$(scan_corpus_prose "$REPO_ROOT/tests/mutation/corpus")
+    if [ -n "$bad" ]; then
+        fail "$(printf 'a corpus prose field would be evaluated when sourced:\n%s' "$bad")"
+    fi
+}
+
+@test "the corpus prose scan actually catches an evaluating field" {
+    # This guard gets no corpus entry, and not by omission. The only way to
+    # mutate it is to reintroduce an unescaped substitution into a real corpus
+    # file - and run-mutations.sh SOURCES every corpus file on every run, so the
+    # mutation would execute the very thing the guard exists to prevent, in the
+    # runner, before any test could observe it. A fixture proves the same thing
+    # without arming it.
+    local dir="$BATS_TEST_TMPDIR/corpus"
+    mkdir -p "$dir"
+    cat > "$dir/clean.sh" <<'EOF'
+mutation fine \
+  --why "a \`quoted\` name and a literal \$(not a substitution)" \
+  --apply 'sed -i "s@a@b@" "$F"'
+EOF
+    run scan_corpus_prose "$dir"
+    assert_success
+    [ -z "$output" ] || fail "flagged a correctly escaped corpus file: $output"
+
+    printf '%s\n' 'mutation bad \' '  --why "the consumer, `notify`, never fires" \' > "$dir/bad.sh"
+    run scan_corpus_prose "$dir"
+    assert_output --partial "bad.sh"
+
+    printf '%s\n' 'mutation bad2 \' '  --test "runs $(id -u) at source time" \' > "$dir/bad2.sh"
+    run scan_corpus_prose "$dir"
+    assert_output --partial "bad2.sh"
+}
