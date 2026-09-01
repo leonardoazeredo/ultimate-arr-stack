@@ -39,6 +39,11 @@ dry()   { echo "  [dry-run] Would: $1"; }
 # HTTP helpers
 # ============================================
 
+# Set by _api_request to the HTTP code of the most recent call, or "000" when
+# curl never got a response. This is the ONLY place the code survives -- it is
+# deliberately kept out of the exit status. See the comment in _api_request.
+_API_LAST_CODE=""
+
 # Usage: body=$(api_get "url" "header1" "header2" ...)
 #        body=$(api_post "url" "application/json" '{"k":"v"}' "header1" ...)
 _api_request() {
@@ -56,17 +61,32 @@ _api_request() {
     code=$(echo "$response" | tail -1)
     local body
     body=$(echo "$response" | sed '$d')
+
+    # The HTTP code goes in a global, never in the exit status. Every caller in
+    # configure-apps.sh is `if api_post ...; then ok "added X"; else fail; fi`,
+    # so the status is read as a boolean and nothing else -- and an HTTP code
+    # makes a terrible boolean. 404 became status 148, 500 became 244, an empty
+    # code became `return: : numeric argument required`, and curl's own "000"
+    # for a connection that never completed became status 0, so a refused port
+    # was reported to the user as a tick.
+    _API_LAST_CODE="${code:-000}"
+
     if [[ "$code" =~ ^2 ]]; then
         echo "$body"
         return 0
-    else
-        [[ "$method" != "GET" ]] && echo "$body"
-        if [[ "${VERBOSE:-false}" == "true" ]]; then
-            echo "  [verbose] $method $url → HTTP $code" >&2
-            echo "  [verbose] Response: $body" >&2
-        fi
-        if [[ "$method" == "GET" ]]; then return 1; else return "$code"; fi
     fi
+
+    # A failing non-GET prints the body because it usually carries the reason
+    # ("already exists", a validation message). A failing GET prints nothing,
+    # so a caller doing `x=$(api_get ...)` never captures an error page as data.
+    if [[ "$method" != "GET" ]]; then
+        echo "$body"
+    fi
+    if [[ "${VERBOSE:-false}" == "true" ]]; then
+        echo "  [verbose] $method $url → HTTP ${_API_LAST_CODE}" >&2
+        echo "  [verbose] Response: $body" >&2
+    fi
+    return 1
 }
 
 api_get()  { _api_request GET  "$@"; }

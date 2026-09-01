@@ -48,8 +48,13 @@ MUTANT_DIR="$ROOT/tests/mutation/.mutants"
 # with no oracle does not belong here: against an untested file EVERY mutant
 # survives by construction, which is not a finding, it is a restatement of
 # "this file has no tests" -- and a few hundred guaranteed survivors would bury
-# the real signal. The nine untested scripts/lib/ files are recorded as a
-# missing-test gap in tests/mutation/README.md instead of being swept.
+# the real signal. The scripts/lib/ files that still have no oracle are recorded
+# as a missing-test gap in tests/mutation/README.md instead of being swept.
+#
+# No count is written down here on purpose. This table IS the list of covered
+# files, so a number beside it can only ever disagree with it; the staleness
+# test in tests/shellcheck.bats derives the uncovered set from field 1 at run
+# time rather than from anything anyone remembered to edit.
 TARGETS=(
 # The third field is a bats `-f` regex, so it is anchored: an unanchored
 # substring would silently widen the oracle as tests are added, and a mutant
@@ -57,6 +62,10 @@ TARGETS=(
   "scripts/lib/check-secrets.sh:tests/pre-commit-checks.bats:^check_secrets "
   "scripts/lib/check-env-vars.sh:tests/pre-commit-checks.bats:^check_env_vars "
   "scripts/lib/check-conflicts.sh:tests/pre-commit-checks.bats:^check_conflicts "
+  "scripts/lib/check-hardcoded-domain.sh:tests/lib-hardcoded-domain.bats:^hardcoded-domain: "
+  "scripts/lib/check-uptime-monitors.sh:tests/lib-uptime-monitors.bats:^uptime-monitors: "
+  "scripts/lib/check-image-versions.sh:tests/lib-image-versions.bats:^image-versions: "
+  "scripts/lib/configure-helpers.sh:tests/lib-configure-helpers.bats:^configure-helpers: "
   # scripts/lib/common.sh is deliberately NOT here. It was swept once, on the
   # theory that being sourced by three tested files made it covered: 78 mutants
   # generated, 78 survived, 0 killed. Sourced is not covered -- the four tests
