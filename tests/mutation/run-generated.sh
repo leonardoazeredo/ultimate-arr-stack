@@ -70,12 +70,14 @@ TARGETS=(
   "scripts/lib/check-yaml-syntax.sh:tests/lib-yaml-syntax.bats:^yaml-syntax: "
   "scripts/lib/check-env-backup.sh:tests/lib-env-backup.bats:^env-backup: "
   "scripts/lib/check-dns-duplicates.sh:tests/lib-dns-duplicates.bats:^dns-duplicates: "
-  # scripts/lib/common.sh is deliberately NOT here. It was swept once, on the
-  # theory that being sourced by three tested files made it covered: 78 mutants
-  # generated, 78 survived, 0 killed. Sourced is not covered -- the four tests
-  # exercise none of its NAS/SSH/domain helpers. It belongs on the missing-test
-  # list in README.md with the other nine, and leaving it in the sweep would add
-  # 78 guaranteed survivors that say nothing beyond "this file has no tests".
+  # scripts/lib/common.sh IS here now, and the reason it was not is worth
+  # keeping: it was swept once on the theory that being sourced by three tested
+  # files made it covered, and produced 78 mutants of which 78 survived. Sourced
+  # is not covered. It stayed off this list until it had an oracle of its own,
+  # because a target with no tests contributes only guaranteed survivors, which
+  # say nothing beyond "this file has no tests" - something README.md's derived
+  # no-sweep list already says, for free.
+  "scripts/lib/common.sh:tests/lib-common.bats:^common: "
 )
 
 FILTER=""

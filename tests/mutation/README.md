@@ -189,7 +189,6 @@ old "14 tests" claim went stale.
 - `scripts/fix-radarr-paths.sh`
 - `scripts/fix-sonarr-folders.sh`
 - `scripts/lib/check-domains.sh`
-- `scripts/lib/common.sh`
 - `scripts/post-merge`
 - `scripts/pre-commit`
 - `scripts/queue-cleanup.sh`
