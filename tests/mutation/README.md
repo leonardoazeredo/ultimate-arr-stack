@@ -154,17 +154,52 @@ tested files made it covered. **78 mutants generated, 78 survived, 0 killed.**
 Sourced is not covered: the four `pre-commit-checks.bats` tests exercise none of
 its NAS, SSH, or domain helpers. It is listed below with the rest.
 
-These files are sourced by `scripts/pre-commit`, so a defect in any of them
-silently weakens every commit's checks. **Ten `scripts/lib/` files have no bats
-test whatsoever:**
+### What is not swept
 
-`common.sh`, `check-dns-duplicates.sh`, `check-doc-links.sh`,
-`check-domains.sh`, `check-env-backup.sh`, `check-hardcoded-domain.sh`,
-`check-image-versions.sh`, `check-uptime-monitors.sh`, `check-yaml-syntax.sh`,
-`configure-helpers.sh`
+The list below is every tracked production shell file with no `TARGETS` entry,
+which is to say every one a generated mutant could not be scored against.
+Some of them do have bats tests and are simply not swept yet; others have no
+test at all. The list does not distinguish the two, because only the first is
+mechanically knowable — "has a test" has no honest definition here, as
+`setup-hooks.sh` demonstrated by being *named* by a bats file that never ran it.
 
-That is a bigger finding than anything the sweep produced, and writing those
-tests is separate work.
+There is no count written down, and the list is not maintained by hand. It is
+derived from field 1 of `TARGETS` at run time by
+`tests/shellcheck.bats`, which fails if the two disagree in either direction.
+The previous version of this paragraph was a hand-written count that went stale
+the day the first of those tests was written, which is the same way `CLAUDE.md`'s
+old "14 tests" claim went stale.
+
+<!-- NO-SWEEP-ORACLE: asserted by tests/shellcheck.bats; do not edit by hand -->
+- `duc-service/app/duc.cgi`
+- `duc-service/app/log.cgi`
+- `duc-service/app/manual_scan.cgi`
+- `duc-service/app/manual_scan.sh`
+- `duc-service/app/scan.sh`
+- `duc-service/app/startup.sh`
+- `scripts/arr-backup.sh`
+- `scripts/backup-prune.sh`
+- `scripts/boot-compose-up.sh`
+- `scripts/check-network.sh`
+- `scripts/check-vpn.sh`
+- `scripts/configure-apps.sh`
+- `scripts/detect-credential-drift.sh`
+- `scripts/detect-vpn-zombies.sh`
+- `scripts/ensure-tailscale-relay-port.sh`
+- `scripts/fix-radarr-paths.sh`
+- `scripts/fix-sonarr-folders.sh`
+- `scripts/lib/check-dns-duplicates.sh`
+- `scripts/lib/check-domains.sh`
+- `scripts/lib/check-env-backup.sh`
+- `scripts/lib/common.sh`
+- `scripts/post-merge`
+- `scripts/pre-commit`
+- `scripts/queue-cleanup.sh`
+- `scripts/restart-stack.sh`
+- `scripts/sync-nas.sh`
+- `setup-hooks.sh`
+- `terraform/apply.sh`
+<!-- /NO-SWEEP-ORACLE -->
 
 ## The stub harness, and why it has its own corpus entries
 

@@ -85,3 +85,59 @@ shell_files() {
 
     [ "$status" -eq 0 ] || fail "shellcheck errors across ${#files[@]} files:"$'\n'"$output"
 }
+
+# Every tracked shell file that is production code -- i.e. not this suite's own
+# tooling, whose oracle is the suite itself.
+production_shell_files() {
+    local f
+    while read -r f; do
+        case "$f" in tests/*) continue ;; esac
+        echo "$f"
+    done < <(shell_files)
+}
+
+# Field 1 of every TARGETS row in the generative runner. Deliberately parses no
+# further: a future fourth field, or a change to the regex convention, must not
+# be able to break this.
+sweep_targets() {
+    sed -n '/^TARGETS=(/,/^)/p' "$REPO_ROOT/tests/mutation/run-generated.sh" \
+        | grep -oE '"[^":]+:' | tr -d '":' | sort -u
+}
+
+@test "the no-sweep list in tests/mutation/README.md matches what TARGETS actually covers" {
+    # WHY THIS IS A TEST AND NOT A PARAGRAPH
+    #
+    # The claim it replaces was "Ten scripts/lib/ files have no bats test
+    # whatsoever", hand-written in three places at once. It was true when
+    # written and false the day the first of those tests landed -- the same way
+    # CLAUDE.md's old "14 tests" claim went stale, which that file now cites as
+    # the reason not to hardcode counts. A list that cannot be wrong is worth
+    # more than a list someone has to remember to edit.
+    #
+    # It fails in BOTH directions on purpose. Naming a file as unswept when it
+    # has a target is the stale half; omitting one that has no target is the
+    # half that would quietly under-report coverage as the repo grows.
+    local expected actual
+    expected="$(comm -23 <(production_shell_files | sort) <(sweep_targets))"
+
+    actual="$(sed -n '/<!-- NO-SWEEP-ORACLE:/,/<!-- \/NO-SWEEP-ORACLE -->/p' \
+                  "$REPO_ROOT/tests/mutation/README.md" \
+              | grep -oE '^- `[^`]+`' | tr -d '`' | sed 's/^- //' | sort)"
+
+    # Neither side may be empty. An empty `expected` would mean the discovery
+    # broke; an empty `actual` would mean the markers moved or were renamed.
+    # Either way the comparison would pass by matching nothing against nothing.
+    [ -n "$expected" ] || fail "derived no-sweep list is empty; the discovery is broken"
+    [ -n "$actual" ]   || fail "no NO-SWEEP-ORACLE block found in tests/mutation/README.md"
+
+    if [ "$expected" != "$actual" ]; then
+        {
+            echo "tests/mutation/README.md's no-sweep list disagrees with TARGETS."
+            echo "--- in the README but IS swept (stale, remove the line) ---"
+            comm -13 <(echo "$expected") <(echo "$actual")
+            echo "--- has no TARGETS entry but is NOT in the README (add the line) ---"
+            comm -23 <(echo "$expected") <(echo "$actual")
+        } >&2
+        fail "no-sweep list is out of date"
+    fi
+}
