@@ -347,3 +347,55 @@ CORPUS
         echo "expected 77 (docker unavailable), got $status:"; echo "$output"; return 1
     }
 }
+
+@test "a partial sweep does not delete ledger rows for targets it did not sweep" {
+    # The regression this exists for: the ledger used to be rebuilt from the
+    # current run's survivors alone. Any run that did not sweep everything -- a
+    # -k filter, a positional target, a target that SKIPped for want of docker,
+    # a target that ERRORed -- silently deleted every row it had not just
+    # regenerated. Five hand-assigned verdicts were lost that way, and the
+    # "two consecutive sweeps produce an identical ledger" check could not see
+    # it, because both of those sweeps were full ones.
+    #
+    # Both directions are asserted. A rule that only preserved rows would be
+    # satisfied by never rewriting anything, which would strand verdicts for
+    # mutations that no longer exist.
+    command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 \
+        || skip "no usable docker daemon to generate mutants in"
+    [ -z "$(cd "$REPO_ROOT" && git status --porcelain -- scripts/lib/)" ] \
+        || skip "scripts/lib is dirty; the runner refuses to sweep it (by design)"
+
+    local ledger="$REPO_ROOT/tests/mutation/survivors.tsv"
+    cp "$ledger" "$FX/ledger.orig"
+
+    # One row for a target this run will NOT sweep, carrying a hand verdict...
+    # ...and one for a target it WILL sweep, describing a mutation that does not
+    # exist, which must therefore be dropped.
+    {
+        printf '#file\tline\tmutation\tverdict\tnote\n'
+        printf 'scripts/lib/check-conflicts.sh\t99\tSENTINEL_NOT_SWEPT ==> x\twontfix\tkeep me\n'
+        printf 'scripts/lib/check-env-vars.sh\t1\tSENTINEL_STALE ==> x\tequivalent\tdrop me\n'
+    } > "$ledger"
+
+    run "$REPO_ROOT/tests/mutation/run-generated.sh" -k check-env-vars
+    local rc="$status" out="$output"
+    local after
+    after="$(cat "$ledger")"
+    cp "$FX/ledger.orig" "$ledger"
+
+    [ "$rc" -eq 0 ] || { echo "the runner must always exit 0:"; echo "$out"; return 1; }
+
+    [[ "$after" == *"SENTINEL_NOT_SWEPT"* ]] || {
+        echo "a filtered run deleted the ledger row for a target it never swept."
+        echo "every hand-assigned verdict outside the filter is lost this way."
+        echo "$after"; return 1
+    }
+    [[ "$after" == *"wontfix"$'\t'"keep me"* ]] || {
+        echo "the carried row lost its verdict or note:"; echo "$after"; return 1
+    }
+    [[ "$after" != *"SENTINEL_STALE"* ]] || {
+        echo "a stale row for a SWEPT target was preserved. Rows for a target the"
+        echo "run actually swept must be replaced by what that sweep found:"
+        echo "$after"; return 1
+    }
+}

@@ -14,8 +14,25 @@
 # Sourced, not executed. The sourcing script owns its own counters and its own
 # summary; this file owns ROOT, WORK, the restore discipline, and the oracle.
 
+# Sourcing this twice in one process would install a second EXIT trap over the
+# first and point WORK at a new directory, orphaning the first one's pristine
+# copies -- the backups a FATAL message would tell the reader to restore from.
+# `trap` replaces, it does not accumulate. Second source is a no-op.
+if [[ -n "${LIB_MUTATE_SOURCED:-}" ]]; then
+    return 0 2>/dev/null || true
+fi
+LIB_MUTATE_SOURCED=1
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORK="$(mktemp -d)"
+# Without this the failure is silent and misdirected: WORK is empty, every
+# backup path becomes "/<tag>.orig" at the filesystem root, and the caller
+# reports "could not copy the target aside" for what is actually a full /tmp.
+if [[ -z "$WORK" || ! -d "$WORK" ]]; then
+    echo "FATAL: mktemp -d failed - no scratch directory to hold backups in." >&2
+    echo "FATAL: refusing to mutate anything without somewhere to restore from." >&2
+    exit 3
+fi
 CURRENT_FILE=""; CURRENT_BACKUP=""
 RESTORE_FAILED=0
 

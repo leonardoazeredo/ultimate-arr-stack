@@ -97,9 +97,27 @@ Survivors land in `survivors.tsv` as `unreviewed`. Each gets one of:
 | `unreviewed` | not yet looked at |
 
 A `real-gap` gets a test written, **and then a corpus entry**, so the new test is
-itself proved capable of failing. The ledger is merged rather than rewritten on
-each run: a triaged survivor keeps its verdict, and only genuinely new ones
-appear as `unreviewed`.
+itself proved capable of failing.
+
+The ledger is merged, never rebuilt, along both axes:
+
+- a row whose target was **not swept** by this run is carried through untouched,
+  so a `-k` filter, a positional target, or a target that SKIPs for want of
+  docker cannot delete verdicts it never looked at;
+- a row whose target **was** swept keeps its verdict if the same mutation is
+  still found, and is dropped if it is not.
+
+Identity is `(file, mutation text)`. The line number is a separate column and is
+deliberately **not** part of the key: line numbers shift the moment anything is
+inserted above a mutation, and an identity that included one would silently
+orphan every hand-assigned verdict on the next edit.
+
+> Both halves of that were paid for. The first version rebuilt the file from the
+> current run's survivors alone, so a filtered run deleted every row outside the
+> filter — five triaged verdicts, lost silently. The "two consecutive sweeps
+> produce an identical ledger" check could not see it, because both sweeps were
+> full ones. `tests/mutation-framework.bats` now asserts both directions, with
+> corpus entries proving each assertion can fail.
 
 ### First sweep, 2026-09-01
 

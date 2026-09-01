@@ -119,6 +119,16 @@ appeared while neither asserted the wrong one did not.
 40 mutants, 21 killed. Five new tests took it to 35 killed / 5 survived, the five triaged
 `wontfix` or `equivalent` in `tests/mutation/survivors.tsv`.
 
+> The survivor ledger shipped a second instance of the same class, caught by the merge
+> review rather than by the tool. It was rebuilt from the current run's survivors alone,
+> so any run that did not sweep everything — a `-k` filter, a SKIPped target, an ERRORed
+> one — silently deleted every row it had not just regenerated. Five hand-assigned
+> verdicts were lost. The verification that should have caught it, *"two consecutive
+> sweeps produce an identical ledger"*, passed: both sweeps were full ones, so the check
+> could not fail. Identity also included the line number, which would have orphaned every
+> verdict on the next edit above a mutation. Both are fixed, both are asserted in
+> `tests/mutation-framework.bats`, and both have corpus entries.
+>
 > The extraction of `lib-mutate.sh` — the shared backup/restore core — shipped a bug of
 > exactly the class this directory exists to catch, and the corpus caught it on the next
 > run. `take_backup` returned its path by echoing it, so every caller wrote
@@ -251,6 +261,22 @@ write-up in `tests/mutation/README.md`; these are the one-line forms.
   silently yielding `<id>_.orig`. Use `printf '%s'`.
 - **`timeout` execs its argument**, so it can never run a shell function. A test that
   needs to intercept a `timeout`-wrapped call must put a real executable on `PATH`.
+- **A command substitution is a subshell, so a function that "returns" by setting a
+  global cannot be called as `x="$(fn ...)"`** — the assignment lands in the subshell
+  and dies with it. If the function's whole purpose is a side effect on globals, make
+  it refuse to run where they go nowhere (`[[ "$BASHPID" != "$$" ]]`).
+- **`trap` replaces, it does not accumulate**, so sourcing a file that installs an EXIT
+  trap twice orphans the first one's cleanup. Guard the file against double-sourcing.
+
+**Test**
+
+- ▸ **`tests/shellcheck.bats` only sees *tracked* files.** A newly written script passes
+  it until the moment it is committed, so "shellcheck clean" is not a statement about
+  the working tree. Check a new script explicitly, or `git add` it first.
+- ▸ **A determinism check between two *identical* invocations cannot fail.** "Two
+  consecutive sweeps produce an identical ledger" passed while a filtered sweep was
+  deleting rows, because both sweeps were full ones. Vary the thing the invariant is
+  supposed to be robust to, not the clock.
 - **`^#!.*(bash|/sh)` misses `#!/usr/bin/env sh`** — no `/sh` substring, no `bash`.
   Match the interpreter *word*: `^#!.*\b(ba|da|k|z)?sh([[:space:]]|$)`.
 - **`sed -i` is rename-based**, so a running bash keeps its original inode — the

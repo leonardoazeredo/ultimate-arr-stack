@@ -43,9 +43,12 @@ MUTANT_DIR="$ROOT/tests/mutation/.mutants"
 # the real signal. The nine untested scripts/lib/ files are recorded as a
 # missing-test gap in tests/mutation/README.md instead of being swept.
 TARGETS=(
-  "scripts/lib/check-secrets.sh:tests/pre-commit-checks.bats:check_secrets"
-  "scripts/lib/check-env-vars.sh:tests/pre-commit-checks.bats:check_env_vars"
-  "scripts/lib/check-conflicts.sh:tests/pre-commit-checks.bats:check_conflicts"
+# The third field is a bats `-f` regex, so it is anchored: an unanchored
+# substring would silently widen the oracle as tests are added, and a mutant
+# that then survived would have survived for a reason unrelated to coverage.
+  "scripts/lib/check-secrets.sh:tests/pre-commit-checks.bats:^check_secrets "
+  "scripts/lib/check-env-vars.sh:tests/pre-commit-checks.bats:^check_env_vars "
+  "scripts/lib/check-conflicts.sh:tests/pre-commit-checks.bats:^check_conflicts "
   # scripts/lib/common.sh is deliberately NOT here. It was swept once, on the
   # theory that being sourced by three tested files made it covered: 78 mutants
   # generated, 78 survived, 0 killed. Sourced is not covered -- the four tests
@@ -93,21 +96,35 @@ oracle_for() {
     return 1
 }
 
-# Describe a mutant as one stable line: the first changed line number, the
-# original text, and the replacement. This triple is the ledger's identity for
-# a survivor, so a re-run recognises one it has already been triaged.
+# Describe a mutant as `<line>\t<old> ==> <new>`.
+#
+# The line number is deliberately NOT part of the ledger's identity for a
+# survivor -- only the file and the mutation text are. Line numbers shift the
+# moment anything is inserted above the mutation, and an identity that includes
+# one would silently orphan every hand-assigned verdict on the next edit to the
+# source file: the triaged row would reappear as `unreviewed` and the human work
+# would be lost with nothing reporting it. The line is carried as its own
+# column, where it is useful to a reader and harmless if stale.
+#
+# ` ==> ` is universalmutator's own rule syntax, reused here so a ledger row
+# reads the same way the rule that produced it does.
 describe() {
-    local orig="$1" mut="$2"
-    # ` ==> ` is universalmutator's own rule syntax, reused here so a ledger row
-    # reads the same way the rule that produced it does.
-    diff --unchanged-line-format= --old-line-format='%dn|%L ==> ' --new-line-format='%L' \
-        "$orig" "$mut" 2>/dev/null \
-    | head -2 | tr -d '\n' \
-    | sed 's/[[:space:]]\{1,\}/ /g; s/^ //; s/ $//'
+    local orig="$1" mut="$2" out line text
+    out="$(diff --unchanged-line-format= --old-line-format='%dn|%L ==> ' \
+        --new-line-format='%L' "$orig" "$mut" 2>/dev/null \
+        | head -2 | tr -d '\n' \
+        | sed 's/[[:space:]]\{1,\}/ /g; s/^ //; s/ $//')"
+    line="${out%%|*}"
+    text="${out#*|}"
+    [[ "$line" =~ ^[0-9]+$ ]] || { line="?"; text="$out"; }
+    printf '%s\t%s\n' "$line" "$text"
 }
 
-TOTAL=0; KILLED=0; SURVIVED=0; ERRORED=0
+TOTAL=0; KILLED=0; SURVIVED=0; ERRORED=0; SKIPPED=0
 declare -a NEW_SURVIVORS=()
+# Targets this run actually swept to completion. The ledger is rewritten only
+# for these; rows belonging to any other target are carried through untouched.
+declare -A SWEPT=()
 
 for target in "${SELECTED[@]}"; do
     if [[ -n "$FILTER" && "$target" != *"$FILTER"* ]]; then continue; fi
@@ -145,13 +162,14 @@ for target in "${SELECTED[@]}"; do
     genst=$?
     if [[ "$genst" -eq 77 ]]; then
         echo "   SKIP: no usable docker daemon to generate mutants in"
-        continue
+        SKIPPED=$((SKIPPED + 1)); continue
     fi
     if [[ "$genst" -ne 0 ]]; then
         echo "   ERROR: mutant generation failed"
         ERRORED=$((ERRORED + 1)); continue
     fi
     echo "   $gen, $count oracle test(s)"
+    SWEPT["$target"]=1
 
     for mutant in "$outdir"/*; do
         [[ -f "$mutant" ]] || continue
@@ -193,42 +211,63 @@ done
 
 # --- ledger ------------------------------------------------------------------
 #
-# Merge, never overwrite. A survivor that has already been triaged keeps its
-# verdict and note; only genuinely new ones land as `unreviewed`. Rewriting the
-# file from scratch each run would discard every hand-triage decision, which is
-# the only part of this whole exercise a human actually did.
-if [[ ${#NEW_SURVIVORS[@]} -gt 0 || -f "$LEDGER" ]]; then
-    tmp="$WORK/ledger.tsv"
-    {
-        echo "# Survivors of ./tests/mutation/run-generated.sh -- mutants the suite did NOT kill."
-        echo "# verdict: real-gap | equivalent | wontfix | unreviewed"
-        echo "# A real-gap gets a test written, and then a corpus entry so the new test is"
-        echo "# itself proved capable of failing. An equivalent mutant changes text without"
-        echo "# changing behaviour and can never be killed by anything - it is not a defect."
-        printf '#file\tmutation\tverdict\tnote\n'
-    } > "$tmp"
+# Merge, never overwrite -- and merge along BOTH axes.
+#
+# The first version rebuilt this file from the current run's survivors alone.
+# Any run that did not sweep everything -- a `-k` filter, a positional target, a
+# target that SKIPped because docker was unavailable, a target that ERRORed --
+# silently deleted every row it had not just regenerated, and a run with no
+# survivors at all left a header and nothing else. That is how the five
+# hand-assigned verdicts in the first ledger were lost, and the "two sweeps
+# produce an identical ledger" check could not see it because both sweeps were
+# full ones.
+#
+# So: a row survives unless its target was actually swept this run, and a row
+# for a swept target keeps its verdict if the same mutation is still found.
+# Identity is (file, mutation text) -- never the line number, see describe().
+{
+    echo "# Survivors of ./tests/mutation/run-generated.sh -- mutants the suite did NOT kill."
+    echo "# verdict: real-gap | equivalent | wontfix | unreviewed"
+    echo "# A real-gap gets a test written, and then a corpus entry so the new test is"
+    echo "# itself proved capable of failing. An equivalent mutant changes text without"
+    echo "# changing behaviour and can never be killed by anything - it is not a defect."
+    echo "#"
+    echo "# Rows are keyed on (file, mutation); the line number is informational and may"
+    echo "# be stale. Only targets swept by the last run are rewritten."
+    printf '#file\tline\tmutation\tverdict\tnote\n'
+} > "$WORK/ledger.tsv"
 
-    declare -A KNOWN=()
-    if [[ -f "$LEDGER" ]]; then
-        while IFS=$'\t' read -r f m v n; do
-            [[ "$f" == \#* || -z "$f" ]] && continue
+declare -A KNOWN=()
+declare -a CARRIED=()
+if [[ -f "$LEDGER" ]]; then
+    while IFS=$'\t' read -r f l m v n; do
+        [[ "$f" == \#* || -z "$f" ]] && continue
+        if [[ -n "${SWEPT[$f]+set}" ]]; then
             KNOWN["$f"$'\t'"$m"]="$v"$'\t'"$n"
-        done < "$LEDGER"
-    fi
+        else
+            # Not swept this run: carried through exactly as it was.
+            CARRIED+=("$f"$'\t'"$l"$'\t'"$m"$'\t'"$v"$'\t'"$n")
+        fi
+    done < "$LEDGER"
+fi
 
-    for s in "${NEW_SURVIVORS[@]}"; do
-        if [[ -n "${KNOWN[$s]+set}" ]]; then
-            printf '%s\t%s\n' "$s" "${KNOWN[$s]}"
+{
+    for c in ${CARRIED+"${CARRIED[@]}"}; do printf '%s\n' "$c"; done
+    for s in ${NEW_SURVIVORS+"${NEW_SURVIVORS[@]}"}; do
+        # s is already file<TAB>line<TAB>mutation
+        f="${s%%$'\t'*}"; rest="${s#*$'\t'}"; m="${rest#*$'\t'}"
+        if [[ -n "${KNOWN[$f$'\t'$m]+set}" ]]; then
+            printf '%s\t%s\n' "$s" "${KNOWN[$f$'\t'$m]}"
         else
             printf '%s\tunreviewed\t\n' "$s"
         fi
-    done | sort >> "$tmp"
+    done
+} | sort >> "$WORK/ledger.tsv"
 
-    cp "$tmp" "$LEDGER"
-fi
+cp "$WORK/ledger.tsv" "$LEDGER"
 
 echo
-echo "killed $KILLED / $TOTAL   survived $SURVIVED   errored $ERRORED"
+echo "killed $KILLED / $TOTAL   survived $SURVIVED   errored $ERRORED   skipped $SKIPPED"
 if [[ "$SURVIVED" -gt 0 ]]; then
     echo "ledger: $LEDGER  (survivors are findings to triage, not failures)"
 fi

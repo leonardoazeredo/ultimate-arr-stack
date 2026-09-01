@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Corpus: the generative half's own guards.
 # (sourced by run-mutations.sh, never executed - hence a directive, not a shebang)
 #
@@ -38,3 +39,24 @@ mutation gen-absent-docker-looks-like-success \
   --test "reports an absent docker distinctly" \
   --why "exiting 0 when docker is unavailable makes 'could not generate any mutants' identical to 'the sweep found nothing' - the same silent-success shape sync-nas.sh shipped for an unreachable NAS" \
   --apply 'sed -i "0,/^    exit 77\$/s@^    exit 77\$@    exit 0@" "$F"'
+
+mutation gen-partial-sweep-wipes-the-ledger \
+  --file tests/mutation/run-generated.sh \
+  --bats tests/mutation-framework.bats \
+  --test "does not delete ledger rows for targets it did not sweep" \
+  --why "rebuilding the ledger from only the current run's survivors deletes every hand-assigned verdict for any target the run did not sweep - this shipped once and cost five triaged verdicts" \
+  --apply 'sed -i "s@^        if \[\[ -n \"\${SWEPT\[\$f\]+set}\" \]\]; then\$@        if true; then@" "$F"'
+
+mutation gen-ledger-keeps-stale-rows \
+  --file tests/mutation/run-generated.sh \
+  --bats tests/mutation-framework.bats \
+  --test "does not delete ledger rows for targets it did not sweep" \
+  --why "carrying every old row through unconditionally never drops a mutation that no longer exists, so the ledger accretes rows for code that is gone and a reader cannot tell which findings are live" \
+  --apply 'sed -i "s@^        if \[\[ -n \"\${SWEPT\[\$f\]+set}\" \]\]; then\$@        if false; then@" "$F"'
+
+mutation gen-mktemp-failure-unchecked \
+  --file tests/mutation/lib-mutate.sh \
+  --bats tests/mutation-framework.bats \
+  --test "arms the restore path when called plainly" \
+  --why "an unchecked mktemp -d leaves WORK empty, so every backup path becomes /<tag>.orig at the filesystem root and the real fault (a full /tmp) is reported as 'could not copy the target aside'" \
+  --apply 'sed -i "s@^WORK=\"\$(mktemp -d)\"\$@WORK=\"\"@" "$F"'
