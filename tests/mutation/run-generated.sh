@@ -59,7 +59,7 @@ TARGETS=(
 # The third field is a bats `-f` regex, so it is anchored: an unanchored
 # substring would silently widen the oracle as tests are added, and a mutant
 # that then survived would have survived for a reason unrelated to coverage.
-  "scripts/lib/check-secrets.sh:tests/pre-commit-checks.bats:^check_secrets "
+  "scripts/lib/check-secrets.sh:tests/lib-secrets.bats:^secrets: "
   "scripts/lib/check-env-vars.sh:tests/pre-commit-checks.bats:^check_env_vars "
   "scripts/lib/check-conflicts.sh:tests/pre-commit-checks.bats:^check_conflicts "
   "scripts/lib/check-hardcoded-domain.sh:tests/lib-hardcoded-domain.bats:^hardcoded-domain: "

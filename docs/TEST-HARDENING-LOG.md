@@ -441,6 +441,44 @@ write-up in `tests/mutation/README.md`; these are the one-line forms.
 - ▸ **An assertion can be satisfied by its own fixture.** Never assert on a string that
   also appears in the test's own data — especially not the fixture's name.
 - **`$TMPDIR` is not `/tmp` under bats**, and `mktemp -d` honours it.
+- ▸ **One test for one of nine patterns is not coverage of a nine-pattern file, and it
+  reads exactly like it is.** `scripts/lib/check-secrets.sh` — the check that gates
+  every commit in this repo — had a single test, against pattern 1, using a captured
+  fixture. It passed. Writing the other twenty-seven found three defects it could
+  never have seen, all of the same shape as the ones this document already catalogues:
+
+  1. **The placeholder allowlist was applied to the joined set of hits, not to each
+     hit.** `match=$(echo "$content" | grep -oE "$pattern")` collects every hit in a
+     file into one string, and `echo "$match" | grep -qi '(your|here|example|…)'`
+     excuses the whole set if any ONE of them looks like a placeholder. So a single
+     `PASSWORD=your-password-here` line disarmed that pattern for every real credential
+     in the same file. Measured: a file holding that line plus
+     `SSH_PASSWORD=hunter2-Tr0ub4dor-real` made `check_secrets` return 0 and print
+     nothing. A test that puts one hit in a file cannot see this — the fixture shape is
+     the blind spot, not the assertion.
+  2. **Pattern 2 could never fire.** Its allowlist carried `token` as a sixth
+     placeholder word, and the allowlist is tested against the whole match — which
+     always begins with the literal key name `CF_DNS_API_TOKEN`. A real Cloudflare
+     token had passed this check since the day it was written. Generalisable: an
+     allowlist word that appears in the *key name* the pattern matches on excuses every
+     possible value.
+  3. **`return $errors` again.** Third instance in this repo (`check_doc_links` was
+     `9cc4b2d`). Exactly 256 findings returned 0. The only caller is
+     `if check_secrets; then`, so the count was never read by anyone — the wrap was
+     pure downside.
+
+  Two patterns also printed `WARNING` while incrementing the same counter every `ERROR`
+  fed, so the hook printed a warning and then blocked on it. The label and the effect
+  disagreed, and the only way to tell which warning was the error was to count them.
+- **A guard's own false positives get fixed at the fixture, not by widening the
+  exemption.** `check-secrets.sh` Pattern 9 flags `_PASSWORD=<15+ non-space chars>` in
+  any tracked file and exempts only `tests/fixtures/*`. Realistic-looking fixture values
+  in `tests/configure-apps.bats` therefore blocked *every* commit in the repo, not just
+  their own file. Adding `tests/*.bats` to the skip list would have been one line — and
+  a permanent blind spot in exactly the files where a real credential is most likely to
+  be pasted while debugging. Renaming the fixture values to spell `example`, which the
+  pattern's existing placeholder allowlist already recognises, keeps the guard armed
+  everywhere. `tests/lib-secrets.bats` pins that `.bats` files are still scanned.
 - **bats `-f <regex>` exits 0 having run nothing** when the filter matches no test.
   The runner parses the TAP `1..N` plan line rather than trusting the status.
 - ▸ **A test extracted from a script with `awk` inherits none of its callees.** Anything
@@ -453,6 +491,17 @@ write-up in `tests/mutation/README.md`; these are the one-line forms.
   real triage output to be committed by accident. The fix is a seam, not a trap:
   `MUTATION_LEDGER` lets the test point the runner somewhere disposable, so there is no
   window to interrupt and no restore that can be skipped.
+- ▸ **A test needs its isolation seams in the state its own mutation puts it in, not in
+  the state it normally passes in.** `mutation-framework.bats`'s "the generative runner
+  refuses to start on a dirty target" asserts a *refusal*, so in its passing state the
+  runner never reaches the ledger and `MUTATION_LEDGER` looked unnecessary. The corpus
+  entry that proves the guard can fail — `gen-dirty-tree-check-removed` — deletes the
+  refusal, and the runner then performs a real sweep and appends real rows to the
+  repo's tracked `survivors.tsv`. Observed 2026-09-01: three `unreviewed`
+  `check-secrets.sh` rows appeared in a working tree that had run nothing but the
+  corpus, and they were indistinguishable from genuine triage output. The seam already
+  existed; the test simply did not use it, because in the only state anyone looked at
+  it was not needed.
 - ▸ **A single-word denylist rule cannot test an ordered-subsequence matcher.** The
   first mutation written against `forbid()`'s subsequence walk targeted the one-word
   `restart` rule and SURVIVED: a one-word rule matches wherever the word appears, no

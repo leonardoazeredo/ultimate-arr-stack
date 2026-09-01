@@ -7,30 +7,11 @@ setup() {
     source "$REPO_ROOT/scripts/lib/common.sh"
 }
 
-@test "check_secrets catches a known WireGuard key pattern" {
-    source "$REPO_ROOT/scripts/lib/check-secrets.sh"
-
-    # Copy fixture to a temp path that won't match the tests/fixtures/* skip rule
-    local tmpdir
-    tmpdir=$(mktemp -d)
-    cp "$REPO_ROOT/tests/fixtures/compose-with-secrets.yml" "$tmpdir/docker-compose.secrets.yml"
-
-    # Override get_files_to_scan to return the temp copy
-    get_files_to_scan() {
-        echo "docker-compose.secrets.yml"
-    }
-
-    # Override read_file_content to read from the temp dir
-    read_file_content() {
-        cat "$tmpdir/$1" 2>/dev/null
-    }
-
-    run check_secrets
-    assert_failure
-    assert_output --partial "WireGuard private key"
-
-    rm -rf "$tmpdir"
-}
+# check_secrets moved out to tests/lib-secrets.bats when it got real coverage:
+# 28 tests across the skip list, all nine patterns, the allowlist and the
+# return status, rather than the one WireGuard fixture that used to stand in
+# for the whole file. TARGETS in tests/mutation/run-generated.sh points at
+# that file now.
 
 @test "check_env_vars catches an undocumented variable" {
     source "$REPO_ROOT/scripts/lib/check-env-vars.sh"

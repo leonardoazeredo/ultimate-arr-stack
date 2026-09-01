@@ -390,7 +390,16 @@ CORPUS
     cp "$REPO_ROOT/$target" "$FX/pristine"
     printf '\n# dirt introduced by %s\n' "$BATS_TEST_NAME" >> "$REPO_ROOT/$target"
 
-    run "$REPO_ROOT/tests/mutation/run-generated.sh" "$target"
+    # MUTATION_LEDGER is not decoration here. This test asserts a REFUSAL, so
+    # in its passing state the runner never reaches the ledger -- but the corpus
+    # entry that proves the guard can fail (gen-dirty-tree-check-removed) deletes
+    # the refusal, and the runner then performs a real sweep and appends real
+    # rows to the repo's tracked survivors.tsv. Observed 2026-09-01: three
+    # unreviewed check-secrets.sh rows appeared in a working tree that had run
+    # nothing but the corpus. A test only needs the seam in the state its own
+    # mutation puts it in.
+    run env MUTATION_LEDGER="$FX/ledger.tsv" \
+        "$REPO_ROOT/tests/mutation/run-generated.sh" "$target"
     cp "$FX/pristine" "$REPO_ROOT/$target"
 
     [ "$status" -ne 0 ] || {

@@ -90,8 +90,8 @@ run_hook() {
     checks_run="$( grep -cE '^[0-9]+\. ' <<<"$output" || true )"
 }
 
-# A WireGuard key in the env-var spelling check-secrets.sh:35 actually matches,
-# staged under an extension that check ACTUALLY SCANS. check-secrets.sh:27 skips
+# A WireGuard key in the env-var spelling check-secrets.sh's pattern 1 actually
+# matches, staged under an extension that check ACTUALLY SCANS. Its skip list drops
 # *.md outright, so a markdown fixture sails through check 1 reporting "OK" and
 # the test would be asserting against a check that never ran.
 # Its own `.conf` spelling (`PrivateKey = ...`, spaces round the `=`) does NOT
@@ -100,7 +100,7 @@ run_hook() {
 # It is read from tests/fixtures/ rather than written inline, because the check
 # under test scans this repo too: an inline copy made check_secrets flag THIS
 # FILE, so every later commit here would have been blocked by the test for the
-# blocking check. check-secrets.sh:26 exempts tests/fixtures/* precisely so that
+# blocking check. That skip list exempts tests/fixtures/* precisely so that
 # intentional fake secrets have somewhere to live -- use it, rather than widening
 # the exemption to all bats files and blinding the check to a real key pasted
 # into some future test.
