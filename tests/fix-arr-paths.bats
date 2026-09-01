@@ -11,6 +11,9 @@
 # Driven out of a throwaway copy: both derive their .env path from their own
 # location, and a test must never read the repo's real one.
 
+# `run --separate-stderr` is a 1.5.0 feature.
+bats_require_minimum_version 1.5.0
+
 setup() {
     load helpers/setup
     load helpers/stubs
@@ -83,6 +86,51 @@ env_with() {
     run "$RADARR"
     [ "$status" -eq 1 ]
     [[ "$output" == *"Movies directory not found"* ]]
+}
+
+@test "fix-radarr: an .env that is a directory is reported as a missing .env" {
+    rm -f "$ENV"
+    mkdir "$ENV"
+    run "$RADARR"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *".env not found"* ]]
+}
+
+@test "fix-radarr: a movies path that is a file is reported as a missing directory" {
+    env_with "RADARR_API_KEY=k" "MEDIA_ROOT=$BATS_TEST_TMPDIR/notadir"
+    mkdir -p "$BATS_TEST_TMPDIR/notadir/media"
+    : > "$BATS_TEST_TMPDIR/notadir/media/movies"
+    run "$RADARR"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Movies directory not found"* ]]
+}
+
+@test "fix-radarr: an .env with a key but no MEDIA_ROOT still explains itself" {
+    # Not just "exits 1": with MEDIA_ROOT unset the movies path resolves to
+    # /media/movies and the script must SAY that, rather than dying at the
+    # assignment with no output at all.
+    env_with "RADARR_API_KEY=k"
+    run "$RADARR"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Movies directory not found"* ]]
+}
+
+@test "fix-radarr: a failed library dump aborts before the fixer runs" {
+    # curl writes movies.json; if it fails the file is empty or absent, and
+    # handing that to the fixer would have it conclude the library is empty.
+    env_with "RADARR_API_KEY=k" "MEDIA_ROOT=$MEDIA"
+    stub_curl 'exit 7'
+    run "$RADARR"
+    [ "$status" -ne 0 ]
+    assert_stub_not_called python3 ""
+}
+
+@test "fix-radarr: the fatal error goes to stderr, not stdout" {
+    env_with "RADARR_API_KEY=k" "MEDIA_ROOT=$MEDIA"
+    stub_tool python3 'exit 4'
+    run --separate-stderr "$RADARR"
+    [[ "$stderr" == *"path fixer exited non-zero"* ]]
+    [[ "$output" != *"path fixer exited non-zero"* ]]
 }
 
 @test "fix-radarr: hands the Python half the key and a temp directory" {
@@ -184,6 +232,14 @@ env_with() {
     run "$SONARR" --apply
     [ "$status" -eq 1 ]
     [[ "$output" == *"folder fixer exited non-zero"* ]]
+}
+
+@test "fix-sonarr: the fatal error goes to stderr, not stdout" {
+    env_with "SONARR_API_KEY=k"
+    stub_tool python3 'exit 5'
+    run --separate-stderr "$SONARR"
+    [[ "$stderr" == *"folder fixer exited non-zero"* ]]
+    [[ "$output" != *"folder fixer exited non-zero"* ]]
 }
 
 @test "fix-arr: neither script reaches a destructive operation on its own" {

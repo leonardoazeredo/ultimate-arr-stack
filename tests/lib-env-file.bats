@@ -122,6 +122,16 @@ setup() {
     [ "$output" = "" ]
 }
 
+@test "env-file: a directory in place of the file reads as absent, quietly" {
+    # `-e` instead of `-f` gets as far as redirecting from a directory, which
+    # returns the same non-zero but prints a bash error to stderr from inside a
+    # library function -- noise in a cron log, from a call that is supposed to
+    # be a clean "not configured".
+    run env_value "$BATS_TEST_TMPDIR" K
+    [ "$status" -eq 1 ]
+    [ "$output" = "" ]
+}
+
 @test "env-file: reads a final line with no trailing newline" {
     printf 'K=lastline' > "$ENV"
     run env_value "$ENV" K

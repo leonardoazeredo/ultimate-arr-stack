@@ -61,12 +61,12 @@ for arg in "$@"; do
 done
 
 # --- Output helpers ---
+# Only log() survives. The other five (ok/skip/fail/info/verbose) were never
+# called by anything -- the Python half prints its own ✓/✗/[verbose] lines --
+# and the generative sweep found them the way dead code is usually found: two
+# mutants of verbose() that no test could possibly kill, because nothing runs
+# it.
 log()  { echo "[queue-cleanup] $1"; }
-ok()   { echo "  ✓ $1"; }
-skip() { echo "  - $1"; }
-fail() { echo "  ✗ $1"; }
-info() { echo "  $1"; }
-verbose() { $VERBOSE && echo "  [verbose] $1" || true; }
 
 # --- Timestamp ---
 echo ""

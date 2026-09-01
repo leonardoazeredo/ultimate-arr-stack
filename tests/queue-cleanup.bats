@@ -11,6 +11,10 @@
 # derived from the script's own location -- testing it where it lives would
 # rewrite the repo's real logs/queue-cleanup.log.
 
+# `run --separate-stderr` is a 1.5.0 feature; without this the runner warns on
+# every use of it.
+bats_require_minimum_version 1.5.0
+
 setup() {
     load helpers/setup
     load helpers/stubs
@@ -102,6 +106,17 @@ esac
     [[ "$output" == *"the queue cleanup exited non-zero"* ]]
 }
 
+@test "queue-cleanup: the fatal error goes to stderr, not stdout" {
+    # This runs from cron with its stdout redirected into a log. An error on
+    # stdout lands in that log and nowhere else; on stderr it also reaches
+    # cron's mail, which is the only thing that tells anyone the weekly job
+    # stopped working.
+    stub_tool python3 'exit 3'
+    run --separate-stderr "$SCRIPT" --apply
+    [[ "$stderr" == *"the queue cleanup exited non-zero"* ]]
+    [[ "$output" != *"the queue cleanup exited non-zero"* ]]
+}
+
 @test "queue-cleanup: a failing Python half suppresses the webhook" {
     stub_tool python3 'exit 3'
     HA_WEBHOOK_URL="http://ha.example/hook" run "$SCRIPT" --apply
@@ -164,6 +179,16 @@ esac
     # the notification is attempted and never actually sent. The script's own
     # `|| true` is what keeps that from failing the run.
     assert_forbidden "POST"
+}
+
+@test "queue-cleanup: the webhook carries the cleanup payload" {
+    # Asserting only that curl was called with the URL would pass on a request
+    # with no body at all -- and on `-e`, which sets a Referer header instead
+    # of a POST body and would have Home Assistant fire a notification with
+    # nothing in it.
+    HA_WEBHOOK_URL="http://ha.example/hook" run "$SCRIPT" --apply
+    assert_stub_called curl '\-d .*Queue Cleanup'
+    assert_stub_called curl "Content-Type: application/json"
 }
 
 # --- log trim: defect #8 --------------------------------------------------
