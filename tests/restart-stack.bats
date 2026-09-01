@@ -12,7 +12,7 @@
 # had to be trustworthy BEFORE anything was refactored on the strength of it.
 #
 # The dispatcher's own behaviour - aliases, the ${1:-all} default, the file
-# mapping, the traefik-before-arr-stack ordering - cannot be observed through
+# mapping, the dependency ordering of the `all` arm - cannot be observed through
 # those, because forbid() kills the script at its FIRST compose call and `all`
 # has five. So the second half extracts the `case` block with awk and evals it
 # with restart_compose overridden, which is this repo's existing idiom for
@@ -136,14 +136,52 @@ MAP
     assert_equal "$bare" "$(cat "$CALLS")"
 }
 
-@test "restart-stack: traefik comes up before arr-stack" {
-    # The networks arr-stack attaches to are defined by traefik's file. Reversed,
-    # the arr services come up unrouted and every .lan name 404s until the next
-    # restart. Ordering is the whole content of the `all` arm.
+@test "restart-stack: the 'all' order matches the compose files' own dependencies" {
+    # Derived from the compose files rather than restated, because the version of
+    # this test written on 2026-09-01 pinned the order the script happened to
+    # ship with and wrote an inverted rationale under it -- "the networks
+    # arr-stack attaches to are defined by traefik's file", which is backwards.
+    # arr-stack.yml CREATES arr-core; traefik.yml, cloudflared.yml and
+    # utilities.yml all declare it `external: true`. A test that reads that off
+    # the files cannot get the direction wrong twice.
     run dispatch all
     assert_success
-    [ "$(head -1 "$CALLS")" = "docker-compose.traefik.yml traefik" ]
-    [ "$(sed -n 2p "$CALLS")" = "docker-compose.arr-stack.yml arr-stack" ]
+
+    local creator="docker-compose.arr-stack.yml"
+    grep -qE '^  arr-core:' "$REPO_ROOT/$creator" \
+        || fail "$creator no longer declares arr-core; this test's premise is stale"
+
+    local creator_line f consumer_line
+    creator_line=$(grep -n "^$creator " "$CALLS" | cut -d: -f1)
+    [ -n "$creator_line" ] || fail "the all arm never restarted $creator"
+
+    for f in "$REPO_ROOT"/docker-compose.*.yml; do
+        f=$(basename "$f")
+        [ "$f" = "$creator" ] && continue
+        # Only the files that consume arr-core as external.
+        awk '/^networks:/,0' "$REPO_ROOT/$f" | grep -A1 '^  arr-core:' \
+            | grep -q 'external: true' || continue
+        consumer_line=$(grep -n "^$f " "$CALLS" | cut -d: -f1)
+        [ -n "$consumer_line" ] || continue   # not in the all arm at all
+        [ "$consumer_line" -gt "$creator_line" ] \
+            || fail "$f declares arr-core external but is restarted before $creator, which creates it"
+    done
+}
+
+@test "restart-stack: magnetio comes up before arr-stack" {
+    # docker-compose.arr-stack.yml declares magnetio-net `external: true` and
+    # says so in a comment: gluetun joins it, and recreating gluetun without it
+    # fails with "network not found". Under set -e that aborts the run before
+    # anything else, so the file that owns DNS never comes up.
+    run dispatch all
+    assert_success
+    grep -qE '^  magnetio-net:' "$REPO_ROOT/docker-compose.arr-stack.yml" \
+        || skip "arr-stack.yml no longer references magnetio-net"
+    local m a
+    m=$(grep -n '^docker-compose.magnetio.yml ' "$CALLS" | cut -d: -f1)
+    a=$(grep -n '^docker-compose.arr-stack.yml ' "$CALLS" | cut -d: -f1)
+    [ -n "$m" ] && [ -n "$a" ] || fail "the all arm is missing magnetio or arr-stack"
+    [ "$m" -lt "$a" ] || fail "magnetio (line $m) must precede arr-stack (line $a)"
 }
 
 @test "restart-stack: 'all' covers every compose file except the ones it names" {

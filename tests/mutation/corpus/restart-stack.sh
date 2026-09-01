@@ -7,12 +7,19 @@
 # underneath. A mutant that escaped the extraction would hit the stub and fail
 # loudly rather than restarting anything.
 
-mutation restart-stack-order-reversed \
+mutation restart-stack-consumer-before-network-owner \
   --file scripts/restart-stack.sh \
   --bats tests/restart-stack.bats \
-  --test "restart-stack: traefik comes up before arr-stack" \
-  --why "starts the all arm with something other than traefik. The networks arr-stack attaches to are defined by traefik's compose file, so the arr services come up unrouted and every .lan name 404s until the next restart. Nothing errors; the stack just quietly does not work" \
-  --apply 'sed -i "/^    all)/,/^        ;;/s@docker-compose.traefik.yml \"traefik\"@docker-compose.cloudflared.yml \"cloudflared\"@" "$F"'
+  --test "restart-stack: the 'all' order matches the compose files' own dependencies" \
+  --why "restarts traefik before the file that creates the network traefik declares external. This is the order the script actually shipped with until 2026-09-01, and it survived because the network already existed on the one machine it was ever run on. On a machine where arr-core is absent - a fresh deploy, or after a network prune - traefik fails, set -e aborts the run, and the command someone reaches for when the house has no DNS never gets as far as starting DNS" \
+  --apply 'sed -i "/^    all)/,/^        ;;/{ /traefik.yml .traefik./d; s@^    all)\$@    all)\n        restart_compose docker-compose.traefik.yml \"traefik\"@ }" "$F"'
+
+mutation restart-stack-magnetio-after-arr-stack \
+  --file scripts/restart-stack.sh \
+  --bats tests/restart-stack.bats \
+  --test "restart-stack: magnetio comes up before arr-stack" \
+  --why "moves magnetio to the end of the all arm, which is where it was first added. docker-compose.arr-stack.yml declares magnetio-net external and gluetun joins it, so recreating gluetun before that network exists fails with \"network not found\" - and under set -e the run stops there, taking DNS with it. Ordering that costs nothing to get right and everything to get wrong" \
+  --apply 'sed -i "/^    all)/,/^        ;;/{ /magnetio.yml .magnetio./d; s@^        restart_compose docker-compose.utilities.yml \"utilities\"\$@        restart_compose docker-compose.utilities.yml \"utilities\"\n        restart_compose docker-compose.magnetio.yml \"magnetio\"@ }" "$F"'
 
 mutation restart-stack-magnetio-dropped-from-all \
   --file scripts/restart-stack.sh \
