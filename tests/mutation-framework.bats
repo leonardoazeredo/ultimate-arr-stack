@@ -55,6 +55,51 @@ CORPUS
     [[ "$output" == *"KILLED demo-killed"* ]] || { echo "$output"; return 1; }
 }
 
+@test "the dirty-tree guard only considers targets the filter actually selected" {
+    # -k exists to sweep ONE target while the rest of the tree is mid-edit, so a
+    # guard that reads an unfiltered SELECTED refuses over files the run was
+    # never going to touch. That is not merely an inconvenience: two entries in
+    # tests/mutation/corpus/generative.sh were scored SURVIVED because of it,
+    # their oracle having skipped on a dirty scripts/lib while the run was
+    # measuring a fix to scripts/lib. An over-broad precondition launders itself
+    # into a false measurement downstream.
+    #
+    # This runs against a THROWAWAY repo rather than this one, because the only
+    # way to exercise a dirty-tree guard is to have a dirty tree, and dirtying a
+    # tracked file here would need a restore -- which is exactly the bare-`cp`
+    # interrupt window that already cost this repo a corrupted ledger. A copy
+    # has no restore to skip.
+    command -v git >/dev/null 2>&1 || skip "no host git binary"
+    local r="$FX/r"
+    mkdir -p "$r/tests/mutation" "$r/scripts/lib"
+    cp "$REPO_ROOT/tests/mutation/run-generated.sh" \
+       "$REPO_ROOT/tests/mutation/lib-mutate.sh" "$r/tests/mutation/"
+    printf '#!/bin/bash\nexit 0\n' > "$r/tests/run-tests.sh"
+    chmod +x "$r/tests/run-tests.sh" "$r/tests/mutation/run-generated.sh"
+    # Every TARGETS path must exist and be committed: `git status --porcelain --`
+    # errors out on a pathspec matching nothing, which would empty DIRTY and let
+    # the mutant pass for the wrong reason.
+    local t
+    for t in $(sed -n '/^TARGETS=(/,/^)/p' "$REPO_ROOT/tests/mutation/run-generated.sh" \
+               | grep -oE '"[^":]+\.sh:' | tr -d '":'); do
+        mkdir -p "$r/$(dirname "$t")"; printf '#!/bin/bash\n:\n' > "$r/$t"
+    done
+    git -C "$r" init -q .
+    git -C "$r" config user.email t@example.com
+    git -C "$r" config user.name t
+    git -C "$r" add -A && git -C "$r" commit -qm seed
+
+    # One target dirty; the filter selects none of them.
+    echo '# edited' >> "$r/scripts/lib/check-secrets.sh"
+
+    MUTATION_LEDGER="$FX/led.tsv" run bash "$r/tests/mutation/run-generated.sh" \
+        -k zzz-no-such-target
+    # A filter matching nothing has nothing to protect, so the guard must stay
+    # quiet about a file the run had already decided to ignore.
+    [[ "$output" != *"refusing to start"* ]] || { echo "$output"; return 1; }
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
 @test "reports SKIPPED, not SURVIVED, when the whole oracle skipped" {
     # TAP spells a skipped test `ok N name # skip reason`, so to anything
     # reading the exit status it is a PASS. An oracle that skipped therefore

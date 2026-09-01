@@ -77,6 +77,6 @@ mutation runner-scores-a-skipped-oracle-as-survived \
 mutation gen-dirty-guard-ignores-the-filter \
   --file tests/mutation/run-generated.sh \
   --bats tests/mutation-framework.bats \
-  --test "the ledger path is overridable so a test never writes to the repo's own" \
+  --test "the dirty-tree guard only considers targets the filter actually selected" \
   --why "the dirty-tree guard reads SELECTED, so building SELECTED before applying -k made it refuse over files the run would never touch - and -k exists precisely to sweep one target while the rest of the tree is mid-edit. An over-broad precondition does not just block a run, it launders itself into false SURVIVED readings downstream" \
   --apply 'perl -0pi -e "s/^if \[\[ -n \\\"\\\$FILTER\\\" \]\]; then\n    _kept=\(\)\n/if false; then\n    _kept=()\n/m" "$F"'

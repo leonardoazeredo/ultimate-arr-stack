@@ -316,6 +316,22 @@ write-up in `tests/mutation/README.md`; these are the one-line forms.
   planted secret in a markdown fixture is reported "OK" and the test then asserts against
   a check that never ran. Confirm the fixture's *extension* is one the code under test
   actually scans.
+- **A skipped oracle reads as a passing one.** TAP spells a skip as `ok N name # skip`,
+  so a mutation runner scores the mutant SURVIVED — a coverage gap invented out of an
+  environment condition and filed against a test that never executed. Two entries read
+  that way here, both because their oracle skips on a dirty `scripts/lib` while the run
+  was measuring a fix to `scripts/lib`. `run-mutations.sh` now reports SKIPPED and the
+  reason.
+- **A corpus entry whose verdict depends on the ambient tree is worse than none.**
+  `gen-dirty-guard-ignores-the-filter` killed while the tree was dirty and survived once
+  it was clean, because the condition it needed was ambient rather than constructed. An
+  entry must build the state it measures. Where that state is a dirty tree, build a
+  throwaway repo — dirtying a tracked file needs a restore, and a restore has an
+  interrupt window that has already cost this repo a corrupted ledger once.
+- **An over-broad precondition does not merely block, it launders itself into a false
+  measurement.** `run-generated.sh` refused to start over targets a `-k` run would never
+  touch; downstream that surfaced not as "refused" but as two coverage gaps that did not
+  exist.
 
 **Tests**
 
