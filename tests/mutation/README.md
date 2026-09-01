@@ -187,7 +187,6 @@ old "14 tests" claim went stale.
 - `duc-service/app/startup.sh`
 - `scripts/arr-backup.sh`
 - `scripts/backup-prune.sh`
-- `scripts/boot-compose-up.sh`
 - `scripts/check-network.sh`
 - `scripts/configure-apps.sh`
 - `scripts/detect-credential-drift.sh`
