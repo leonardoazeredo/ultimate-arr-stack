@@ -1,0 +1,14 @@
+# Survivors of ./tests/mutation/run-generated.sh -- mutants the suite did NOT kill.
+# verdict: real-gap | equivalent | wontfix | unreviewed
+# A real-gap gets a test written, and then a corpus entry so the new test is
+# itself proved capable of failing. An equivalent mutant changes text without
+# changing behaviour and can never be killed by anything - it is not a defect.
+#
+# Rows are keyed on (file, mutation); the line number is informational and may
+# be stale. Only targets swept by the last run are rewritten.
+#file	line	mutation	verdict	note
+scripts/lib/check-conflicts.sh	11	 [[ -f "$compose_file" ]] || continue ==> [[ -e "$compose_file" ]] || continue	wontfix	-f vs -e differs only if a DIRECTORY is named docker-compose*.yml; not a state this repo can reach
+scripts/lib/check-conflicts.sh	54	 [[ -f "$compose_file" ]] || continue ==> [[ -e "$compose_file" ]] || continue	wontfix	same as :11 - would need a directory matching the compose glob
+scripts/lib/check-env-vars.sh	13	 [[ -f "$f" ]] && compose_files+=("$f") ==> [[ -e "$f" ]] && compose_files+=("$f")	wontfix	same class - a directory named docker-compose*.yml
+scripts/lib/check-env-vars.sh	32	 if [[ ! -f "$env_example" ]]; then ==> if [[ ! -e "$env_example" ]]; then	wontfix	would need .env.example to be a directory
+scripts/lib/check-env-vars.sh	39	 env_example_vars=$(grep -E '^[# ]*[A-Z_][A-Z0-9_]*=' "$env_example" 2>/dev/null | \ ==> env_example_vars=$(grep '^[# ]*[A-Z_][A-Z0-9_]*=' "$env_example" 2>/dev/null | \	equivalent	the pattern uses no ERE-only syntax (no + ? | or grouping), so BRE and ERE parse it identically - grep -E is documentation here, not behaviour

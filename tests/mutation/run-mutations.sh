@@ -41,77 +41,13 @@ while getopts "k:" opt; do
 done
 shift $((OPTIND - 1))
 
+# The restore discipline and the bats oracle are shared with run-generated.sh
+# and live in one file on purpose -- see the header of lib-mutate.sh. This
+# also provides ROOT, WORK, CURRENT_FILE/CURRENT_BACKUP and the EXIT trap.
+# shellcheck source=tests/mutation/lib-mutate.sh
+source "$ROOT/tests/mutation/lib-mutate.sh"
+
 TOTAL=0; KILLED=0; SURVIVED=0; ERRORED=0; SKIPPED=0
-WORK="$(mktemp -d)"
-CURRENT_FILE=""; CURRENT_BACKUP=""
-RESTORE_FAILED=0
-
-# Restoring is the one thing that must happen no matter how this exits. A
-# mutated file left in the tree is worse than no mutation testing at all: it
-# looks like an ordinary edit and there is nothing to distinguish it from one.
-restore_current() {
-    # Nothing to restore is a legitimate no-op. A backup that has gone missing
-    # is NOT -- it means the mutated file is in the tree with nothing left to
-    # put back, and the old single-condition guard returned 0 for both, silently.
-    [[ -n "$CURRENT_FILE" ]] || return 0
-    if [[ ! -f "$CURRENT_BACKUP" ]]; then
-        RESTORE_FAILED=1
-        echo "FATAL: the backup of $CURRENT_FILE has vanished from under us." >&2
-        echo "FATAL:   expected it at $CURRENT_BACKUP" >&2
-        echo "FATAL: THE TREE IS MUTATED and there is nothing left to restore" >&2
-        echo "FATAL: it from. Recover $CURRENT_FILE from git." >&2
-        return 1
-    fi
-    # `cmp` alone, deliberately. Checking cp's exit status as well reads like
-    # belt and braces, but a mutation proved it unfalsifiable: every case where
-    # a failed cp matters is a case where the bytes differ, so cmp fires first
-    # and the cp branch can never be the thing that catches anything. This
-    # repo's own rule -- verify the outcome, not the exit status of the command
-    # that was supposed to produce it -- picks the survivor.
-    cp "$CURRENT_BACKUP" "$CURRENT_FILE" 2>/dev/null || true
-    if ! cmp -s "$CURRENT_BACKUP" "$CURRENT_FILE"; then
-        RESTORE_FAILED=1
-        echo "FATAL: could not restore $CURRENT_FILE" >&2
-        echo "FATAL: THE TREE IS MUTATED RIGHT NOW. The pristine copy is at" >&2
-        echo "FATAL:   $CURRENT_BACKUP" >&2
-        echo "FATAL: put it back by hand before doing anything else." >&2
-        return 1
-    fi
-    RESTORE_FAILED=0
-    CURRENT_FILE=""; CURRENT_BACKUP=""
-}
-
-# A failed restore must be fatal in BOTH directions, and the first version of
-# this was neither. It printed FATAL and carried on: the run could still finish
-# with 24 KILLED and exit 0 while a mutated file sat in the tree, indexed by
-# nothing, looking exactly like an ordinary edit. And `rm -rf "$WORK"` ran
-# immediately after -- deleting the pristine copy the message had just told the
-# reader to restore from. A tool built to catch silent failure, failing silently.
-cleanup() {
-    restore_current || true
-    if [[ "$RESTORE_FAILED" -eq 1 ]]; then
-        echo "FATAL: keeping the backups in $WORK - do NOT delete it." >&2
-        exit 3
-    fi
-    rm -rf "$WORK"
-}
-trap cleanup EXIT
-trap 'echo; echo "interrupted - restoring" >&2; exit 130' INT TERM
-
-# Run bats and report both the exit status and how many tests actually ran.
-# The count is what makes a filter typo detectable instead of silently green.
-# Echoes: "<status> <count>"
-run_tests() {
-    local batsfile="$1" regex="$2" out
-    out="$("$ROOT/tests/run-tests.sh" -f "$regex" "$batsfile" 2>&1)"
-    local st=$?
-    local plan count
-    plan="$(grep -m1 -E '^1\.\.[0-9]+$' <<<"$out" || true)"
-    count="${plan#1..}"
-    [[ "$count" =~ ^[0-9]+$ ]] || count=0
-    printf '%s\n' "$out" > "$WORK/last-output.txt"
-    echo "$st $count"
-}
 
 # mutation <id> --file F --bats B --test REGEX --why TEXT --apply 'SHELL'
 #
@@ -155,11 +91,11 @@ mutation() {
     # Split declaration from assignment (SC2155): `local x=$(cmd)` takes the
     # exit status of `local`, not of the command.
     local backup
-    # printf, not echo: `echo` appends a newline and `tr -c` then turns it into
-    # a trailing '_', so every backup was silently named "<id>_.orig".
-    backup="$WORK/$(printf '%s' "$id" | tr -c 'A-Za-z0-9._-' '_').orig"
-    cp "$file" "$backup"
-    CURRENT_FILE="$file"; CURRENT_BACKUP="$backup"
+    take_backup "$file" "$id" || {
+        echo "ERROR  $id"; echo "       could not copy $file aside"
+        ERRORED=$((ERRORED + 1)); return 0
+    }
+    backup="$BACKUP_PATH"
 
     # 1. Control.
     local res st count

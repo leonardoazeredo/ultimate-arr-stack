@@ -94,36 +94,40 @@ mutation sync-verifies-commit-but-not-branch \
   --apply 'sed -i "s@ || \"\$NAS_BRANCH\" != \"\$BRANCH\"@@" "$F"'
 
 # --- the runner's own restore path ------------------------------------------
-# These mutate run-mutations.sh while run-mutations.sh is running it. That is
+# These mutate lib-mutate.sh, which run-mutations.sh has already sourced. That is
 # safe for a reason worth stating: `sed -i` writes a temp file and renames it,
 # so the running bash keeps its original inode and finishes reading the script
-# it started with. The mutation is visible only to the child runner the fixture
-# spawns, which is exactly the thing under test.
+# it started with -- and a sourced file is read once, at source time, so the
+# already-loaded function bodies are equally unaffected. The mutation is visible
+# only to the child runner the fixture spawns, which is exactly the thing under
+# test. These four moved from run-mutations.sh to lib-mutate.sh when the restore
+# core was extracted; they are the reason that refactor was caught leaving five
+# mutated files in the tree.
 
 mutation runner-restore-failure-not-fatal \
-  --file tests/mutation/run-mutations.sh \
+  --file tests/mutation/lib-mutate.sh \
   --bats tests/mutation-framework.bats \
   --test "failed restore is fatal" \
   --why "a run that could not put the tree back exits 0, so a mutated file is left behind looking like an ordinary edit" \
   --apply 'sed -i "s@^        exit 3\$@        : @" "$F"'
 
 mutation runner-deletes-the-backup-it-names \
-  --file tests/mutation/run-mutations.sh \
+  --file tests/mutation/lib-mutate.sh \
   --bats tests/mutation-framework.bats \
   --test "failed restore is fatal" \
   --why "cleanup rm -rf's the pristine copy the FATAL message just told the reader to restore from" \
   --apply 'sed -i "s@^    if \[\[ \"\$RESTORE_FAILED\" -eq 1 \]\]; then\$@    if false; then@" "$F"'
 
 mutation runner-vanished-backup-is-silent \
-  --file tests/mutation/run-mutations.sh \
+  --file tests/mutation/lib-mutate.sh \
   --bats tests/mutation-framework.bats \
   --test "vanished backup is fatal" \
   --why "a backup that disappeared is treated as nothing-to-restore, so the mutated file stays in the tree unreported" \
   --apply 'sed -i "s@^    if \[\[ ! -f \"\$CURRENT_BACKUP\" \]\]; then\$@    if false; then@" "$F"'
 
 mutation runner-backup-name-gains-an-underscore \
-  --file tests/mutation/run-mutations.sh \
+  --file tests/mutation/lib-mutate.sh \
   --bats tests/mutation-framework.bats \
   --test "vanished backup is fatal" \
   --why "echo appends a newline that tr turns into a trailing underscore, so every backup is silently named <id>_.orig and nothing that looks it up by name finds it" \
-  --apply 'sed -i "s@backup=\"\$WORK/\$(printf .%s. \"\$id\" | tr@backup=\"\$WORK/\$(echo \"\$id\" | tr@" "$F"'
+  --apply 'sed -i "s@BACKUP_PATH=\"\$WORK/\$(printf .%s. \"\$tag\" | tr@BACKUP_PATH=\"\$WORK/\$(echo \"\$tag\" | tr@" "$F"'

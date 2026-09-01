@@ -1,0 +1,106 @@
+# Mutation rules for bash, for universalmutator.
+#
+# Format is universalmutator's own: `<python regex> ==> <replacement>`, one per
+# line, backrefs as \1. An empty right-hand side deletes the match. Copied from
+# the shipped static/universal.rules rather than guessed at.
+#
+# universal.rules is arithmetic-centric (it exists for C-like languages) and on
+# shell it mostly produces junk -- it mutates the shebang into `#!+bin/bash`.
+# These rules are chosen from defects THIS repo has actually shipped, so a
+# survivor here means a guard that would not have caught a bug we already had.
+
+# --- The one real find so far: `grep -Fxq` -> `grep -Fq` survived all 18 tests
+# around it. Whole-line matching was load-bearing and nothing proved it.
+# Generalised to dropping any single flag letter from a grep/sed/awk flag group.
+# Two forms, because one is not enough. The general form requires at least one
+# flag letter to REMAIN (\2 or the \1 group is non-empty), so `grep -qx` becomes
+# `grep -q`. Without that constraint `grep -E` mutated to the bare `grep -`,
+# where `-` is taken as the PATTERN and the real pattern as a filename -- which
+# in this repo happened to still match, producing a mutant that survived for a
+# reason that has nothing to do with test coverage. A junk mutant that survives
+# is worse than no mutant: it reads like a finding.
+(grep\s+-[A-Za-z]+)x([A-Za-z]*) ==> \1\2
+(grep\s+-[A-Za-z]*)x([A-Za-z]+) ==> \1\2
+(grep\s+-[A-Za-z]+)F([A-Za-z]*) ==> \1\2
+(grep\s+-[A-Za-z]*)F([A-Za-z]+) ==> \1\2
+(grep\s+-[A-Za-z]+)w([A-Za-z]*) ==> \1\2
+(grep\s+-[A-Za-z]*)w([A-Za-z]+) ==> \1\2
+(grep\s+-[A-Za-z]+)E([A-Za-z]*) ==> \1\2
+(grep\s+-[A-Za-z]*)E([A-Za-z]+) ==> \1\2
+# The last flag letter, dropped properly: the flag goes away rather than
+# decaying into a bare `-`.
+grep -E  ==> grep 
+grep -F  ==> grep 
+grep -x  ==> grep 
+
+# --- The silent-success class: this repo's single most expensive defect shape.
+# A failure that exits 0 and says nothing. Three of these were live at once.
+exit 1 ==> exit 0
+exit 2 ==> exit 0
+exit 3 ==> exit 0
+return 1 ==> return 0
+
+# --- Losing the error channel. `>&2` deleted means a failure prints to stdout
+# and is indistinguishable from normal output to any caller parsing it.
+\s*>&2 ==>
+
+# --- `set -e` / `pipefail` removal. arr-backup.sh exited 0 on a failed volume
+# for exactly this class of reason: the status was never allowed to propagate.
+set -euo pipefail ==> set -uo pipefail
+set -eo pipefail ==> set -o pipefail
+^(\s*)set -e\s*$ ==> \1true
+
+# --- Negation flips. `if ! cmd` vs `if cmd` is the shape behind the
+# `rc=$?`-reads-the-status-of-the-negation bug in ensure_services_running.
+if ! ==> if
+while ! ==> while
+\[\[ -z ==> [[ -n
+\[\[ -n ==> [[ -z
+\[ -z ==> [ -n
+\[ -n ==> [ -z
+\[\[ ! ==> [[
+\[ ! ==> [
+
+# --- File-test flips. `-x` vs `-e` vs `-f` distinguish "executable" from
+# "exists"; hooks-installed.bats asserted exactly these and could not fail.
+-x " ==> -e "
+-f " ==> -e "
+-d " ==> -e "
+
+# --- Comparison flips.
+-eq ==> -ne
+-ne ==> -eq
+-gt ==> -ge
+-lt ==> -le
+-ge ==> -gt
+-le ==> -lt
+ == ==> !=
+ != ==> ==
+
+# --- Boolean flips.
+&& ==> ||
+\|\| ==> &&
+
+# --- DISABLED, with the measurement that disabled them ------------------------
+#
+# These two rules are real defect classes. They are off because in the first
+# sweep (2026-09-01) they produced 170 of 174 survivors between them and buried
+# everything else -- the two genuine finds in that run were invisible in the
+# noise until the ledger was grouped by rule.
+#
+# Quoting: 131 survivors. Unquoting a variable reintroduces word-splitting and
+# glob expansion. Nothing in this suite kills any of them, and the reason is a
+# single fact, not 131 separate gaps: no test input in tests/pre-commit-checks.bats
+# contains whitespace or a glob character, so quoted and unquoted behave
+# identically on every value these tests ever pass. That is one finding and it
+# wants one test (a fixture path with a space in it), not 131 ledger rows.
+#
+# Scope: 39 survivors. Dropping `local` makes a variable global. Every one of
+# these is an equivalent mutant in practice -- these helpers are called once per
+# process, so a leaked global has nothing to collide with. Re-enable if a helper
+# ever gains a second call site or recurses.
+#
+# Re-enable by uncommenting; both are one-line changes.
+# "\$\{([A-Za-z_][A-Za-z0-9_]*)\}" ==> ${\1}
+# "\$([A-Za-z_][A-Za-z0-9_]*)" ==> $\1
+# ^(\s*)local  ==> \1

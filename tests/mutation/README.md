@@ -26,18 +26,145 @@ None of these were caught by reading the tests. In every case they read
 correctly. Breaking the thing they guard and watching them stay green is what
 found them.
 
+## Two runners, two jobs
+
+|  | `run-mutations.sh` | `run-generated.sh` |
+| --- | --- | --- |
+| Kind | regression | discovery |
+| Mutations | a corpus of defects someone wrote down | generated systematically by universalmutator |
+| Answers | "can this guard still fail?" | "what is not guarded at all?" |
+| Blocking | **yes** — non-zero on any SURVIVED/ERRORED | **no** — always exits 0 |
+| Output | a verdict per corpus entry | `survivors.tsv`, to be triaged by hand |
+
+The corpus can only ever re-ask a question someone already thought to ask; every
+entry in it is a bug that was written down after the fact. Generation asks the
+questions nobody thought of. Both are needed, and neither substitutes for the
+other.
+
+Generation is non-blocking **by design**. Some generated mutants are
+*equivalent* — they change the text without changing behaviour — and no test can
+ever kill them. A discovery tool that wedges the workflow on an irreducible
+false-positive rate gets disabled, and then it finds nothing at all.
+
 ## Running it
 
 ```sh
 ./tests/mutation/run-mutations.sh                      # every corpus
 ./tests/mutation/run-mutations.sh -k sync              # ids containing "sync"
 ./tests/mutation/run-mutations.sh tests/mutation/corpus/nas-sync.sh
+
+./tests/mutation/run-generated.sh                      # sweep every target
+./tests/mutation/run-generated.sh -k check-conflicts   # one target
 ```
 
-Exits non-zero if anything SURVIVED or ERRORED. It is not part of
-`./tests/run-tests.sh`: it runs the bats suite twice per mutation, so it
-belongs to the "changed a guard, or about to trust one" moment rather than to
-every commit.
+`run-mutations.sh` exits non-zero if anything SURVIVED or ERRORED. Neither is
+part of `./tests/run-tests.sh`: they run the bats suite once or twice per
+mutation, so they belong to the "changed a guard, or about to trust one" moment
+rather than to every commit.
+
+Both share `lib-mutate.sh`, which owns the backup/restore discipline. That is
+one file on purpose — a second copy of restore logic would drift, and the copy
+that drifted would leave a mutated file in the tree looking like an ordinary
+edit.
+
+## The generated half
+
+`mutator.sh` runs universalmutator in a container (`tests/mutation/Dockerfile`,
+image and package both pinned). pi1 cannot install it on the host: no pip, no
+pipx, PEP 668, and `ensurepip` ships no bundled wheels, so even `python3 -m venv`
+cannot bootstrap. Containerising is this repo's standing answer for tools the
+host lacks — `alpine/git`, `koalaman/shellcheck`, the Playwright image.
+
+The repo is never bind-mounted. universalmutator writes scratch files into its
+working directory, so the target is copied into a throwaway directory instead:
+the container cannot reach anything it was not handed.
+
+`shell.rules` is the ruleset. universalmutator ships nothing for bash and its
+`universal.rules` fallback is arithmetic-centric — on shell it mutates the
+shebang into `#!+bin/bash`. Note that passing `none` as the language does **not**
+disable the built-in rules; only `--only shell.rules` does. Measured on
+`check-secrets.sh`: `none` alone produced 119 mutants, all of them noise.
+
+### Triaging a survivor
+
+Survivors land in `survivors.tsv` as `unreviewed`. Each gets one of:
+
+| verdict | meaning |
+| --- | --- |
+| `real-gap` | the suite genuinely cannot see this defect |
+| `equivalent` | the mutation does not change behaviour; nothing can kill it |
+| `wontfix` | real but unreachable in practice; the note must say why |
+| `unreviewed` | not yet looked at |
+
+A `real-gap` gets a test written, **and then a corpus entry**, so the new test is
+itself proved capable of failing.
+
+The ledger is merged, never rebuilt, along both axes:
+
+- a row whose target was **not swept** by this run is carried through untouched,
+  so a `-k` filter, a positional target, or a target that SKIPs for want of
+  docker cannot delete verdicts it never looked at;
+- a row whose target **was** swept keeps its verdict if the same mutation is
+  still found, and is dropped if it is not.
+
+Identity is `(file, mutation text)`. The line number is a separate column and is
+deliberately **not** part of the key: line numbers shift the moment anything is
+inserted above a mutation, and an identity that included one would silently
+orphan every hand-assigned verdict on the next edit.
+
+> Both halves of that were paid for. The first version rebuilt the file from the
+> current run's survivors alone, so a filtered run deleted every row outside the
+> filter — five triaged verdicts, lost silently. The "two consecutive sweeps
+> produce an identical ledger" check could not see it, because both sweeps were
+> full ones. `tests/mutation-framework.bats` now asserts both directions, with
+> corpus entries proving each assertion can fail.
+
+### First sweep, 2026-09-01
+
+40 mutants across the three covered `scripts/lib/` files: 21 killed, 19 survived.
+Writing five tests for the survivors took it to **35 killed, 5 survived** — the
+remaining five are triaged `wontfix`/`equivalent` in the ledger.
+
+Two of those were real, and both are this repo's recurring shapes:
+
+- **`grep -qx "$var"` → `grep -q "$var"`** in `check-env-vars.sh` survived. This
+  is the *same defect* generation already found once here, in the backup volume
+  resolver (`grep -Fxq` → `grep -Fq`). Whole-line matching was load-bearing in
+  both places and proved in neither: with `-q`, an undocumented `${NAS_IP}` is
+  considered documented because `.env.example` mentions `NAS_IP_RANGE`.
+- **Static-IP conflict detection had no test at all.** Both pre-existing
+  `check_conflicts` tests used ports; nine mutants across the entire IP half
+  survived. CLAUDE.md pins static IPs precisely because a collision is silent
+  until a container restarts onto an address something else holds.
+
+A third was subtler and worth its own line: `-gt 1` → `-ge 1` survived because
+both tests asserted that the *expected* message appeared and neither asserted
+that the *wrong* one did not. Getting the right output is not proof — the check
+also has to not emit the wrong one.
+
+## Targets with no oracle
+
+Mutation testing needs a test as its oracle. Against a file with no tests, every
+mutant survives by construction — that is not a finding, it is a restatement of
+"this file has no tests", and a few hundred guaranteed survivors would bury the
+real signal. So the sweep covers only files that have one.
+
+`scripts/lib/common.sh` was swept once on the theory that being sourced by three
+tested files made it covered. **78 mutants generated, 78 survived, 0 killed.**
+Sourced is not covered: the four `pre-commit-checks.bats` tests exercise none of
+its NAS, SSH, or domain helpers. It is listed below with the rest.
+
+These files are sourced by `scripts/pre-commit`, so a defect in any of them
+silently weakens every commit's checks. **Ten `scripts/lib/` files have no bats
+test whatsoever:**
+
+`common.sh`, `check-dns-duplicates.sh`, `check-doc-links.sh`,
+`check-domains.sh`, `check-env-backup.sh`, `check-hardcoded-domain.sh`,
+`check-image-versions.sh`, `check-uptime-monitors.sh`, `check-yaml-syntax.sh`,
+`configure-helpers.sh`
+
+That is a bigger finding than anything the sweep produced, and writing those
+tests is separate work.
 
 ## What the runner refuses to do
 
