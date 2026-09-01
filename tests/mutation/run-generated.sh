@@ -81,6 +81,7 @@ TARGETS=(
   "scripts/lib/check-domains.sh:tests/lib-domains.bats:^domains: "
   "scripts/restart-stack.sh:tests/restart-stack.bats:^restart-stack: "
   "setup-hooks.sh:tests/setup-hooks.bats:^setup-hooks: "
+  "scripts/ensure-tailscale-relay-port.sh:tests/ensure-relay-port.bats:^ensure-relay-port: "
 )
 
 FILTER=""

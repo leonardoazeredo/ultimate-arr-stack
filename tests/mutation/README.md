@@ -193,7 +193,6 @@ old "14 tests" claim went stale.
 - `scripts/configure-apps.sh`
 - `scripts/detect-credential-drift.sh`
 - `scripts/detect-vpn-zombies.sh`
-- `scripts/ensure-tailscale-relay-port.sh`
 - `scripts/fix-radarr-paths.sh`
 - `scripts/fix-sonarr-folders.sh`
 - `scripts/post-merge`
