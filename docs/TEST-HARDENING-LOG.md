@@ -290,6 +290,13 @@ write-up in `tests/mutation/README.md`; these are the one-line forms.
   reason. Only a separate process (`bash -c '...'`, status read afterwards) observes it.
 - **Command substitution strips trailing newlines**, so `x=$(cmd)` can never end in a
   blank line and a fixture appending one to test a blank-line guard never reaches it.
+- **A "portable" `stat -f %m || stat -c %Y` fallback is not one.** `-f` is *format* on
+  BSD and `--file-system` on GNU, where it is a valid flag that prints a filesystem
+  report to **stdout** and exits 1 — so the `||` fires and appends the real mtime to
+  that report. The `$(( ))` consuming it throws a syntax error that aborts the enclosing
+  function, so the failure surfaces as "the cache is never read", not as a wrong number.
+  Try GNU first (`-c` is simply unrecognised on BSD) *and* check the result is an
+  integer, so the ordering argument is not the only thing holding it up.
 
 **Test**
 
