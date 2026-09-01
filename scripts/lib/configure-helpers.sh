@@ -166,6 +166,10 @@ qbit_auth() {
 #
 # Requires globals: NAS_IP, DRY_RUN, QBIT_USERNAME, QBIT_PASSWORD,
 #                   SABNZBD_RUNNING, SABNZBD_API_KEY
+# The `$flag` booleans below are compared as STRINGS, never run as commands.
+# `if $DRY_RUN; then` executes the variable's value - unquoted, so it word-splits
+# too - which is a command-execution path bought in exchange for nothing over a
+# string comparison. Same shape as the two cache flags fixed in common.sh.
 configure_arr_service() {
     local name="$1"
     local port="$2"
@@ -200,15 +204,15 @@ configure_arr_service() {
         priority_older="olderMoviePriority"
     fi
 
-    if $DRY_RUN; then
+    if [[ "$DRY_RUN" == true ]]; then
         dry "Add root folder ${root_path}"
         dry "Add qBittorrent download client (category: ${category})"
-        if $SABNZBD_RUNNING; then dry "Add SABnzbd download client (category: ${category})"; fi
+        if [[ "$SABNZBD_RUNNING" == true ]]; then dry "Add SABnzbd download client (category: ${category})"; fi
         dry "Enable NFO metadata (Kodi/Emby)"
         dry "Set TRaSH naming scheme"
         dry "Add Reject ISO custom format"
         dry "Score Reject ISO at -10000 in quality profiles"
-        if $SABNZBD_RUNNING; then dry "Add delay profile (Usenet 0, Torrent 30)"; fi
+        if [[ "$SABNZBD_RUNNING" == true ]]; then dry "Add delay profile (Usenet 0, Torrent 30)"; fi
         return
     fi
 
@@ -263,7 +267,7 @@ QBIT_JSON
     fi
 
     # --- Download client: SABnzbd (if running) ---
-    if $SABNZBD_RUNNING && [[ -n "$SABNZBD_API_KEY" ]]; then
+    if [[ "$SABNZBD_RUNNING" == true && -n "$SABNZBD_API_KEY" ]]; then
         if json_extract "$clients" "sys.exit(0 if any(c.get('name','').lower() == 'sabnzbd' for c in data) else 1)"; then
             skip "${name}: SABnzbd download client"
         else
@@ -390,7 +394,7 @@ print(json.dumps(data))")
     fi
 
     # --- Delay profile (if SABnzbd running — prefer Usenet) ---
-    if $SABNZBD_RUNNING; then
+    if [[ "$SABNZBD_RUNNING" == true ]]; then
         local delays
         delays=$(api_get "${BASE}/api/v3/delayprofile" "$AUTH") || true
         if json_extract "$delays" "sys.exit(0 if any(d.get('preferredProtocol') == 'usenet' for d in data) else 1)"; then

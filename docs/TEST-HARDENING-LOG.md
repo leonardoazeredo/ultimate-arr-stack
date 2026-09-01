@@ -427,6 +427,15 @@ write-up in `tests/mutation/README.md`; these are the one-line forms.
   touch; downstream that surfaced not as "refused" but as two coverage gaps that did not
   exist.
 
+- **`cut -d= -f2` truncates any value containing a second `=`.** An env-file parser
+  wants `${line#*=}`, which keeps everything after the *first* one. A password is
+  exactly the sort of value that contains an `=`, and the truncated half fails
+  authentication indistinguishably from a wrong password.
+- **`return 1` and `exit 1` inside a function look identical from the caller's shell.**
+  Both give status 1. Only `exit` kills the caller mid-flight, so its cleanup trap, its
+  summary and every later step never run. The status cannot tell them apart; a trailing
+  `echo STILLHERE` after the call can.
+
 **Tests**
 
 - ▸ **An assertion can be satisfied by its own fixture.** Never assert on a string that
@@ -482,6 +491,18 @@ write-up in `tests/mutation/README.md`; these are the one-line forms.
   one. A mutation whose `s@@@` silently failed to match reported as an ERROR rather than
   a false KILLED only because `run-mutations.sh` checks that the file actually changed.
 
+- **bats' `lines` array silently drops blank lines.** `run` splits `$output` with
+  `read -r -a` under `IFS=$'\n'`, and that collapses consecutive delimiters, so a
+  28-line help block arrives as 21 elements. `${#lines[@]}` is therefore not a line
+  count. Compare `$output` against independently derived text instead — which is the
+  stronger assertion anyway, since a count still passes when the block starts or ends
+  one line off.
+- **A seam added for testability can make the thing it replaced untestable.**
+  `CONFIGURE_ENV_FILE` exists so a test can point the script at a fixture — and because
+  every test sets it, no test can ever exercise the default it falls back to. A mutation
+  of that default is unkillable by construction. Mutate the *call site* instead, and
+  write the one test that proves the resolution rule (run it from `/`).
+
 **Operational**
 
 - **A no-op that returns success is indistinguishable from work completed.**
@@ -499,3 +520,8 @@ write-up in `tests/mutation/README.md`; these are the one-line forms.
 - **"18 backed up" against 17 archive directories is not a defect.** `.env` /
   `dot-env` increments `BACKED_UP` alongside the 17 volumes (`arr-backup.sh:748`).
   Recorded so nobody re-investigates it.
+- **A fixed path in a world-writable directory is a shared mutable resource.**
+  `configure-apps.sh` kept its qBittorrent session cookie at `/tmp/qbit_configure_cookie.txt`
+  with no `trap`: two concurrent runs clobbered each other's session, every early return
+  left a live cookie readable by anything on the box, and there are a dozen early returns.
+  `mktemp` plus an EXIT trap is what makes "we always clean up" true rather than intended.

@@ -28,11 +28,21 @@
 #   - Seerr: initial Jellyfin login + service connections
 #   - SABnzbd: usenet provider credentials + folder config
 
+# No `set -e`, deliberately. This script's whole shape is "attempt every step,
+# count what failed, report at the end" - a dozen `fail` calls exist precisely
+# so one unreachable service does not abandon the other five. `set -u` and
+# pipefail are on because neither of them changes that: they catch a misspelt
+# variable and a silently-swallowed pipeline failure, which are bugs in the
+# script rather than conditions it is designed to survive.
+set -uo pipefail
+
 # ============================================
 # Source helpers
 # ============================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# shellcheck source=scripts/lib/configure-helpers.sh
 source "${SCRIPT_DIR}/lib/configure-helpers.sh"
 
 # ============================================
@@ -42,7 +52,15 @@ source "${SCRIPT_DIR}/lib/configure-helpers.sh"
 DRY_RUN=false
 VERBOSE=false
 NAS_IP=""
-QBIT_COOKIE="/tmp/qbit_configure_cookie.txt"
+QBIT_COOKIE=""
+
+# Overridable only so tests/configure-apps.bats can point at a fixture. Nothing
+# in production sets it; the default is the repo's own .env, resolved from this
+# script's location rather than from the caller's working directory. It used to
+# be the bare relative path `.env`, so running the script from anywhere but the
+# repo root silently skipped the password lookup and fell through to scraping
+# docker logs.
+CONFIGURE_ENV_FILE="${CONFIGURE_ENV_FILE:-${REPO_ROOT}/.env}"
 
 # Counters
 CONFIGURED=0
@@ -55,155 +73,191 @@ RADARR_API_KEY=""
 PROWLARR_API_KEY=""
 BAZARR_API_KEY=""
 SABNZBD_API_KEY=""
+SABNZBD_RUNNING=false
 QBIT_USERNAME="${QBIT_USERNAME:-admin}"
 QBIT_PASSWORD="${QBIT_PASSWORD:-}"
 
 # ============================================
-# Parse arguments
+# Usage
 # ============================================
 
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        --dry-run)
-            DRY_RUN=true
-            shift
-            ;;
-        --verbose|-v)
-            VERBOSE=true
-            shift
-            ;;
-        --help|-h)
-            head -27 "$0" | tail -24
-            echo ""
-            echo "This script is idempotent — safe to re-run at any time."
-            exit 0
-            ;;
-        *)
-            echo "Unknown option: $1"
-            echo "Usage: $0 [--dry-run] [--verbose|-v] [--help|-h]"
-            exit 1
-            ;;
-    esac
-done
+# Print this file's own leading comment block.
+#
+# Derived, not a line range. This was `head -27 "$0" | tail -24`, which had
+# already gone stale: the block runs to line 29, so --help silently dropped its
+# last two lines. A hardcoded range is wrong the moment anyone edits the
+# header, and nothing tells you.
+print_usage() {
+    local self="${1:-${BASH_SOURCE[0]}}"
+    # awk and not a sed range: the block ends at a BLANK line, and `/^[^#]/`
+    # does not match one - a bracket expression needs a character to reject, and
+    # an empty line has none. A sed range would run straight past the blank into
+    # the next comment block.
+    awk 'NR == 1 { next } /^#/ { sub(/^#( |$)/, ""); print; next } { exit }' "$self"
+}
+
+# Read one KEY= value out of an env file.
+#
+# Keeps everything after the FIRST `=`, so a value containing one survives, and
+# strips a single layer of surrounding quotes - which `cut -d= -f2-` does not,
+# so a quoted password used to be handed to qBittorrent with the quotes still
+# attached and simply failed to authenticate.
+env_value() {
+    local key="$1" file="$2" line
+    [[ -f "$file" ]] || return 1
+    line=$(grep -m1 "^${key}=" "$file") || return 1
+    line="${line#*=}"
+    line="${line%\"}"; line="${line#\"}"
+    line="${line%\'}"; line="${line#\'}"
+    printf '%s\n' "$line"
+}
+
+# ============================================
+# Arguments
+# ============================================
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --dry-run)
+                DRY_RUN=true
+                shift
+                ;;
+            --verbose|-v)
+                VERBOSE=true
+                shift
+                ;;
+            --help|-h)
+                print_usage "${BASH_SOURCE[0]}"
+                echo ""
+                echo "This script is idempotent - safe to re-run at any time."
+                exit 0
+                ;;
+            *)
+                echo "Unknown option: $1"
+                echo "Usage: $0 [--dry-run] [--verbose|-v] [--help|-h]"
+                return 1
+                ;;
+        esac
+    done
+    return 0
+}
 
 # ============================================
 # Prerequisites
 # ============================================
 
-echo "=== Arr-Stack App Configuration ==="
-echo ""
-
-if ! command -v docker &>/dev/null; then
-    echo "ERROR: docker not found. Run this on the NAS."
-    exit 1
-fi
-
-# Detect NAS IP
-NAS_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
-if [[ -z "$NAS_IP" ]]; then
-    echo "ERROR: Could not detect NAS IP"
-    exit 1
-fi
-log "NAS IP: $NAS_IP"
-
-if $DRY_RUN; then
-    log "DRY RUN — no changes will be made"
-fi
-echo ""
-
-# Check key containers are running
 REQUIRED_CONTAINERS="gluetun qbittorrent sonarr radarr prowlarr bazarr"
-MISSING=""
-for c in $REQUIRED_CONTAINERS; do
-    if ! docker ps --format '{{.Names}}' | grep -q "^${c}$"; then
-        MISSING="$MISSING $c"
+
+check_prerequisites() {
+    if ! command -v docker &>/dev/null; then
+        echo "ERROR: docker not found. Run this on the NAS."
+        return 1
     fi
-done
-if [[ -n "$MISSING" ]]; then
-    echo "ERROR: Required containers not running:$MISSING"
-    echo "Start the stack first: docker compose -f docker-compose.arr-stack.yml up -d"
-    exit 1
-fi
 
-# Gluetun must be healthy — qBittorrent and the *arr services share its network
-# namespace, so if the VPN isn't up, they won't respond on any port. Checking here
-# turns a 4-minute mysterious hang into a clear error.
-GLUETUN_HEALTH=$(docker inspect -f '{{.State.Health.Status}}' gluetun 2>/dev/null || echo unknown)
-if [[ "$GLUETUN_HEALTH" != "healthy" ]]; then
-    echo "ERROR: Gluetun is '$GLUETUN_HEALTH' (need 'healthy')."
-    echo "       qBit and the *arr services share Gluetun's network — they can't respond until the VPN is up."
-    echo "       Wait for it to connect, then re-run. Diagnose: docker logs gluetun --tail 50"
-    exit 1
-fi
+    NAS_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+    if [[ -z "$NAS_IP" ]]; then
+        echo "ERROR: Could not detect NAS IP"
+        return 1
+    fi
+    log "NAS IP: $NAS_IP"
 
-# Check if SABnzbd is running (optional)
-SABNZBD_RUNNING=false
-if docker ps --format '{{.Names}}' | grep -q "^sabnzbd$"; then
-    SABNZBD_RUNNING=true
-fi
+    if [[ "$DRY_RUN" == true ]]; then
+        log "DRY RUN - no changes will be made"
+    fi
+    echo ""
+
+    local c missing=""
+    for c in $REQUIRED_CONTAINERS; do
+        if ! docker ps --format '{{.Names}}' | grep -q "^${c}$"; then
+            missing="$missing $c"
+        fi
+    done
+    if [[ -n "$missing" ]]; then
+        echo "ERROR: Required containers not running:$missing"
+        echo "Start the stack first: docker compose -f docker-compose.arr-stack.yml up -d"
+        return 1
+    fi
+
+    # Gluetun must be healthy - qBittorrent and the *arr services share its
+    # network namespace, so if the VPN isn't up they won't respond on any port.
+    # Checking here turns a 4-minute mysterious hang into a clear error.
+    local health
+    health=$(docker inspect -f '{{.State.Health.Status}}' gluetun 2>/dev/null || echo unknown)
+    if [[ "$health" != "healthy" ]]; then
+        echo "ERROR: Gluetun is '$health' (need 'healthy')."
+        echo "       qBit and the *arr services share Gluetun's network - they can't respond until the VPN is up."
+        echo "       Wait for it to connect, then re-run. Diagnose: docker logs gluetun --tail 50"
+        return 1
+    fi
+
+    # SABnzbd is optional.
+    if docker ps --format '{{.Names}}' | grep -q "^sabnzbd$"; then
+        SABNZBD_RUNNING=true
+    fi
+    return 0
+}
 
 # ============================================
 # Discover API keys
 # ============================================
 
-log "Discovering API keys..."
+# The *arr services all keep theirs in the same place and the same shape.
+arr_api_key() {
+    docker exec "$1" cat /config/config.xml 2>/dev/null \
+        | grep -oP '(?<=<ApiKey>)[^<]+' || true
+}
 
-# Sonarr
-SONARR_API_KEY=$(docker exec sonarr cat /config/config.xml 2>/dev/null | grep -oP '(?<=<ApiKey>)[^<]+' || true)
-if [[ -z "$SONARR_API_KEY" ]]; then
-    fail "Could not discover Sonarr API key"
-else
-    info "Sonarr API key: ${SONARR_API_KEY:0:8}..."
-fi
+discover_api_keys() {
+    log "Discovering API keys..."
 
-# Radarr
-RADARR_API_KEY=$(docker exec radarr cat /config/config.xml 2>/dev/null | grep -oP '(?<=<ApiKey>)[^<]+' || true)
-if [[ -z "$RADARR_API_KEY" ]]; then
-    fail "Could not discover Radarr API key"
-else
-    info "Radarr API key: ${RADARR_API_KEY:0:8}..."
-fi
+    local svc var
+    for svc in sonarr radarr prowlarr; do
+        var="${svc^^}_API_KEY"
+        printf -v "$var" '%s' "$(arr_api_key "$svc")"
+        if [[ -z "${!var}" ]]; then
+            fail "Could not discover ${svc^} API key"
+        else
+            info "${svc^} API key: ${!var:0:8}..."
+        fi
+    done
 
-# Prowlarr
-PROWLARR_API_KEY=$(docker exec prowlarr cat /config/config.xml 2>/dev/null | grep -oP '(?<=<ApiKey>)[^<]+' || true)
-if [[ -z "$PROWLARR_API_KEY" ]]; then
-    fail "Could not discover Prowlarr API key"
-else
-    info "Prowlarr API key: ${PROWLARR_API_KEY:0:8}..."
-fi
-
-# Bazarr — apikey is on same line as key: "  apikey: abc123"
-BAZARR_API_KEY=$(docker exec bazarr grep '^\s*apikey:' /config/config/config.yaml 2>/dev/null | head -1 | sed 's/.*apikey:\s*//' | tr -d ' ' || true)
-if [[ -z "$BAZARR_API_KEY" ]]; then
-    fail "Could not discover Bazarr API key"
-else
-    info "Bazarr API key: ${BAZARR_API_KEY:0:8}..."
-fi
-
-# SABnzbd (optional)
-if $SABNZBD_RUNNING; then
-    SABNZBD_API_KEY=$(docker exec sabnzbd grep '^api_key' /config/sabnzbd.ini 2>/dev/null | head -1 | sed 's/^api_key = //' | tr -d ' ' || true)
-    if [[ -n "$SABNZBD_API_KEY" ]]; then
-        info "SABnzbd API key: ${SABNZBD_API_KEY:0:8}..."
+    # Bazarr - apikey is on the same line as the key: "  apikey: abc123"
+    BAZARR_API_KEY=$(docker exec bazarr grep '^\s*apikey:' /config/config/config.yaml 2>/dev/null \
+        | head -1 | sed 's/.*apikey:\s*//' | tr -d ' ' || true)
+    if [[ -z "$BAZARR_API_KEY" ]]; then
+        fail "Could not discover Bazarr API key"
+    else
+        info "Bazarr API key: ${BAZARR_API_KEY:0:8}..."
     fi
-fi
 
-# qBittorrent password: env var → .env file → docker logs temp password
-if [[ -z "$QBIT_PASSWORD" && -f .env ]]; then
-    QBIT_PASSWORD=$(grep '^QBIT_PASSWORD=' .env 2>/dev/null | head -1 | cut -d= -f2- || true)
-fi
-if [[ -z "$QBIT_PASSWORD" ]]; then
-    QBIT_PASSWORD=$(docker logs qbittorrent 2>&1 | grep -oP 'temporary password is provided.*: \K\S+' | tail -1 || true)
-fi
-if [[ -z "$QBIT_PASSWORD" ]]; then
-    echo ""
-    echo "WARNING: Could not find qBittorrent password."
-    echo "         Set QBIT_PASSWORD env var if you've changed the default, e.g.:"
-    echo "         QBIT_PASSWORD=mypassword ./scripts/configure-apps.sh"
-    echo ""
-fi
+    # SABnzbd (optional)
+    if [[ "$SABNZBD_RUNNING" == true ]]; then
+        SABNZBD_API_KEY=$(docker exec sabnzbd grep '^api_key' /config/sabnzbd.ini 2>/dev/null \
+            | head -1 | sed 's/^api_key = //' | tr -d ' ' || true)
+        if [[ -n "$SABNZBD_API_KEY" ]]; then
+            info "SABnzbd API key: ${SABNZBD_API_KEY:0:8}..."
+        fi
+    fi
 
-echo ""
+    # qBittorrent password: env var -> .env file -> docker logs temp password
+    if [[ -z "$QBIT_PASSWORD" ]]; then
+        QBIT_PASSWORD=$(env_value QBIT_PASSWORD "$CONFIGURE_ENV_FILE") || QBIT_PASSWORD=""
+    fi
+    if [[ -z "$QBIT_PASSWORD" ]]; then
+        QBIT_PASSWORD=$(docker logs qbittorrent 2>&1 \
+            | grep -oP 'temporary password is provided.*: \K\S+' | tail -1 || true)
+    fi
+    if [[ -z "$QBIT_PASSWORD" ]]; then
+        echo ""
+        echo "WARNING: Could not find qBittorrent password."
+        echo "         Set QBIT_PASSWORD env var if you've changed the default, e.g.:"
+        echo "         QBIT_PASSWORD=mypassword ./scripts/configure-apps.sh"
+        echo ""
+    fi
+
+    echo ""
+}
 
 # ============================================
 # 1. qBittorrent
@@ -221,7 +275,7 @@ configure_qbittorrent() {
         return
     fi
 
-    if $DRY_RUN; then
+    if [[ "$DRY_RUN" == true ]]; then
         dry "Authenticate to qBittorrent"
         dry "Create category 'tv' → /data/torrents/tv"
         dry "Create category 'movies' → /data/torrents/movies"
@@ -329,7 +383,7 @@ configure_prowlarr() {
 
     if ! wait_for_service "Prowlarr" "${BASE}/api/v1/health"; then return; fi
 
-    if $DRY_RUN; then
+    if [[ "$DRY_RUN" == true ]]; then
         dry "Add FlareSolverr indexer proxy"
         dry "Add Sonarr application sync"
         dry "Add Radarr application sync"
@@ -397,7 +451,7 @@ configure_bazarr() {
 
     if ! wait_for_service "Bazarr" "${BASE}/api/system/status"; then return; fi
 
-    if $DRY_RUN; then
+    if [[ "$DRY_RUN" == true ]]; then
         dry "Connect Bazarr to Sonarr (gluetun:8989)"
         dry "Connect Bazarr to Radarr (gluetun:7878)"
         dry "Enable subtitle sync (ffsubsync) with thresholds"
@@ -426,7 +480,7 @@ configure_bazarr() {
     [[ "$sonarr_section" == "gluetun 8989" ]] && sonarr_connected=true
     [[ "$radarr_section" == "gluetun 7878" ]] && radarr_connected=true
 
-    if $sonarr_connected && $radarr_connected; then
+    if [[ "$sonarr_connected" == true && "$radarr_connected" == true ]]; then
         skip "Bazarr: Sonarr/Radarr connections"
     else
         local conn_payload="{"
@@ -487,7 +541,7 @@ sys.exit(0 if 'remove_tags' in mods and 'OCR_fixes' in mods else 1)"; then
     fi
 
     # Restart if any changes were made
-    if $needs_restart; then
+    if [[ "$needs_restart" == true ]]; then
         info "Restarting Bazarr to apply changes..."
         docker restart bazarr >/dev/null 2>&1
     fi
@@ -500,7 +554,7 @@ sys.exit(0 if 'remove_tags' in mods and 'OCR_fixes' in mods else 1)"; then
 configure_pihole() {
     log "Configuring Pi-hole..."
 
-    if $DRY_RUN; then
+    if [[ "$DRY_RUN" == true ]]; then
         dry "Set Pi-hole upstream DNS to dnscrypt-proxy (172.20.0.6#5053)"
         return
     fi
@@ -527,43 +581,75 @@ configure_pihole() {
 # Run all
 # ============================================
 
-configure_qbittorrent
-echo ""
-configure_arr_service "Sonarr" 8989 "$SONARR_API_KEY" "/data/media/tv" "tv" \
-    "renameEpisodes" "$SONARR_METADATA_FIELDS" "$SONARR_NAMING_PAYLOAD"
-echo ""
-configure_arr_service "Radarr" 7878 "$RADARR_API_KEY" "/data/media/movies" "movies" \
-    "renameMovies" "$RADARR_METADATA_FIELDS" "$RADARR_NAMING_PAYLOAD"
-echo ""
-configure_prowlarr
-echo ""
-configure_bazarr
-echo ""
-configure_pihole
+run_all() {
+    configure_qbittorrent
+    echo ""
+    configure_arr_service "Sonarr" 8989 "$SONARR_API_KEY" "/data/media/tv" "tv" \
+        "renameEpisodes" "$SONARR_METADATA_FIELDS" "$SONARR_NAMING_PAYLOAD"
+    echo ""
+    configure_arr_service "Radarr" 7878 "$RADARR_API_KEY" "/data/media/movies" "movies" \
+        "renameMovies" "$RADARR_METADATA_FIELDS" "$RADARR_NAMING_PAYLOAD"
+    echo ""
+    configure_prowlarr
+    echo ""
+    configure_bazarr
+    echo ""
+    configure_pihole
+}
 
 # ============================================
 # Summary
 # ============================================
 
-echo ""
-echo "=========================================="
-echo "Summary: ${CONFIGURED} configured, ${SKIPPED} skipped, ${FAILED} failed"
-echo "=========================================="
-
-if [[ $FAILED -gt 0 ]]; then
+# Returns non-zero when anything failed, so `FAILED` is not merely decorative.
+# It used to be printed and then discarded: the script exited 0 whether it had
+# configured everything or nothing, which makes it unusable from anything that
+# checks a status - including the deploy pipeline that is the obvious caller.
+print_summary() {
     echo ""
-    echo "Some steps failed. Re-run to retry, or configure manually via web UI."
-fi
+    echo "=========================================="
+    echo "Summary: ${CONFIGURED} configured, ${SKIPPED} skipped, ${FAILED} failed"
+    echo "=========================================="
 
-echo ""
-echo "Remaining manual steps:"
-echo "  1. Jellyfin: initial wizard, libraries, hardware transcoding"
-echo "  2. qBittorrent: change default password (Tools → Options → Web UI)"
-echo "  3. Prowlarr: add indexers (torrent/Usenet)"
-echo "  4. Seerr: initial setup + Jellyfin login"
-if $SABNZBD_RUNNING; then
-    echo "  5. SABnzbd: usenet provider credentials"
-fi
+    if (( FAILED > 0 )); then
+        echo ""
+        echo "Some steps failed. Re-run to retry, or configure manually via web UI."
+    fi
 
-# Cleanup
-rm -f "$QBIT_COOKIE"
+    echo ""
+    echo "Remaining manual steps:"
+    echo "  1. Jellyfin: initial wizard, libraries, hardware transcoding"
+    echo "  2. qBittorrent: change default password (Tools -> Options -> Web UI)"
+    echo "  3. Prowlarr: add indexers (torrent/Usenet)"
+    echo "  4. Seerr: initial setup + Jellyfin login"
+    if [[ "$SABNZBD_RUNNING" == true ]]; then
+        echo "  5. SABnzbd: usenet provider credentials"
+    fi
+
+    (( FAILED == 0 ))
+}
+
+main() {
+    parse_args "$@" || return 1
+
+    echo "=== Arr-Stack App Configuration ==="
+    echo ""
+
+    check_prerequisites || return 1
+
+    # A private, unpredictable path. This was the fixed /tmp/qbit_configure_cookie.txt:
+    # a world-writable directory, one session cookie, no trap - so two concurrent
+    # runs clobbered each other's session and any early return left the cookie on
+    # disk. The trap is what makes "we always clean up" true rather than intended.
+    QBIT_COOKIE=$(mktemp -t qbit_configure_cookie.XXXXXX)
+    trap '[[ -n "$QBIT_COOKIE" ]] && rm -f "$QBIT_COOKIE"' EXIT
+
+    discover_api_keys
+    run_all
+    print_summary
+}
+
+# Sourced by tests/configure-apps.bats; executed on the NAS.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

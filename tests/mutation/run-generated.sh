@@ -85,6 +85,7 @@ TARGETS=(
   "scripts/check-vpn.sh:tests/check-vpn.bats:^check-vpn: "
   "scripts/boot-compose-up.sh:tests/boot-compose-up.bats:^boot-compose-up: "
   "scripts/check-network.sh:tests/check-network.bats:^check-network: "
+  "scripts/configure-apps.sh:tests/configure-apps.bats:^configure-apps: "
   # The four duc files share one oracle because they are one protocol: the cgi
   # produces a request marker, the poller consumes it, scan.sh holds the lock
   # both of them branch on. A mutant in any of them is scored against all of it.

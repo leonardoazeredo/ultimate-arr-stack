@@ -183,7 +183,6 @@ old "14 tests" claim went stale.
 - `duc-service/app/log.cgi`
 - `scripts/arr-backup.sh`
 - `scripts/backup-prune.sh`
-- `scripts/configure-apps.sh`
 - `scripts/detect-credential-drift.sh`
 - `scripts/detect-vpn-zombies.sh`
 - `scripts/fix-radarr-paths.sh`
