@@ -80,6 +80,7 @@ TARGETS=(
   "scripts/lib/common.sh:tests/lib-common.bats:^common: "
   "scripts/lib/check-domains.sh:tests/lib-domains.bats:^domains: "
   "scripts/restart-stack.sh:tests/restart-stack.bats:^restart-stack: "
+  "setup-hooks.sh:tests/setup-hooks.bats:^setup-hooks: "
 )
 
 FILTER=""

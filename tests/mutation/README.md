@@ -167,7 +167,9 @@ which is to say every one a generated mutant could not be scored against.
 Some of them do have bats tests and are simply not swept yet; others have no
 test at all. The list does not distinguish the two, because only the first is
 mechanically knowable — "has a test" has no honest definition here, as
-`setup-hooks.sh` demonstrated by being *named* by a bats file that never ran it.
+`setup-hooks.sh` demonstrated, for as long as it was *named* by a bats file that
+only asserted the hook symlinks already existed and never ran the script that
+creates them.
 
 There is no count written down, and the list is not maintained by hand. It is
 derived from field 1 of `TARGETS` at run time by
@@ -198,7 +200,6 @@ old "14 tests" claim went stale.
 - `scripts/pre-commit`
 - `scripts/queue-cleanup.sh`
 - `scripts/sync-nas.sh`
-- `setup-hooks.sh`
 - `terraform/apply.sh`
 <!-- /NO-SWEEP-ORACLE -->
 

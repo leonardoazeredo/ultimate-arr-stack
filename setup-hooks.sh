@@ -28,9 +28,16 @@ HOOKS_DIR="$GIT_COMMON_DIR/hooks"
 # Create hooks directory if needed
 mkdir -p "$HOOKS_DIR"
 
-# Remove existing hooks if present
+# Remove existing hooks if present.
+#
+# -e OR -L. `-e` follows the symlink, so a hook pointing at a checkout that has
+# since been moved or renamed reads as "not present" -- and then `ln -s` fails
+# with "File exists" and `set -e` kills the script. That is precisely the
+# situation in which someone re-runs this: the hooks stopped working because the
+# path they point at is gone. The one repair that is supposed to fix it was the
+# one thing that could not run.
 for hook in pre-commit post-merge; do
-    if [[ -e "$HOOKS_DIR/$hook" ]]; then
+    if [[ -e "$HOOKS_DIR/$hook" || -L "$HOOKS_DIR/$hook" ]]; then
         rm "$HOOKS_DIR/$hook"
         echo "  Removed existing $hook hook"
     fi
