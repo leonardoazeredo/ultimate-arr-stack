@@ -197,7 +197,6 @@ old "14 tests" claim went stale.
 - `scripts/post-merge`
 - `scripts/pre-commit`
 - `scripts/queue-cleanup.sh`
-- `scripts/restart-stack.sh`
 - `scripts/sync-nas.sh`
 - `setup-hooks.sh`
 - `terraform/apply.sh`
