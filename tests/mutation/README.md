@@ -256,6 +256,42 @@ proved able to emit KILLED, SURVIVED, and all three ERRORs against a fixture
 built for the purpose. A mutation runner that cannot report SURVIVED is worse
 than none — it turns every vacuous test in the suite into a certificate.
 
+## The oracle runs on a clock
+
+Every mutated oracle run is bounded. The budget is **ten times the unmutated
+control run, with a 60-second floor**, computed per mutation rather than
+hardcoded, so a slow oracle gets a proportionally longer rope and a fast one is
+never strangled by a fixed number that was right on somebody else's machine.
+
+This was not a precaution. A generative sweep of
+`scripts/lib/configure-helpers.sh` on 2026-09-01 ran past a 90-minute external
+cap having scored **3 of its 31 mutants**; there was no per-mutant bound at all,
+so one mutant that made the oracle loop stalled the whole sweep, and only a
+`timeout` outside the tool ended it. For a tool whose entire job is injecting
+pathological code, "this mutant hangs" is the expected case, not an edge one.
+
+A run that hits the budget comes back as status 124 and is scored a **kill** —
+the oracle demonstrably did not pass — but it is tallied and printed separately
+(`of those, N hit the oracle time budget`). A hang and a clean red are the same
+exit status once the bound fires, and folding them together would hide the only
+thing that explains a sweep's wall-clock moving.
+
+Two implementation details are load-bearing and both are asserted:
+
+- **`timeout` wraps `tests/run-tests.sh`, not a shell function.** `timeout`
+  execs its argument, so wrapping a function does nothing at all (recorded trap,
+  `docs/TEST-HARDENING-LOG.md` §8).
+- **The whole process group has to die.** `run-tests.sh` forks bats, and bats
+  forks a subshell per test, so signalling only the direct child would leave the
+  hung grandchild holding the command substitution's stdout pipe — the bound
+  would report 124 and still wait out the full hang. GNU `timeout` puts its
+  child in a new process group and signals the group, which is why this works;
+  `tests/mutation-framework.bats` drives it against a runner that *forks* its
+  hang, for exactly that reason, and asserts on elapsed time and not just status.
+
+`ORACLE_BUDGET_FLOOR` exists only so that the timeout-scoring branch can be
+watched firing in seconds instead of a minute. Nothing outside `tests/` sets it.
+
 ## Adding a mutation
 
 A corpus file is an ordinary shell script calling `mutation`. There is no

@@ -43,6 +43,40 @@ FXB
 
 write_corpus() { cat > "$FX/corpus.sh"; }
 
+# A repo that is not this one, laid out just enough for run-generated.sh to run
+# inside it: the runner and its library, a stub test runner, and an empty file
+# at every path TARGETS names.
+#
+# Every test of the dirty-tree guard needs a dirty tree, and dirtying a tracked
+# file HERE means restoring it afterwards -- a restore that any interrupt skips.
+# That is not hypothetical: the timeout added on 2026-09-01 killed one of these
+# tests mid-run twice, and both times it left its dirt appended to the real
+# scripts/lib/check-secrets.sh. A copy has no restore to skip, and the runner
+# derives its own ROOT from where its library sits, so everything it writes --
+# ledger included -- lands inside the throwaway.
+make_throwaway_repo() {
+    THROWAWAY="$FX/r"
+    mkdir -p "$THROWAWAY/tests/mutation"
+    cp "$REPO_ROOT/tests/mutation/run-generated.sh" \
+       "$REPO_ROOT/tests/mutation/lib-mutate.sh" "$THROWAWAY/tests/mutation/"
+    printf '#!/bin/bash\nexit 0\n' > "$THROWAWAY/tests/run-tests.sh"
+    chmod +x "$THROWAWAY/tests/run-tests.sh" \
+             "$THROWAWAY/tests/mutation/run-generated.sh"
+    # Every TARGETS path must exist and be committed: `git status --porcelain --`
+    # errors out on a pathspec matching nothing, which would empty DIRTY and let
+    # a mutant pass for the wrong reason.
+    local t
+    for t in $(sed -n '/^TARGETS=(/,/^)/p' "$REPO_ROOT/tests/mutation/run-generated.sh" \
+               | grep -oE '"[^":]+\.sh:' | tr -d '":'); do
+        mkdir -p "$THROWAWAY/$(dirname "$t")"
+        printf '#!/bin/bash\n:\n' > "$THROWAWAY/$t"
+    done
+    git -C "$THROWAWAY" init -q .
+    git -C "$THROWAWAY" config user.email t@example.com
+    git -C "$THROWAWAY" config user.name t
+    git -C "$THROWAWAY" add -A && git -C "$THROWAWAY" commit -qm seed
+}
+
 @test "reports KILLED when the test detects the mutation" {
     write_corpus <<CORPUS
 mutation demo-killed \
@@ -70,30 +104,12 @@ CORPUS
     # interrupt window that already cost this repo a corrupted ledger. A copy
     # has no restore to skip.
     command -v git >/dev/null 2>&1 || skip "no host git binary"
-    local r="$FX/r"
-    mkdir -p "$r/tests/mutation" "$r/scripts/lib"
-    cp "$REPO_ROOT/tests/mutation/run-generated.sh" \
-       "$REPO_ROOT/tests/mutation/lib-mutate.sh" "$r/tests/mutation/"
-    printf '#!/bin/bash\nexit 0\n' > "$r/tests/run-tests.sh"
-    chmod +x "$r/tests/run-tests.sh" "$r/tests/mutation/run-generated.sh"
-    # Every TARGETS path must exist and be committed: `git status --porcelain --`
-    # errors out on a pathspec matching nothing, which would empty DIRTY and let
-    # the mutant pass for the wrong reason.
-    local t
-    for t in $(sed -n '/^TARGETS=(/,/^)/p' "$REPO_ROOT/tests/mutation/run-generated.sh" \
-               | grep -oE '"[^":]+\.sh:' | tr -d '":'); do
-        mkdir -p "$r/$(dirname "$t")"; printf '#!/bin/bash\n:\n' > "$r/$t"
-    done
-    git -C "$r" init -q .
-    git -C "$r" config user.email t@example.com
-    git -C "$r" config user.name t
-    git -C "$r" add -A && git -C "$r" commit -qm seed
+    make_throwaway_repo
 
     # One target dirty; the filter selects none of them.
-    echo '# edited' >> "$r/scripts/lib/check-secrets.sh"
+    echo '# edited' >> "$THROWAWAY/scripts/lib/check-secrets.sh"
 
-    MUTATION_LEDGER="$FX/led.tsv" run bash "$r/tests/mutation/run-generated.sh" \
-        -k zzz-no-such-target
+    run bash "$THROWAWAY/tests/mutation/run-generated.sh" -k zzz-no-such-target
     # A filter matching nothing has nothing to protect, so the guard must stay
     # quiet about a file the run had already decided to ignore.
     [[ "$output" != *"refusing to start"* ]] || { echo "$output"; return 1; }
@@ -386,21 +402,21 @@ CORPUS
     # It overwrites tracked files in place. On a dirty tree a failed restore is
     # indistinguishable from the user's own uncommitted work, and the documented
     # recovery -- `git checkout --` -- would destroy that work.
+    #
+    # Against a throwaway repo, not this one. In the passing state the runner
+    # refuses and touches nothing -- but the corpus entry that proves the guard
+    # can fail (gen-dirty-tree-check-removed) deletes the refusal, and the
+    # runner then sweeps for real: it appended three unreviewed rows to the
+    # tracked survivors.tsv on 2026-09-01, and later, once the oracle had a time
+    # budget, was killed mid-run and left its dirt in the real
+    # scripts/lib/check-secrets.sh. A test has to be safe in the state its own
+    # mutation puts it in, not just the state it normally passes in.
+    command -v git >/dev/null 2>&1 || skip "no host git binary"
+    make_throwaway_repo
     local target="scripts/lib/check-secrets.sh"
-    cp "$REPO_ROOT/$target" "$FX/pristine"
-    printf '\n# dirt introduced by %s\n' "$BATS_TEST_NAME" >> "$REPO_ROOT/$target"
+    printf '\n# dirt introduced by %s\n' "$BATS_TEST_NAME" >> "$THROWAWAY/$target"
 
-    # MUTATION_LEDGER is not decoration here. This test asserts a REFUSAL, so
-    # in its passing state the runner never reaches the ledger -- but the corpus
-    # entry that proves the guard can fail (gen-dirty-tree-check-removed) deletes
-    # the refusal, and the runner then performs a real sweep and appends real
-    # rows to the repo's tracked survivors.tsv. Observed 2026-09-01: three
-    # unreviewed check-secrets.sh rows appeared in a working tree that had run
-    # nothing but the corpus. A test only needs the seam in the state its own
-    # mutation puts it in.
-    run env MUTATION_LEDGER="$FX/ledger.tsv" \
-        "$REPO_ROOT/tests/mutation/run-generated.sh" "$target"
-    cp "$FX/pristine" "$REPO_ROOT/$target"
+    run bash "$THROWAWAY/tests/mutation/run-generated.sh" "$target"
 
     [ "$status" -ne 0 ] || {
         echo "the runner started against a dirty target. A failed restore would"
@@ -563,4 +579,146 @@ EOF
     printf '%s\n' 'mutation bad2 \' '  --test "runs $(id -u) at source time" \' > "$dir/bad2.sh"
     run scan_corpus_prose "$dir"
     assert_output --partial "bad2.sh"
+}
+
+# --- The oracle's time budget ----------------------------------------------
+#
+# Added 2026-09-01, after a generative sweep of scripts/lib/configure-helpers.sh
+# ran past a 90-minute external cap having scored 3 of its 31 mutants. There was
+# no per-mutant bound at all: one mutant that makes the oracle loop stalls the
+# whole sweep, and for a tool whose entire job is injecting pathological code
+# that is the expected case rather than an edge one.
+
+@test "oracle_budget scales with the control run and floors at a minute" {
+    run bash -c "
+        source '$REPO_ROOT/tests/mutation/lib-mutate.sh'
+        echo \"thirty=\$(oracle_budget 30)\"
+        echo \"one=\$(oracle_budget 1)\"
+        echo \"zero=\$(oracle_budget 0)\"
+    "
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"thirty=300"* ]] || {
+        echo "the budget is not derived from the control run:"; echo "$output"; return 1
+    }
+    # The floor is what stops a sub-second oracle being handed a sub-second
+    # budget: on a loaded machine that would score every mutant as a timeout,
+    # which reads as a perfect kill rate and measures nothing.
+    [[ "$output" == *"one=60"* && "$output" == *"zero=60"* ]] || {
+        echo "the floor did not apply:"; echo "$output"; return 1
+    }
+}
+
+@test "oracle_budget refuses a control time it cannot trust" {
+    # (( )) does not merely coerce a non-number to zero -- it EVALUATES it, so
+    # an unvalidated argument is an injection surface as well as a wrong-answer
+    # risk (bash expands command substitution inside an arithmetic subscript).
+    # The control time comes from $SECONDS today, but the validation is what
+    # keeps that a local fact rather than a load-bearing one.
+    run bash -c "
+        source '$REPO_ROOT/tests/mutation/lib-mutate.sh'
+        echo \"expr=\$(oracle_budget '59 + 59')\"
+        echo \"word=\$(oracle_budget abc)\"
+        oracle_budget 'a[\$(touch $FX/evaluated)]' >/dev/null
+    "
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"expr=60"* ]] || {
+        echo "an expression was evaluated as if it were a measured duration:"
+        echo "$output"; return 1
+    }
+    [[ "$output" == *"word=60"* ]] || { echo "$output"; return 1; }
+    [ ! -e "$FX/evaluated" ] || {
+        echo "the argument reached an arithmetic context and ran a command from"
+        echo "inside an array subscript"; return 1
+    }
+}
+
+@test "run_tests bounds the oracle at the budget rather than waiting on it" {
+    mkdir -p "$FX/fakeroot/tests"
+    # The fake runner FORKS its hang rather than exec'ing it, because that is
+    # the shape of the real one: tests/run-tests.sh runs bats as a child, and
+    # bats runs each test in a further subshell. So the bound is only real if
+    # the whole process group dies -- if only the direct child were signalled,
+    # the orphaned grandchild would keep the command substitution's stdout pipe
+    # open and run_tests would block for the full 30s while reporting 124.
+    cat > "$FX/fakeroot/tests/run-tests.sh" <<'RUNNER'
+#!/bin/bash
+echo "1..1"
+bash -c 'sleep 30'
+RUNNER
+    chmod +x "$FX/fakeroot/tests/run-tests.sh"
+    run bash -c "
+        source '$REPO_ROOT/tests/mutation/lib-mutate.sh'
+        ROOT='$FX/fakeroot'
+        start=\$SECONDS
+        res=\$(run_tests /dev/null '^x' 1)
+        echo \"res=[\$res] elapsed=\$(( SECONDS - start ))\"
+    "
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"res=[124 "* ]] || {
+        echo "an oracle that never finished did not come back as a timeout:"
+        echo "$output"; return 1
+    }
+    # The status alone is not proof: `timeout` reporting 124 while the caller
+    # still waits out the full run is exactly the failure this asserts against.
+    local elapsed="${output##*elapsed=}"
+    [ "$elapsed" -le 10 ] || {
+        echo "it reported 124 after waiting ${elapsed}s, so nothing was actually bounded"
+        echo "$output"; return 1
+    }
+}
+
+@test "run_tests leaves the oracle unbounded when no budget is given" {
+    # The other half. A bound that fires unconditionally would pass the test
+    # above while scoring every slow-but-passing oracle as a kill.
+    mkdir -p "$FX/fakeroot/tests"
+    cat > "$FX/fakeroot/tests/run-tests.sh" <<'RUNNER'
+#!/bin/bash
+echo "1..1"
+sleep 2
+echo "ok 1 slow but fine"
+RUNNER
+    chmod +x "$FX/fakeroot/tests/run-tests.sh"
+    run bash -c "
+        source '$REPO_ROOT/tests/mutation/lib-mutate.sh'
+        ROOT='$FX/fakeroot'
+        echo \"res=[\$(run_tests /dev/null '^x')]\"
+    "
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"res=[0 1 0]"* ]] || {
+        echo "an oracle that took longer than nothing was not allowed to finish:"
+        echo "$output"; return 1
+    }
+}
+
+@test "a mutant that hangs the oracle is scored a kill and named as a timeout" {
+    # The end of the same story: run_tests reports 124, and the runner has to
+    # decide what that means. It is a kill -- the oracle demonstrably did not
+    # pass -- but it is not the same event as a clean red, and folding the two
+    # together would hide the only thing that explains a sweep's wall-clock.
+    #
+    # ORACLE_BUDGET_FLOOR is why this takes seconds instead of a minute; it
+    # exists for exactly this assertion.
+    write_corpus <<CORPUS
+mutation demo-hangs \
+  --file "$FX/target.sh" --bats "$FX/fixture.bats" \
+  --test "asserts the guarded output" --why "x" \
+  --apply 'sed -i "1a sleep 300" "\$F"'
+CORPUS
+    run env ORACLE_BUDGET_FLOOR=2 "$RUNNER" "$FX/corpus.sh"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"KILLED demo-hangs"* ]] || {
+        echo "an oracle that never finished was not scored as a kill:"
+        echo "$output"; return 1
+    }
+    [[ "$output" == *"hit the oracle time budget"* ]] || {
+        echo "a timeout was tallied as an ordinary failure, so a sweep that got"
+        echo "slower would say nothing about why:"; echo "$output"; return 1
+    }
+    # And the tree still has to come back. A restore that only runs on the
+    # paths the author was thinking about is the failure this whole file exists
+    # to catch.
+    grep -q 'sleep 300' "$FX/target.sh" && {
+        echo "the mutated target was left behind after a timeout"; return 1
+    }
+    return 0
 }

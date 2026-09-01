@@ -180,7 +180,7 @@ describe() {
     printf '%s\t%s\n' "$line" "$text"
 }
 
-TOTAL=0; KILLED=0; SURVIVED=0; ERRORED=0; SKIPPED=0
+TOTAL=0; KILLED=0; SURVIVED=0; ERRORED=0; SKIPPED=0; TIMEDOUT=0
 declare -a NEW_SURVIVORS=()
 # Targets this run actually swept to completion. The ledger is rewritten only
 # for these; rows belonging to any other target are carried through untouched.
@@ -204,7 +204,9 @@ for target in "${SELECTED[@]}"; do
 
     # Control, once per target rather than once per mutant. A suite that is
     # already red would score every mutant KILLED and report a perfect sweep.
+    control_start=$SECONDS
     res=$(run_tests "$ROOT/$batsfile" "$testre"); read -r st count _skipped <<<"$res"
+    budget=$(oracle_budget $(( SECONDS - control_start )))
     if [[ "$count" -eq 0 ]]; then
         echo "   ERROR: -f '$testre' matched NO tests. bats exits 0 having run"
         echo "          nothing, which reads exactly like a pass. Fix the regex."
@@ -252,14 +254,21 @@ for target in "${SELECTED[@]}"; do
             ERRORED=$((ERRORED + 1)); restore_current || exit 3; continue
         fi
 
-        res=$(run_tests "$ROOT/$batsfile" "$testre"); read -r st _count _skipped <<<"$res"
+        res=$(run_tests "$ROOT/$batsfile" "$testre" "$budget"); read -r st _count _skipped <<<"$res"
 
         # Restore before classifying. Stop the whole run if it failed: mutating
         # the next target on top of a tree we could not put back turns one
         # recoverable problem into an unrecoverable one.
         restore_current || exit 3
 
-        if [[ "$st" -ne 0 ]]; then
+        if [[ "$st" -eq 124 ]]; then
+            # Counted as a kill -- the oracle demonstrably did not pass -- but
+            # named, because a hang and a clean red are the same status here and
+            # very different problems. The tally reports them separately so a
+            # sweep whose wall-clock quietly went up says why.
+            KILLED=$((KILLED + 1)); TIMEDOUT=$((TIMEDOUT + 1))
+            echo "   KILLED (oracle hit the ${budget}s budget)  $desc"
+        elif [[ "$st" -ne 0 ]]; then
             KILLED=$((KILLED + 1))
         else
             SURVIVED=$((SURVIVED + 1))
@@ -328,6 +337,12 @@ cp "$WORK/ledger.tsv" "$LEDGER"
 
 echo
 echo "killed $KILLED / $TOTAL   survived $SURVIVED   errored $ERRORED   skipped $SKIPPED"
+if [[ "$TIMEDOUT" -gt 0 ]]; then
+    # Not folded into the line above. These are counted as kills, but they are
+    # the reason a sweep's wall-clock moves, and a number nobody prints is a
+    # number nobody notices.
+    echo "  of those, $TIMEDOUT hit the oracle time budget rather than failing outright"
+fi
 if [[ "$SURVIVED" -gt 0 ]]; then
     echo "ledger: $LEDGER  (survivors are findings to triage, not failures)"
 fi

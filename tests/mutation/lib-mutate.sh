@@ -90,10 +90,48 @@ trap 'echo; echo "interrupted - restoring" >&2; exit 130' INT TERM
 
 # Run bats and report both the exit status and how many tests actually ran.
 # The count is what makes a filter typo detectable instead of silently green.
-# Echoes: "<status> <count>"
+# Echoes: "<status> <count> <skipped>"
+# A per-run wall-clock budget for the oracle, in seconds, from the time the
+# UNMUTATED oracle took. Ten times that, with a 60-second floor.
+#
+# Generous on purpose. A mutant that merely makes the code slower must not be
+# misread as a hang, and the floor stops a sub-second oracle being handed a
+# sub-second budget on a loaded machine.
+# The floor is overridable only so that the runners' own timeout-scoring branch
+# can be watched firing in under a minute. Nothing outside tests/ sets it, and a
+# non-numeric value falls back rather than reaching an arithmetic context.
+oracle_budget() {
+    local control="${1:-0}" budget floor="${ORACLE_BUDGET_FLOOR:-60}"
+    [[ "$control" =~ ^[0-9]+$ ]] || control=0
+    [[ "$floor" =~ ^[0-9]+$ ]] || floor=60
+    budget=$(( control * 10 ))
+    if (( budget < floor )); then
+        budget=$floor
+    fi
+    echo "$budget"
+}
+
+# $3, when given and non-zero, bounds the run at that many seconds.
+#
+# A mutation tool exists to inject pathological code, so "this mutant loops
+# forever" is the expected case rather than an edge one -- and an oracle with no
+# bound turns one bad mutant into an unbounded sweep. Observed 2026-09-01: a
+# sweep of scripts/lib/configure-helpers.sh ran past a 90-minute cap having
+# scored 3 of its 31 mutants, and only an external `timeout` ended it.
+#
+# `timeout` execs its argument, so this wraps the runner script itself; wrapping
+# a shell function would do nothing (recorded trap, TEST-HARDENING-LOG section 8).
+# A run that hits the budget comes back as status 124, which the caller scores as
+# a kill -- the suite demonstrably did not pass -- but reports distinctly,
+# because a hang and a clean red are the same number and very different problems.
 run_tests() {
-    local batsfile="$1" regex="$2" out
-    out="$("$ROOT/tests/run-tests.sh" -f "$regex" "$batsfile" 2>&1)"
+    local batsfile="$1" regex="$2" budget="${3:-0}" out
+    [[ "$budget" =~ ^[0-9]+$ ]] || budget=0
+    if (( budget > 0 )); then
+        out="$(timeout "$budget" "$ROOT/tests/run-tests.sh" -f "$regex" "$batsfile" 2>&1)"
+    else
+        out="$("$ROOT/tests/run-tests.sh" -f "$regex" "$batsfile" 2>&1)"
+    fi
     local st=$?
     local plan count
     plan="$(grep -m1 -E '^1\.\.[0-9]+$' <<<"$out" || true)"

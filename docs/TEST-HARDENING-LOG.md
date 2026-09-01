@@ -438,6 +438,25 @@ write-up in `tests/mutation/README.md`; these are the one-line forms.
 
 **Tests**
 
+- ▸ **A tool built to inject pathological code needs a clock on its own oracle.** A
+  generative sweep of `scripts/lib/configure-helpers.sh` ran past a 90-minute external
+  cap having scored **3 of its 31 mutants**: there was no per-mutant bound, so one
+  mutant that made the oracle loop stalled the entire sweep. "This mutant hangs" is the
+  expected case for a mutation runner, not an edge one. The budget is now ten times the
+  unmutated control run with a 60-second floor — derived, not hardcoded, so a slow
+  oracle is not strangled by a number that was right on another machine.
+- **A bound that signals only the direct child is not a bound.** `tests/run-tests.sh`
+  forks bats, and bats forks a subshell per test, so killing the direct child would
+  leave the hung grandchild holding the command substitution's stdout pipe — the caller
+  reports 124 and then waits out the full hang anyway. GNU `timeout` puts its child in
+  a new process group and signals the group, which is what makes it work. The test that
+  proves it deliberately *forks* its hang rather than `exec`ing it, and asserts on
+  elapsed time as well as status; an `exec`ing fixture would pass against a bound that
+  does not really bound anything.
+- **A timeout and a clean red are the same exit status, and very different problems.**
+  Both mean the oracle did not pass, so both are kills — but tallying them together
+  hides the only thing that explains a sweep's wall-clock moving. They get one counter
+  each and a separate line in the summary.
 - ▸ **An assertion can be satisfied by its own fixture.** Never assert on a string that
   also appears in the test's own data — especially not the fixture's name.
 - **`$TMPDIR` is not `/tmp` under bats**, and `mktemp -d` honours it.
