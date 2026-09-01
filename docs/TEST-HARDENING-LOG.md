@@ -203,6 +203,35 @@ scripts that `scripts/pre-commit` sources (`check-secrets.sh`, `check-env-vars.s
 
 ---
 
+### 5.4 The `scripts/lib/*` coverage pass — a separate, later branch
+
+Not part of `86d5fcf`. Recorded here because it closes §7's largest open item and
+because every defect below was found by *writing the test*, not by reading the code —
+the same result §4 reports for the mutation framework, from the other direction.
+
+Branch `feat/test-coverage-safety-harness`. Eleven new bats files, one per check,
+each with a `TARGETS` entry and named corpus entries proving the tests can fail.
+
+| Where | What was wrong |
+| --- | --- |
+| `check-image-versions.sh` | `stat -f %m \|\| stat -c %Y` — on GNU `-f` is `--file-system`, a valid flag, so the arithmetic that consumed it threw a syntax error that aborted `_cache_get`. The cache was not expiring early; it was **never read**. Every run re-queried all 31 registries and wrote an entry nothing would look at again. Measured: 11 s → 1 s. |
+| `scripts/pre-commit` + 2 libs | `((ERRORS++))` under `set -e`. The hook died at its *first* finding, so the message naming the leak, the summary and checks 6–11 were all unreachable. Status 1 was right for the wrong reason. |
+| `configure-helpers.sh` | `return "$http_code"`. 404 → 148, 500 → 244 — and `000`, curl's sentinel for *no response at all*, → **0**. Every call site is `if api_post …; then ok "added X"`, so a service that was simply not up was reported as `✓ added`. |
+| `check-doc-links.sh` | `return $errors` truncates to one byte (0 at exactly 256), and the path was interpolated into a `python3 -c` string. |
+| `check-yaml-syntax.sh` | The staged-file list was word-split on spaces; same `python3 -c` interpolation; same count-as-status. |
+| `scripts/check-dns-duplicates.sh` | Deleted. A divergent second implementation of the lib check — different regex, opposite blocking semantics, invoked by nothing. |
+| `check-env-backup.sh` | The remediation told the user to recover with `scp`, which does not work against this NAS's BusyBox sftp-server — two lines below the function's own working `ssh … cat`. |
+| `check-dns-duplicates.sh` | `grep -qw` — a hyphen is a word boundary, so `sonarr` matched inside `sonarr-4k` and two names pointing at different hosts were reported as a conflict. |
+| `common.sh` | Five: `echo -e` over paths; two caches gated by `if $flag` (executing the value); `cut -d= -f2` truncating at a second `=`; the NAS host interpolated into a `bash -c` string; `$NAS_SSH_PASS` unguarded under `set -u`. |
+| `check-domains.sh` | `mktemp -d` unchecked at both sites — on failure all fourteen `.lan` names were reported as not resolving, a DNS verdict manufactured from a local filesystem error. |
+
+Four behaviours were **pinned rather than fixed**, each with the reason written into
+the test: a failed repo-root lookup is cached like any other answer; the first `.local`
+anywhere in `config.local.md` wins; an `.env` that exists but lacks a key does not fall
+through to `.env.nas.backup`; and the 20+ tracked SVGs are classified binary and so
+never scanned.
+
+
 ## 6. The merge gate, and the two findings rejected
 
 Three gates were run across the branch. The final full three-lens gate returned
@@ -240,11 +269,18 @@ has touched.
   (`tests/credential-propagation.bats`, both `exit 127`).
 - **DONE 2026-09-01 — generative mutation testing installed.** universalmutator,
   containerised and pinned, wired to the bats suite as `run-generated.sh`. See §4.1.
-- **Ten `scripts/lib/` files have no bats test at all** — `common.sh` plus the nine
-  `check-*.sh` listed in `tests/mutation/README.md`. They are sourced by
-  `scripts/pre-commit`, so a defect in any of them silently weakens every commit's
-  checks. `common.sh` was measured: 78 mutants, 78 survived, 0 killed. Writing those
-  tests is separate work and is the largest remaining gap in this suite.
+- **DONE 2026-09-01 — every `scripts/lib/` file now has a bats file and a `TARGETS`
+  entry.** `common.sh` plus the nine `check-*.sh` that had no test at all, closed on
+  branch `feat/test-coverage-safety-harness`. The measurement that made this the
+  largest gap in the suite still stands as the reason: `common.sh` swept on the theory
+  that being sourced by tested files made it covered produced 78 mutants and survived
+  all 78. Nine real defects were found while writing the tests, listed in §5.4.
+  The count is deliberately not restated here — `tests/mutation/README.md`'s no-sweep
+  list is derived at run time and asserted by `tests/shellcheck.bats`, so it cannot go
+  stale the way this bullet just did.
+- **Operational scripts (`scripts/*.sh`, `duc-service/app/*`) still have no tests.**
+  That is the remaining gap, and it is the one that needs the PATH stub harness in
+  `tests/helpers/stubs.bash`, because those scripts restart containers for a living.
 
 ---
 
@@ -297,6 +333,40 @@ write-up in `tests/mutation/README.md`; these are the one-line forms.
   function, so the failure surfaces as "the cache is never read", not as a wrong number.
   Try GNU first (`-c` is simply unrecognised on BSD) *and* check the result is an
   integer, so the ordering argument is not the only thing holding it up.
+
+- **`echo -e` on a path interprets escapes *in the path*.** `get_files_to_scan` combined
+  two file lists with `echo -e`, so the two characters `\` and `t` in a filename became a
+  real tab and every caller scanned a path that does not exist while the real file went
+  unscanned. Git already quotes such a name on the way out, so the mangling happens to
+  git's quoted form and produces a third string that matches neither. A filename is data:
+  `printf '%s\n'`.
+- **`if $flag; then` runs the flag's *value* as a command** — unquoted, so it word-splits
+  too. `common.sh` gated two caches this way. Nothing was exploitable, because nothing
+  untrusted reached those globals; the point is that the check is a command-execution
+  path bought in exchange for nothing over `[[ "$flag" == true ]]`.
+- **A value interpolated into a `bash -c` string is code, not an argument.**
+  `is_ssh_available` built `bash -c "exec 3<>/dev/tcp/$nas_host/22"`, so bash parsed the
+  host name before `/dev/tcp` ever saw it. What kept it safe was a `grep -oE` in
+  `load_nas_config` constraining the host to `[a-zA-Z0-9_-]+\.local` — a guarantee living
+  in a different function, invisible at the call site. Pass it as `$1`. Same class as
+  interpolating a path into `python3 -c`.
+- **`cut -d= -f2` truncates a value at its second `=`.** Four sites in `common.sh` parsed
+  `.env` lines that way; base64 padding is the everyday value that loses its tail. The
+  value is not reported as malformed, it is silently shortened. `-f2-`.
+- **`grep -w` treats a hyphen as a word boundary**, so `sonarr` matches inside
+  `sonarr-4k`. `check-dns-duplicates` reported a conflict between two names pointing at
+  different hosts. Without `-F` the name is compiled as a regex too, so a dot in it
+  matches any character. `grep -qxF --` is the form that means "this exact name".
+- **An unchecked `mktemp -d` manufactures a verdict rather than an error.**
+  `check-domains` left `tmpdir` empty on failure, wrote its markers to the filesystem
+  root, found none, and reported all fourteen `.lan` names as not resolving — a DNS
+  result produced entirely by a local filesystem error, with nothing in the output
+  saying so.
+- **`return` truncates to one byte, and `return "000"` is 0.** `return 404` is 148 and
+  `return 500` is 244, which is the well-known half. The half that bites is curl's
+  `%{http_code}` sentinel for *no response at all*: `configure-helpers.sh` returned it,
+  so every service that simply was not up was reported to the user as `✓ added`. An HTTP
+  code is not a status; keep it in a variable.
 
 **Test**
 
@@ -363,6 +433,23 @@ write-up in `tests/mutation/README.md`; these are the one-line forms.
   matter how the walk is written. Only a multi-word rule with argv in between
   (`compose -f x.yml up`) exercises the property. The test read as though it covered
   it — the mutation is what said otherwise.
+
+- **Two tests that each assert something is NOT reported are both satisfied by a check
+  that reports nothing.** Tightening `check-dns-duplicates`'s match produced exactly that
+  shape: one test that `sonarr-4k` is not a conflict, another that a dotted name is not a
+  regex. A predicate that never matches passes both. Every test that narrows a check
+  needs a paired test that the true positive still fires —
+  `dns-match-never-matches` in the corpus exists to enforce it.
+- **An injection test whose payload has no observable side effect proves nothing.** The
+  first `check-doc-links` mutation SURVIVED because `os.path.normpath("it's/b.md")`
+  returns its argument, so the SyntaxError fell through to the `|| echo "$check_file"`
+  fallback and both versions produced the identical answer. The payload has to *do*
+  something — write a file, whose absence is then the assertion.
+- **A test that only asserts on a return value cannot see an argv.** Dropping
+  `SSH_OPTS`, `@server`, or `+time=2 +tries=1` changes no result anywhere: the call
+  still succeeds against a healthy NAS. What it changes is whether a commit hangs when
+  the NAS is down, and whether the answer came from Pi-hole or from the machine's own
+  resolver. Assert on what was *asked for* — that is what `$STUB_LOG` is for.
 
 **Operational**
 

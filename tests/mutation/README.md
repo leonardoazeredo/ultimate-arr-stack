@@ -151,8 +151,14 @@ real signal. So the sweep covers only files that have one.
 
 `scripts/lib/common.sh` was swept once on the theory that being sourced by three
 tested files made it covered. **78 mutants generated, 78 survived, 0 killed.**
-Sourced is not covered: the four `pre-commit-checks.bats` tests exercise none of
-its NAS, SSH, or domain helpers. It is listed below with the rest.
+Sourced is not covered: the four `pre-commit-checks.bats` tests exercised none of
+its NAS, SSH, or domain helpers. It has an oracle of its own now
+(`tests/lib-common.bats`) and is swept; it stayed off `TARGETS` until it did,
+because a target with no tests contributes nothing but guaranteed survivors.
+
+Every file under `scripts/lib/` is swept as of 2026-09-01. What is left below is
+operational scripts — the ones that restart containers, so they need the stub
+harness before they can have an oracle at all.
 
 ### What is not swept
 
