@@ -185,4 +185,4 @@ mutation radarr-tmpdir-not-cleaned \
   --bats tests/fix-arr-paths.bats \
   --test "the temp directory is removed even when the fixer fails" \
   --why "the temp dir holds a full dump of the Radarr library including the API key in no file the user chose; without the EXIT trap it survives every failed run" \
-  --apply 'sed -i "s@^trap .rm -rf \\\\\"\$TMPDIR\\\\\". EXIT\$@:@" "$F"'
+  --apply 'sed -i "s@^trap .rm -rf \"\$TMPDIR\". EXIT\$@:@" "$F"'
