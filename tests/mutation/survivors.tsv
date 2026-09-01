@@ -1,0 +1,6 @@
+# Survivors of ./tests/mutation/run-generated.sh -- mutants the suite did NOT kill.
+# verdict: real-gap | equivalent | wontfix | unreviewed
+# A real-gap gets a test written, and then a corpus entry so the new test is
+# itself proved capable of failing. An equivalent mutant changes text without
+# changing behaviour and can never be killed by anything - it is not a defect.
+#file	mutation	verdict	note

@@ -69,8 +69,8 @@ asserts the file actually changed, runs the named bats test, and requires it to 
 It is deliberately **not** part of `./tests/run-tests.sh` — it runs the suite twice
 per mutation. Run it after touching any guard, and add a corpus entry with any new one.
 
-Corpus: `corpus/nas-sync.sh` and `corpus/backup-and-guards.sh`. **`tests/mutation/README.md`
-is the authoritative guide** — design, how to add an entry, and the full write-up of the
+Corpus: `corpus/nas-sync.sh`, `corpus/backup-and-guards.sh`, `corpus/generative.sh`.
+**`tests/mutation/README.md` is the authoritative guide** — design, how to add an entry, and the full write-up of the
 lessons summarised below. This section records only what the framework caught here.
 
 ### What it caught that human review did not
@@ -93,6 +93,42 @@ reviewer, and passed.
    harness for `ensure_services_running` never defined `notify_failure`, so the alert
    path died with `command not found` while the test passed. Stubbed, asserted, and
    given its own corpus entry.
+
+### 4.1 The generated half, added 2026-09-01
+
+The corpus can only re-ask a question someone already thought to ask. `run-generated.sh`
+is the other half: universalmutator perturbs a file systematically and anything the suite
+fails to kill is a gap nobody had to think of first.
+
+**The worked example is the reason this was built.** `grep -Fxq` → `grep -Fq` in the
+backup volume resolver survived all 18 tests around it. Whole-line matching was
+load-bearing — volume names nest, so a substring match silently mis-resolves and a volume
+fails to back up — and nothing proved it. Neither review nor the corpus would ever have
+asked. The comment recording it is at `tests/backup-volume-resolution.bats:729`.
+
+The first sweep found the *same defect again*, in a different file: `grep -qx "$var"` →
+`grep -q "$var"` in `check-env-vars.sh:46`. With `-q`, an undocumented `${NAS_IP}` passes
+because `.env.example` mentions `NAS_IP_RANGE`. Two independent instances of one defect
+shape, both invisible to reading, both found the same mechanical way.
+
+It also found that static-IP conflict detection had **no test at all** — both existing
+`check_conflicts` tests used ports, and nine mutants across the whole IP half survived —
+and that `-gt 1` → `-ge 1` survived because both tests asserted the expected message
+appeared while neither asserted the wrong one did not.
+
+40 mutants, 21 killed. Five new tests took it to 35 killed / 5 survived, the five triaged
+`wontfix` or `equivalent` in `tests/mutation/survivors.tsv`.
+
+> The extraction of `lib-mutate.sh` — the shared backup/restore core — shipped a bug of
+> exactly the class this directory exists to catch, and the corpus caught it on the next
+> run. `take_backup` returned its path by echoing it, so every caller wrote
+> `backup="$(take_backup ...)"`: a command substitution is a **subshell**, the
+> `CURRENT_FILE`/`CURRENT_BACKUP` globals were set inside it and died with it,
+> `restore_current` took its legitimate "nothing to restore" branch, and the run finished
+> having left five mutated files in the working tree. Reading the diff did not catch it.
+> A function whose entire purpose is a side effect on globals now refuses to run where
+> those globals go nowhere (`BASHPID != $$`), with a corpus entry proving the refusal
+> can fail.
 
 ---
 
@@ -192,6 +228,13 @@ has touched.
   One command: `sudo crontab <that file>`.
 - **`sudo apt install jq` on pi1** clears the only 2 failures in the local suite
   (`tests/credential-propagation.bats`, both `exit 127`).
+- **DONE 2026-09-01 — generative mutation testing installed.** universalmutator,
+  containerised and pinned, wired to the bats suite as `run-generated.sh`. See §4.1.
+- **Ten `scripts/lib/` files have no bats test at all** — `common.sh` plus the nine
+  `check-*.sh` listed in `tests/mutation/README.md`. They are sourced by
+  `scripts/pre-commit`, so a defect in any of them silently weakens every commit's
+  checks. `common.sh` was measured: 78 mutants, 78 survived, 0 killed. Writing those
+  tests is separate work and is the largest remaining gap in this suite.
 
 ---
 

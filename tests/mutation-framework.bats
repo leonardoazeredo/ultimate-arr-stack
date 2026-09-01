@@ -256,3 +256,94 @@ CORPUS
         echo "$output"; return 1
     }
 }
+
+# --- the generative half ------------------------------------------------------
+
+@test "take_backup refuses to arm the restore path from a subshell" {
+    # This is not a hypothetical. Extracting the restore core into
+    # lib-mutate.sh introduced exactly this bug: take_backup returned the
+    # backup path by echoing it, so the caller wrote
+    # `backup="$(take_backup ...)"` -- a command substitution, which is a
+    # subshell. CURRENT_FILE/CURRENT_BACKUP were set inside it and died with
+    # it, restore_current then took its legitimate "nothing to restore" path,
+    # and the run finished having left five mutated files in the working tree.
+    #
+    # Reading the code did not catch it; run-mutations.sh did, on the next run.
+    # The guard exists so the next person cannot reintroduce it silently.
+    echo pristine > "$FX/subject"
+    run bash -c "
+        source '$REPO_ROOT/tests/mutation/lib-mutate.sh'
+        out=\$(take_backup '$FX/subject' tag)
+        echo \"status=\$?\"
+        echo \"out=\$out\"
+    "
+    [[ "$output" == *"status=2"* ]] || {
+        echo "take_backup returned success from a subshell, so the caller believes"
+        echo "the restore path is armed when it is not:"; echo "$output"; return 1
+    }
+    [[ "$output" == *"subshell"* ]] || {
+        echo "it failed without saying why:"; echo "$output"; return 1
+    }
+}
+
+@test "take_backup arms the restore path when called plainly" {
+    # The other half of the guard above. A refusal that fires unconditionally
+    # would pass that test while making the tool useless -- this is the
+    # assertion that keeps it honest.
+    echo pristine > "$FX/subject"
+    run bash -c "
+        source '$REPO_ROOT/tests/mutation/lib-mutate.sh'
+        take_backup '$FX/subject' tag || { echo REFUSED; exit 1; }
+        echo \"backup=\$BACKUP_PATH\"
+        echo \"current=\$CURRENT_FILE\"
+        cmp -s '$FX/subject' \"\$BACKUP_PATH\" && echo BYTES_MATCH
+    "
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"current=$FX/subject"* ]] || {
+        echo "CURRENT_FILE was not set, so restore_current would no-op:"
+        echo "$output"; return 1
+    }
+    [[ "$output" == *"BYTES_MATCH"* ]] || {
+        echo "the backup is not a byte copy of the target:"; echo "$output"; return 1
+    }
+}
+
+@test "the generative runner refuses to start on a dirty target" {
+    # It overwrites tracked files in place. On a dirty tree a failed restore is
+    # indistinguishable from the user's own uncommitted work, and the documented
+    # recovery -- `git checkout --` -- would destroy that work.
+    local target="scripts/lib/check-secrets.sh"
+    cp "$REPO_ROOT/$target" "$FX/pristine"
+    printf '\n# dirt introduced by %s\n' "$BATS_TEST_NAME" >> "$REPO_ROOT/$target"
+
+    run "$REPO_ROOT/tests/mutation/run-generated.sh" "$target"
+    cp "$FX/pristine" "$REPO_ROOT/$target"
+
+    [ "$status" -ne 0 ] || {
+        echo "the runner started against a dirty target. A failed restore would"
+        echo "then be indistinguishable from the user's own edits:"
+        echo "$output"; return 1
+    }
+    [[ "$output" == *"refusing to start"* && "$output" == *"$target"* ]] || {
+        echo "it refused without naming the file that blocked it:"
+        echo "$output"; return 1
+    }
+}
+
+@test "mutant generation reports an absent docker distinctly, not as success" {
+    # 77, not 0. "docker is unavailable" and "the sweep found nothing" must
+    # never be the same observable result -- that equivalence is the single
+    # defect shape this whole directory exists to remove, and sync-nas.sh
+    # already shipped it once (unreachable NAS exited 0, silently).
+    # A stub docker that fails, which is the realistic shape of this: the
+    # binary is installed and the daemon is not answering. PATH=/nonexistent
+    # would remove bash along with docker and prove nothing.
+    mkdir -p "$FX/bin"
+    printf '#!/bin/sh\nexit 1\n' > "$FX/bin/docker"
+    chmod +x "$FX/bin/docker"
+    run env PATH="$FX/bin:$PATH" bash "$REPO_ROOT/tests/mutation/mutator.sh" \
+        "$REPO_ROOT/scripts/lib/check-secrets.sh" "$FX/out"
+    [ "$status" -eq 77 ] || {
+        echo "expected 77 (docker unavailable), got $status:"; echo "$output"; return 1
+    }
+}

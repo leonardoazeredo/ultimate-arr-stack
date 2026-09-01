@@ -1,0 +1,4 @@
+# Lines universalmutator must not mutate, one regex per line.
+# Comments and the shebang: mutating them produces mutants that change nothing
+# observable, so every one of them SURVIVES and pads the ledger with noise.
+^\s*#
