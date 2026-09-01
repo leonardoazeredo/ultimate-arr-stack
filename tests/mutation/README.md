@@ -142,6 +142,32 @@ both tests asserted that the *expected* message appeared and neither asserted
 that the *wrong* one did not. Getting the right output is not proof — the check
 also has to not emit the wrong one.
 
+### Measured kill ratios
+
+Recorded per target and dated, because a ratio with no date is a claim about a
+tree that no longer exists. Two ratios are given: the raw one, and the one
+against *killable* mutants — a mutant verdicted `equivalent` in the ledger
+cannot be killed by any test, so counting it against coverage would set a floor
+nobody can reach.
+
+| Target | Swept | Kept | Killed | Survived | Killable |
+| --- | --- | --- | --- | --- | --- |
+| `scripts/lib/check-secrets.sh` | 2026-09-01 | 11 | 8 | 3 (all `equivalent`) | **8/8** |
+| `scripts/lib/configure-helpers.sh` | 2026-09-01 | 31 | 23 | 8 (all `equivalent`) | **23/23** |
+
+Both files' survivors are the same shape: `cmd || true` → `cmd && true` on a
+line whose exit status nothing reads. In `check-secrets.sh` every call site is
+an `if` condition, which suppresses errexit for the whole call *including the
+callee's body*; in `configure-helpers.sh` the entry point sets `set -uo
+pipefail` and deliberately no `-e`. Neither is a coverage gap, and neither can
+be closed by writing a test — the ledger says so, with the empirical check that
+established it.
+
+`configure-helpers.sh` is also the target that motivated the oracle's time
+budget: one mutant (`|| true` → `&& true` inside `wait_for_service`'s HTTP-code
+test, `:109`) makes the wait loop unsatisfiable, and the unbounded sweep spent
+90 minutes on it. It is now killed at the budget, and the summary says so.
+
 ## Targets with no oracle
 
 Mutation testing needs a test as its oracle. Against a file with no tests, every
