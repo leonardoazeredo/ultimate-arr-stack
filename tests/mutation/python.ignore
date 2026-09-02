@@ -1,0 +1,7 @@
+# Lines universalmutator must not mutate, one regex per line.
+# Comments and docstring delimiters: mutating them produces mutants that change
+# nothing observable, so every one of them SURVIVES and pads the ledger with
+# noise. Same reasoning as shell.ignore, different comment syntax.
+^\s*#
+^\s*"""
+^\s*'''

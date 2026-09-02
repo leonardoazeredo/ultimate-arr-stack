@@ -1,7 +1,11 @@
 #!/bin/bash
 set -uo pipefail
 #
-# Generate shell mutants of one file, using universalmutator in a container.
+# Generate mutants of one file, using universalmutator in a container.
+#
+# Shell and Python are both handled; the language is picked from the file's
+# extension, because that is the only thing that distinguishes them here and a
+# flag would just be a second place for the two to disagree.
 #
 # Usage:
 #   ./tests/mutation/mutator.sh <source-file> <output-dir>
@@ -51,13 +55,28 @@ RAW="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR" "$RAW"' EXIT
 
 BASE="$(basename "$SRC")"
-# universalmutator picks its language from the file extension, and the two
-# load-bearing hook scripts here (scripts/pre-commit, scripts/post-merge) have
-# none. Give the copy a .sh name so they are mutable like everything else; the
-# original name is irrelevant once the bytes are in a scratch directory.
-[[ "$BASE" == *.sh ]] || BASE="${BASE}.sh"
+if [[ "$BASE" == *.py ]]; then
+    # python.rules ships inside universalmutator itself, so unlike shell.rules
+    # there is nothing to copy in -- `--only python.rules` resolves against the
+    # package. `python` is a real language argument here (the extension lookup
+    # succeeds), where the shell path has to pass `none`.
+    LANG_ARG="python"
+    RULES="python.rules"
+    IGNORE="python.ignore"
+else
+    # universalmutator picks its language from the file extension, and the two
+    # load-bearing hook scripts here (scripts/pre-commit, scripts/post-merge)
+    # have none. Give the copy a .sh name so they are mutable like everything
+    # else; the original name is irrelevant once the bytes are in a scratch
+    # directory.
+    [[ "$BASE" == *.sh ]] || BASE="${BASE}.sh"
+    LANG_ARG="none"
+    RULES="shell.rules"
+    IGNORE="shell.ignore"
+    cp "$HERE/shell.rules" "$WORKDIR/" || exit 1
+fi
 cp "$SRC" "$WORKDIR/$BASE" || exit 1
-cp "$HERE/shell.rules" "$HERE/shell.ignore" "$WORKDIR/" || exit 1
+cp "$HERE/$IGNORE" "$WORKDIR/" || exit 1
 
 mkdir -p "$OUTDIR"
 
@@ -79,17 +98,28 @@ mkdir -p "$OUTDIR"
 # sudo available, and root-owned mutants would be undeletable.
 docker run --rm --user "$(id -u):$(id -g)" \
     -v "$WORKDIR:/work" -v "$RAW:/out" -w /work \
-    "$MUT_IMAGE" "$BASE" none --only shell.rules \
-    --mutantDir /out --noCheck --ignore shell.ignore >/dev/null 2>&1
+    "$MUT_IMAGE" "$BASE" "$LANG_ARG" --only "$RULES" \
+    --mutantDir /out --noCheck --ignore "$IGNORE" >/dev/null 2>&1
 
-# Keep only mutants that are valid bash. A mutant that does not parse cannot
-# distinguish a good test suite from a bad one -- every test fails on it for the
-# same uninteresting reason, and it would be scored KILLED, inflating the score
-# with mutants that prove nothing.
+# Keep only mutants that parse. A mutant that does not cannot distinguish a good
+# test suite from a bad one -- every test fails on it for the same uninteresting
+# reason, and it would be scored KILLED, inflating the score with mutants that
+# prove nothing.
+#
+# `ast.parse` rather than py_compile: py_compile writes a .pyc beside the file,
+# and a syntax checker with a side effect is not one this directory should own.
+parses() {
+    if [[ "$BASE" == *.py ]]; then
+        python3 -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' "$1" 2>/dev/null
+    else
+        bash -n "$1" 2>/dev/null
+    fi
+}
+
 kept=0; dropped=0
 for m in "$RAW"/*; do
     [[ -f "$m" ]] || continue
-    if bash -n "$m" 2>/dev/null; then
+    if parses "$m"; then
         cp "$m" "$OUTDIR/$(basename "$m")"
         kept=$((kept + 1))
     else

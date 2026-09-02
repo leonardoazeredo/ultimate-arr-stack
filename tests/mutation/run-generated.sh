@@ -94,6 +94,19 @@ TARGETS=(
   # instead of belonging to neither.
   "scripts/fix-radarr-paths.sh:tests/fix-arr-paths.bats:^fix-"
   "scripts/fix-sonarr-folders.sh:tests/fix-arr-paths.bats:^fix-"
+  # The Python halves of the three fixers. universalmutator's own python.rules
+  # applies here, picked by extension in mutator.sh; the oracle is pytest,
+  # reached through the one bats test that runs it.
+  #
+  # The regex names a single test rather than the file's `^python: ` prefix,
+  # which is the one place this table deliberately narrows instead of widening.
+  # The other three tests in that file assert properties of pytest.sh itself --
+  # that it exits 77 without docker, that every module has a test file -- and no
+  # mutation of a module can make any of them fail. Including them would only
+  # add wall-clock to every one of a few hundred mutants.
+  "scripts/lib/queue_cleanup.py:tests/python-suite.bats:^python: the extracted modules pass"
+  "scripts/lib/fix_radarr_paths.py:tests/python-suite.bats:^python: the extracted modules pass"
+  "scripts/lib/fix_sonarr_folders.py:tests/python-suite.bats:^python: the extracted modules pass"
   # The four duc files share one oracle because they are one protocol: the cgi
   # produces a request marker, the poller consumes it, scan.sh holds the lock
   # both of them branch on. A mutant in any of them is scored against all of it.
