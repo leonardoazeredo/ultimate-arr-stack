@@ -56,8 +56,12 @@ def compute_expected_folder(s, fmt, colon_fmt=4):
     result = result.replace("{ImdbId}", s.get("imdbId", "") or "")
     result = result.replace("{TmdbId}", str(s.get("tmdbId", 0)))
 
-    # Handle tvdbid- pattern (lowercased token name in brackets)
-    result = result.replace("[tvdbid-{TvdbId}]", "[tvdbid-%d]" % tvdbid)
+    # There was a "[tvdbid-{TvdbId}]" replacement here. It was dead: the
+    # {TvdbId} substitution above runs first and rewrites the token wherever it
+    # appears, brackets included, so this line could never find its pattern. A
+    # mutation sweep found it -- deleting the line changed no output any test
+    # could see, which for a line that is supposed to do something is the
+    # finding, not a gap.
 
     # Apply colon replacement (Sonarr default: dash)
     if colon_fmt == 0:  # delete
