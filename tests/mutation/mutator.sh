@@ -101,6 +101,51 @@ docker run --rm --user "$(id -u):$(id -g)" \
     "$MUT_IMAGE" "$BASE" "$LANG_ARG" --only "$RULES" \
     --mutantDir /out --noCheck --ignore "$IGNORE" >/dev/null 2>&1
 
+# Prose line numbers: comments, and any string literal spanning more than one
+# line -- i.e. every docstring in the file. universalmutator mutates them
+# happily, and the first Python sweep here proved what that costs: of 144
+# survivors on fix_radarr_paths.py, all but a handful were edits to the module
+# docstring ("imported and tested" -> "imported and True"). Nothing can kill
+# those, so they are not findings; they are 144 rows of noise burying the few
+# that were.
+#
+# shell.ignore handles the same class with `^\s*#`, and python.ignore carries
+# that plus the triple-quote delimiters -- but --ignore matches one line at a
+# time, so it cannot see the *interior* of a docstring at all. That has to be
+# done by line number, after generation, which is what this is.
+#
+# A single-line string is left mutable on purpose: `RADARR = "http://..."` is
+# code, and a mutant that rewrites it is a real one.
+prose_lines() {
+    python3 - "$1" <<'PYEOF' 2>/dev/null
+import sys, tokenize
+prose = set()
+with open(sys.argv[1], "rb") as fh:
+    try:
+        for tok in tokenize.tokenize(fh.readline):
+            if tok.type == tokenize.COMMENT or (
+                tok.type == tokenize.STRING and tok.end[0] > tok.start[0]
+            ):
+                prose.update(range(tok.start[0], tok.end[0] + 1))
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        pass
+print("\n".join(str(n) for n in sorted(prose)))
+PYEOF
+}
+
+# The first line number this mutant changed, or empty if diff cannot say.
+# Empty means keep: dropping a mutant we could not place would silently shrink
+# the sweep, which is the failure this whole directory exists to catch.
+changed_line() {
+    diff --unchanged-line-format= --old-line-format='%dn
+' --new-line-format= "$1" "$2" 2>/dev/null | head -1
+}
+
+declare -A PROSE=()
+if [[ "$BASE" == *.py ]]; then
+    while read -r n; do [[ -n "$n" ]] && PROSE["$n"]=1; done < <(prose_lines "$WORKDIR/$BASE")
+fi
+
 # Keep only mutants that parse. A mutant that does not cannot distinguish a good
 # test suite from a bad one -- every test fails on it for the same uninteresting
 # reason, and it would be scored KILLED, inflating the score with mutants that
@@ -116,15 +161,22 @@ parses() {
     fi
 }
 
-kept=0; dropped=0
+kept=0; dropped=0; prose=0
 for m in "$RAW"/*; do
     [[ -f "$m" ]] || continue
-    if parses "$m"; then
-        cp "$m" "$OUTDIR/$(basename "$m")"
-        kept=$((kept + 1))
-    else
+    if ! parses "$m"; then
         dropped=$((dropped + 1))
+        continue
     fi
+    if [[ ${#PROSE[@]} -gt 0 ]]; then
+        cl="$(changed_line "$WORKDIR/$BASE" "$m")"
+        if [[ -n "$cl" && -n "${PROSE[$cl]:-}" ]]; then
+            prose=$((prose + 1))
+            continue
+        fi
+    fi
+    cp "$m" "$OUTDIR/$(basename "$m")"
+    kept=$((kept + 1))
 done
 
 if [[ "$kept" -eq 0 ]]; then
@@ -132,4 +184,8 @@ if [[ "$kept" -eq 0 ]]; then
     exit 1
 fi
 
-echo "$kept kept, $dropped unparseable"
+if [[ "$prose" -gt 0 ]]; then
+    echo "$kept kept, $dropped unparseable, $prose in comments or docstrings"
+else
+    echo "$kept kept, $dropped unparseable"
+fi
