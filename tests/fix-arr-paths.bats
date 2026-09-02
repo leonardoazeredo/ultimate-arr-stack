@@ -175,6 +175,19 @@ env_with() {
     [[ "$output" == *"SONARR_API_KEY not found"* ]]
 }
 
+@test "fix-sonarr: a missing library aborts rather than blaming the API key" {
+    # Both branches exit 1, so the status says nothing. What errexit buys is
+    # the right diagnosis: without it the failed `.` is ignored, `env_value`
+    # is then not a command, the substitution yields an empty key, and the
+    # script reports a missing SONARR_API_KEY -- sending whoever reads the
+    # cron mail to edit an .env that was never the problem.
+    env_with "SONARR_API_KEY=k"
+    rm -f "$STACK/scripts/lib/env-file.sh"
+    run "$SONARR"
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"SONARR_API_KEY not found"* ]]
+}
+
 @test "fix-sonarr: falls back to .env.nas.backup when .env has no key" {
     env_with "OTHER=1"
     printf 'SONARR_API_KEY=frombackup\n' > "$STACK/.env.nas.backup"

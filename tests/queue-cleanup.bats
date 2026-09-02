@@ -219,6 +219,19 @@ esac
     [ "$(head -1 "$LOG")" = "1" ]
 }
 
+@test "queue-cleanup: a log exactly at the limit is not rewritten" {
+    # The boundary is `-gt`, not `-ge`: at exactly MAX_LOG_LINES there is
+    # nothing to trim, and `tail -n 1000` of a 1000-line file reproduces it
+    # byte for byte -- so content assertions cannot see the difference. What
+    # gives it away is that the rewrite happened at all: a temp file created
+    # and a live log replaced, every run, for no change.
+    seq 1 1000 > "$LOG"
+    stub_tool mktemp 'exec /usr/bin/mktemp "$@"'
+    run "$SCRIPT" --apply
+    assert_stub_not_called mktemp "$(basename "$LOG").XXXXXX"
+    [ "$(wc -l < "$LOG")" -eq 1000 ]
+}
+
 @test "queue-cleanup: an absent log is not an error" {
     rm -f "$LOG"
     run "$SCRIPT" --apply

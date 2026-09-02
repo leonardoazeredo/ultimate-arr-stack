@@ -212,7 +212,7 @@ mutation queue-no-errexit \
   --file scripts/queue-cleanup.sh \
   --bats tests/queue-cleanup.bats \
   --test "a failing mktemp aborts rather than trimming to nowhere" \
-  --why "without errexit a failed mktemp leaves TMPLOG unset, the tail redirects into the empty string, and the script still exits 0 - a clean run reported for a trim that could not start" \
+  --why "without errexit the script carries on past the failed mktemp and redirects the tail into the empty string. It still exits non-zero - the failed redirect makes the enclosing if compound return 1 - so only the stream separates them: errexit aborts silently where the mutant leaves bash's own ': No such file or directory' in cron's mail" \
   --apply 'sed -i "s@^set -euo pipefail\$@set -uo pipefail@" "$F"'
 
 mutation radarr-error-on-stdout \
@@ -263,3 +263,17 @@ mutation env-file-accepts-a-directory \
   --test "a directory in place of the file reads as absent, quietly" \
   --why "-e gets as far as redirecting from a directory, which returns the same non-zero but prints a bash error from inside a library function - noise in a cron log from a call that is supposed to be a clean 'not configured'" \
   --apply 'sed -i "s@^    \[ -f \"\$file\" \] || return 1\$@    [ -e \"\$file\" ] || return 1@" "$F"'
+
+mutation queue-trim-boundary-off-by-one \
+  --file scripts/queue-cleanup.sh \
+  --bats tests/queue-cleanup.bats \
+  --test "a log exactly at the limit is not rewritten" \
+  --why "-ge rewrites the log every run once it reaches the limit and stays there, replacing a live file with a byte-identical copy - invisible to any content assertion, so only the fact that a temp file was made at all can catch it" \
+  --apply 'sed -i "s@^  if \[\[ \"\$LINES\" -gt \"\$MAX_LOG_LINES\" \]\]; then\$@  if [[ \"\$LINES\" -ge \"\$MAX_LOG_LINES\" ]]; then@" "$F"'
+
+mutation sonarr-no-errexit \
+  --file scripts/fix-sonarr-folders.sh \
+  --bats tests/fix-arr-paths.bats \
+  --test "a missing library aborts rather than blaming the API key" \
+  --why "without errexit a failed source is ignored, env_value is not a command, and the empty key makes the script report a missing SONARR_API_KEY - a confident wrong diagnosis that sends the operator to edit an .env that was fine" \
+  --apply 'sed -i "s@^set -euo pipefail\$@set -uo pipefail@" "$F"'
