@@ -259,6 +259,17 @@ esac
 
 # --- the harness's own claim ----------------------------------------------
 
+@test "queue-cleanup: a failing mktemp aborts rather than trimming to nowhere" {
+    # Without errexit the script carries on with TMPLOG unset, redirects the
+    # tail into the empty string, and exits 0 -- reporting a clean run for a
+    # trim that could not even start.
+    seq 1 1200 > "$LOG"
+    stub_tool mktemp 'exit 1'
+    run "$SCRIPT" --apply
+    [ "$status" -ne 0 ]
+    [ "$(wc -l < "$LOG")" -eq 1200 ]
+}
+
 @test "queue-cleanup: a dry run reaches no destructive operation at all" {
     seq 1 1200 > "$LOG"
     HA_WEBHOOK_URL="http://ha.example/hook" run "$SCRIPT" -v

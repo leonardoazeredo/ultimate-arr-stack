@@ -186,3 +186,80 @@ mutation radarr-tmpdir-not-cleaned \
   --test "the temp directory is removed even when the fixer fails" \
   --why "the temp dir holds a full dump of the Radarr library including the API key in no file the user chose; without the EXIT trap it survives every failed run" \
   --apply 'sed -i "s@^trap .rm -rf \"\$TMPDIR\". EXIT\$@:@" "$F"'
+
+# --- second round: the survivors of the first generative sweep -------------
+#
+# The sweep over these four targets killed 36 of 61. What survived was mostly
+# one shape -- an assertion that a message reached the terminal but not WHICH
+# stream -- so these entries pin the stream, and the errexit that stands
+# between a failed step and a run that reports success anyway.
+
+mutation queue-error-on-stdout \
+  --file scripts/queue-cleanup.sh \
+  --bats tests/queue-cleanup.bats \
+  --test "the fatal error goes to stderr, not stdout" \
+  --why "this runs from cron with stdout redirected into a log; an error written there and nowhere else never reaches cron's mail, which is the only thing that tells anyone the weekly job stopped working" \
+  --apply 'sed -i "s@^    echo \"ERROR: the queue cleanup exited non-zero; no webhook was sent.\" >\&2\$@    echo \"ERROR: the queue cleanup exited non-zero; no webhook was sent.\"@" "$F"'
+
+mutation queue-webhook-body-dropped \
+  --file scripts/queue-cleanup.sh \
+  --bats tests/queue-cleanup.bats \
+  --test "the webhook carries the cleanup payload" \
+  --why "-e sets a Referer header instead of a POST body, so Home Assistant fires a notification with nothing in it - and a test that only checks the URL was called passes either way" \
+  --apply 'sed -i "s@^    -d \"{\\\\\"title\\\\\":\\\\\"Queue Cleanup@    -e \"{\\\\\"title\\\\\":\\\\\"Queue Cleanup@" "$F"'
+
+mutation queue-no-errexit \
+  --file scripts/queue-cleanup.sh \
+  --bats tests/queue-cleanup.bats \
+  --test "a failing mktemp aborts rather than trimming to nowhere" \
+  --why "without errexit a failed mktemp leaves TMPLOG unset, the tail redirects into the empty string, and the script still exits 0 - a clean run reported for a trim that could not start" \
+  --apply 'sed -i "s@^set -euo pipefail\$@set -uo pipefail@" "$F"'
+
+mutation radarr-error-on-stdout \
+  --file scripts/fix-radarr-paths.sh \
+  --bats tests/fix-arr-paths.bats \
+  --test "the fatal error goes to stderr, not stdout" \
+  --why "same stream confusion as the queue cleanup: an error on stdout is indistinguishable from the script's normal chatter" \
+  --apply 'sed -i "s@^    echo \"ERROR: the path fixer exited non-zero; nothing further was attempted.\" >\&2\$@    echo \"ERROR: the path fixer exited non-zero; nothing further was attempted.\"@" "$F"'
+
+mutation radarr-no-errexit \
+  --file scripts/fix-radarr-paths.sh \
+  --bats tests/fix-arr-paths.bats \
+  --test "a failed library dump aborts before the fixer runs" \
+  --why "curl writes movies.json; without errexit a failed dump leaves it empty and the fixer concludes the library is empty rather than that it could not read it" \
+  --apply 'sed -i "s@^set -euo pipefail\$@set -uo pipefail@" "$F"'
+
+mutation radarr-env-not-a-file \
+  --file scripts/fix-radarr-paths.sh \
+  --bats tests/fix-arr-paths.bats \
+  --test "an .env that is a directory is reported as a missing .env" \
+  --why "-e accepts a directory as the .env, so the script reports a missing API key rather than the missing config file that is actually the problem" \
+  --apply 'sed -i "s@^if \[ ! -f \"\$ENV_FILE\" \]; then\$@if [ ! -e \"\$ENV_FILE\" ]; then@" "$F"'
+
+mutation radarr-movies-not-a-directory \
+  --file scripts/fix-radarr-paths.sh \
+  --bats tests/fix-arr-paths.bats \
+  --test "a movies path that is a file is reported as a missing directory" \
+  --why "-e accepts a regular file as the movies root; ls then lists the file itself and every movie is reported as having no match on disk" \
+  --apply 'sed -i "s@^if \[ ! -d \"\$MOVIES_DIR\" \]; then\$@if [ ! -e \"\$MOVIES_DIR\" ]; then@" "$F"'
+
+mutation radarr-media-root-abort \
+  --file scripts/fix-radarr-paths.sh \
+  --bats tests/fix-arr-paths.bats \
+  --test "an .env with a key but no MEDIA_ROOT still explains itself" \
+  --why "\`&& true\` inside the substitution propagates env_value's failure to the assignment, which errexit turns into a bare exit 1 with no message at all where the script used to say which directory it could not find" \
+  --apply 'sed -i "s@^MEDIA_ROOT=\$(env_value \"\$ENV_FILE\" MEDIA_ROOT || true)\$@MEDIA_ROOT=\$(env_value \"\$ENV_FILE\" MEDIA_ROOT \&\& true)@" "$F"'
+
+mutation sonarr-error-on-stdout \
+  --file scripts/fix-sonarr-folders.sh \
+  --bats tests/fix-arr-paths.bats \
+  --test "the fatal error goes to stderr, not stdout" \
+  --why "same stream confusion as its radarr sibling" \
+  --apply 'sed -i "s@^    echo \"ERROR: the folder fixer exited non-zero; nothing further was attempted.\" >\&2\$@    echo \"ERROR: the folder fixer exited non-zero; nothing further was attempted.\"@" "$F"'
+
+mutation env-file-accepts-a-directory \
+  --file scripts/lib/env-file.sh \
+  --bats tests/lib-env-file.bats \
+  --test "a directory in place of the file reads as absent, quietly" \
+  --why "-e gets as far as redirecting from a directory, which returns the same non-zero but prints a bash error from inside a library function - noise in a cron log from a call that is supposed to be a clean 'not configured'" \
+  --apply 'sed -i "s@^    \[ -f \"\$file\" \] || return 1\$@    [ -e \"\$file\" ] || return 1@" "$F"'
