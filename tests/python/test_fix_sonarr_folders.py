@@ -321,9 +321,13 @@ def lines_from(series_list, apply_changes=False, naming=None):
 
 
 def test_the_configured_format_is_reported_before_anything_else():
-    out, _ = lines_from([])
+    # A series is needed for the blank line to mean anything: with an empty
+    # library the header's blank and the summary's blank are adjacent, so
+    # dropping either one leaves out[1] == "" regardless.
+    out, _ = lines_from([a_series("Beta", "/tv/Beta", sid=2)])
     assert out[0] == "Configured folder format: {Series TitleYear}"
     assert out[1] == ""
+    assert out[2].startswith("  Would rename:")
 
 
 def test_a_correct_series_does_not_stop_the_ones_after_it():

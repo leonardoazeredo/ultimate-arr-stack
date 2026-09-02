@@ -30,48 +30,9 @@ scripts/lib/configure-helpers.sh	353	 cf_result=$(api_post "${BASE}/api/v3/custo
 scripts/lib/configure-helpers.sh	365	 profiles=$(api_get "${BASE}/api/v3/qualityprofile" "$AUTH") || true ==> profiles=$(api_get "${BASE}/api/v3/qualityprofile" "$AUTH") && true	equivalent	configure-apps.sh sets `set -uo pipefail` and deliberately no `-e` (its own comment at :31 says why - attempt every step, report at the end), so the exit status of a failed assignment is read by nothing: in all eight cases the next statement is an `if json_extract ...` that never consults $?, and none of them is the last statement of its function. Verified by driving configure_arr_service under both variants with every non-health call returning 404 - twice, the second with the Reject ISO custom format present so the qualityprofile site behind `[[ -n $iso_cf_id ]]` is reached too: byte-identical stdout, stderr and exit status both times. Only errexit could tell them apart and nothing in this stack enables it
 scripts/lib/configure-helpers.sh	399	 delays=$(api_get "${BASE}/api/v3/delayprofile" "$AUTH") || true ==> delays=$(api_get "${BASE}/api/v3/delayprofile" "$AUTH") && true	equivalent	configure-apps.sh sets `set -uo pipefail` and deliberately no `-e` (its own comment at :31 says why - attempt every step, report at the end), so the exit status of a failed assignment is read by nothing: in all eight cases the next statement is an `if json_extract ...` that never consults $?, and none of them is the last statement of its function. Verified by driving configure_arr_service under both variants with every non-health call returning 404 - twice, the second with the Reject ISO custom format present so the qualityprofile site behind `[[ -n $iso_cf_id ]]` is reached too: byte-identical stdout, stderr and exit status both times. Only errexit could tell them apart and nothing in this stack enables it
 scripts/lib/fix_radarr_paths.py	70	 return None ==> pass	equivalent	the last statement of find_match is `return None`, so falling off the end of the function returns None just the same. No caller can tell the two apart
-scripts/lib/fix_sonarr_folders.py	106	 current_folder = current_path.replace(root_folder, "").strip("/") ==> current_folder = current_path.replace(root_folder, "").strip("//")	unreviewed	
-scripts/lib/fix_sonarr_folders.py	109	 expected_path = "%s/%s" % (root_folder.rstrip("/"), expected_folder) ==> expected_path = "%s/%s" % (root_folder.rstrip("//"), expected_folder)	unreviewed	
-scripts/lib/fix_sonarr_folders.py	120	 out("Configured folder format: %s" % folder_format) ==> pass	unreviewed	
-scripts/lib/fix_sonarr_folders.py	121	 out("") ==> pass	unreviewed	
-scripts/lib/fix_sonarr_folders.py	133	 continue ==> break	unreviewed	
-scripts/lib/fix_sonarr_folders.py	137	 out(" Renaming: %s" % current_folder) ==> pass	unreviewed	
-scripts/lib/fix_sonarr_folders.py	138	 out(" -> %s" % expected_folder) ==> pass	unreviewed	
-scripts/lib/fix_sonarr_folders.py	144	 out(" FAILED: HTTP %d" % e.code) ==> pass	unreviewed	
-scripts/lib/fix_sonarr_folders.py	147	 out(" Would rename: %s" % current_folder) ==> pass	unreviewed	
-scripts/lib/fix_sonarr_folders.py	148	 out(" -> %s" % expected_folder) ==> pass	unreviewed	
-scripts/lib/fix_sonarr_folders.py	151	 out("") ==> pass	unreviewed	
-scripts/lib/fix_sonarr_folders.py	153	 out("Summary: %d renamed, %d already correct, %d errors" % (renamed, already_ok, errors)) ==> pass	unreviewed	
-scripts/lib/fix_sonarr_folders.py	161	 key = argv[1] ==> pass	unreviewed	
-scripts/lib/fix_sonarr_folders.py	162	 url = argv[2] ==> pass	unreviewed	
-scripts/lib/fix_sonarr_folders.py	163	 apply_changes = parse_apply_flag(argv[3]) ==> pass	unreviewed	
-scripts/lib/fix_sonarr_folders.py	164	 run(SonarrApi(url, key), apply_changes) ==> pass	unreviewed	
-scripts/lib/fix_sonarr_folders.py	165	 return 0 ==> pass	unreviewed	
-scripts/lib/fix_sonarr_folders.py	165	 return 0 ==> return None	unreviewed	
-scripts/lib/fix_sonarr_folders.py	169	 sys.exit(main(sys.argv)) ==> pass	unreviewed	
-scripts/lib/fix_sonarr_folders.py	53	 result = result.replace("{Series TitleTheYear}", "%s (%d)" % (title, year)) ==> pass	unreviewed	
-scripts/lib/fix_sonarr_folders.py	54	 result = result.replace("{TvdbId}", str(tvdbid)) ==> pass	unreviewed	
-scripts/lib/fix_sonarr_folders.py	56	 result = result.replace("{ImdbId}", s.get("imdbId", "") or "") ==> result = result.replace("{ImdbId}", False or "")	unreviewed	
-scripts/lib/fix_sonarr_folders.py	56	 result = result.replace("{ImdbId}", s.get("imdbId", "") or "") ==> result = result.replace("{ImdbId}",False or "")	unreviewed	
-scripts/lib/fix_sonarr_folders.py	60	 result = result.replace("[tvdbid-{TvdbId}]", "[tvdbid-%d]" % tvdbid) ==> pass	unreviewed	
-scripts/lib/fix_sonarr_folders.py	76	 def __init__(self, url, key): ==> def __init__(self, key):	unreviewed	
-scripts/lib/fix_sonarr_folders.py	77	 self.url = url ==> pass	unreviewed	
-scripts/lib/fix_sonarr_folders.py	78	 self.key = key ==> pass	unreviewed	
-scripts/lib/fix_sonarr_folders.py	83	 headers={"X-Api-Key": self.key}, ==> headers={},	unreviewed	
-scripts/lib/fix_sonarr_folders.py	86	 return json.loads(resp.read()) ==> pass	unreviewed	
-scripts/lib/fix_sonarr_folders.py	86	 return json.loads(resp.read()) ==> return None	unreviewed	
-scripts/lib/fix_sonarr_folders.py	88	 def put(self, path, data, move_files=False): ==> def put(self, move_files=False):	unreviewed	
-scripts/lib/fix_sonarr_folders.py	88	 def put(self, path, data, move_files=False): ==> def put(self, path, move_files=False):	unreviewed	
-scripts/lib/fix_sonarr_folders.py	89	 url = "%s%s" % (self.url, path) ==> pass	unreviewed	
-scripts/lib/fix_sonarr_folders.py	90	 if move_files: ==> if not (move_files):	unreviewed	
-scripts/lib/fix_sonarr_folders.py	91	 url += "?moveFiles=true" ==> pass	unreviewed	
-scripts/lib/fix_sonarr_folders.py	92	 body = json.dumps(data).encode() ==> pass	unreviewed	
-scripts/lib/fix_sonarr_folders.py	94	 url, data=body, method="PUT", ==> url, data=body,	unreviewed	
-scripts/lib/fix_sonarr_folders.py	94	 url, data=body, method="PUT", ==> url,	unreviewed	
-scripts/lib/fix_sonarr_folders.py	95	 headers={"X-Api-Key": self.key, "Content-Type": "application/json"}, ==> headers={},	unreviewed	
-scripts/lib/fix_sonarr_folders.py	95	 headers={"X-Api-Key": self.key, "Content-Type": "application/json"}, ==> headers={"X-Api-Key": self.key},	unreviewed	
-scripts/lib/fix_sonarr_folders.py	98	 return json.loads(resp.read()) ==> pass	unreviewed	
-scripts/lib/fix_sonarr_folders.py	98	 return json.loads(resp.read()) ==> return None	unreviewed	
+scripts/lib/fix_sonarr_folders.py	110	 current_folder = current_path.replace(root_folder, "").strip("/") ==> current_folder = current_path.replace(root_folder, "").strip("//")	equivalent	str.strip takes a SET of characters, not a string to remove, so "/" and "//" are the same argument. Nothing can distinguish them
+scripts/lib/fix_sonarr_folders.py	113	 expected_path = "%s/%s" % (root_folder.rstrip("/"), expected_folder) ==> expected_path = "%s/%s" % (root_folder.rstrip("//"), expected_folder)	equivalent	str.strip takes a SET of characters, not a string to remove, so "/" and "//" are the same argument. Nothing can distinguish them
+scripts/lib/fix_sonarr_folders.py	125	 out("") ==> pass	unreviewed	
 scripts/queue-cleanup.sh	115	 -d "{\"title\":\"Queue Cleanup\",\"message\":\"Weekly queue cleanup completed. Check $NAS_STACK_DIR/logs/queue-cleanup.log for details.\"}" || true ==> -d "{\"title\":\"Queue Cleanup\",\"message\":\"Weekly queue cleanup completed. Check $NAS_STACK_DIR/logs/queue-cleanup.log for details.\"}" && true	equivalent	curl is the left side of &&, exempt from errexit; the AND-OR list's own non-zero does not fire it either, and the enclosing if compound returning 1 is not a command failure. Measured: same status and same output whether the webhook succeeds or fails
 scripts/queue-cleanup.sh	86	 return 1 ==> return 0	equivalent	returning 0 with nothing on stdout leaves the key as empty as returning 1 through || true does; both reach the same 'Could not get API keys' path. Measured
 scripts/queue-cleanup.sh	89	 | grep -oP '(?<=<ApiKey>)[^<]+' || return 1 ==> | grep -oP '(?<=<ApiKey>)[^<]+' || return 0	equivalent	grep printed nothing, so the substitution captures an empty key whichever status the function returns. Measured
