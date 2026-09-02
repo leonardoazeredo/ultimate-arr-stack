@@ -44,6 +44,23 @@ setup() {
     [[ "$output" == *"no usable docker"* ]]
 }
 
+@test "python: pytest.sh falls back to the default cap on a non-numeric override" {
+    # MEM_KB's fallback ("[[ "$MEM_KB" =~ ^[0-9]+$ ]] || MEM_KB=524288") is
+    # shell arithmetic nothing else exercises. If it were missing, a garbage
+    # override would reach `ulimit -v` directly, which rejects a non-numeric
+    # argument and pytest.sh would exit 1 instead of running under the
+    # default cap -- a clear behavioural difference, not just "still passes".
+    PYTEST_ADDRESS_SPACE_KB=bogus run "$REPO_ROOT/tests/toolkit/pytest.sh" \
+        tests/python/test_oracle_environment.py
+    if [ "$status" -eq 77 ]; then
+        skip "docker unavailable: $output"
+    fi
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        false
+    }
+}
+
 @test "python: pytest.sh exits 77, not 0, when the docker daemon is unreachable" {
     local bin="$BATS_TEST_TMPDIR/bin"
     mkdir -p "$bin"

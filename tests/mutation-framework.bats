@@ -690,6 +690,63 @@ RUNNER
     }
 }
 
+@test "run_tests bounds the oracle's memory, not just its wall clock" {
+    # timeout bounds time; it does nothing about memory. On 2026-09-02 a
+    # generated mutant of scripts/lib/queue_cleanup.py looped allocating and
+    # rebooted this 1.8 GiB host twice, well inside its wall-clock budget --
+    # through the containerised pytest.sh, which now carries its own
+    # `ulimit -v`. This is the same guard for the native path: every bash-side
+    # bats file that run_tests invokes directly, no container involved.
+    #
+    # Asserting that lib-mutate.sh merely *contains* a `ulimit` line would be
+    # the presence-is-not-behaviour trap this repo keeps paying for -- so the
+    # fake runner reads its own limit back and reports it, the same way
+    # test_oracle_environment.py does for the Python side.
+    # run_tests only echoes its own "<status> <count> <skipped>" triple, never
+    # the oracle's stdout, so the fake runner reports through a side-channel
+    # file rather than through $output.
+    mkdir -p "$FX/fakeroot/tests"
+    cat > "$FX/fakeroot/tests/run-tests.sh" <<RUNNER
+#!/bin/bash
+ulimit -v > "$FX/limit.txt"
+echo "1..1"
+echo "ok 1 recorded"
+RUNNER
+    chmod +x "$FX/fakeroot/tests/run-tests.sh"
+    # This test is itself invoked through run_tests() (run-mutations.sh's own
+    # control/scoring calls go through the very function under test), so an
+    # ambient ulimit -v from THAT outer call would already be in effect here
+    # and inherited straight through to the fake runner below regardless of
+    # what the mutated code does -- a false pass with the mutation in place.
+    # `ulimit -v unlimited` only raises the soft limit, which is always legal
+    # up to the hard ceiling as long as nothing in the chain has lowered that
+    # too, so this resets to a clean baseline before the code under test gets
+    # a chance to (or fails to) reapply its own cap.
+    run bash -c "
+        ulimit -v unlimited 2>/dev/null || true
+        source '$REPO_ROOT/tests/mutation/lib-mutate.sh'
+        ROOT='$FX/fakeroot'
+        run_tests /dev/null '^x'
+    "
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ -f "$FX/limit.txt" ] || {
+        echo "the fake oracle never ran, or never reached the ulimit line"
+        return 1
+    }
+    local limit
+    limit="$(cat "$FX/limit.txt")"
+    [[ "$limit" =~ ^[0-9]+$ ]] || {
+        echo "ulimit -v read back as '$limit', not a finite number -- the oracle is unbounded"
+        return 1
+    }
+    # A generous ceiling, not a tuned value: this only has to prove the bound
+    # is real and well below host RAM (1.8 GiB here), not pin the exact KB.
+    [ "$limit" -le 786432 ] || {
+        echo "ulimit -v read back as ${limit}KB, too high to bound a runaway mutant"
+        return 1
+    }
+}
+
 @test "a mutant that hangs the oracle is scored a kill and named as a timeout" {
     # The end of the same story: run_tests reports 124, and the runner has to
     # decide what that means. It is a kill -- the oracle demonstrably did not

@@ -55,6 +55,24 @@ else
     ARGS=(tests/python "$@")
 fi
 
+# A hard address-space cap on the oracle, in KB. Overridable only so a test can
+# watch it fire; a non-numeric value falls back rather than reaching ulimit.
+#
+# THIS IS NOT A TUNING KNOB, IT IS A BLAST DOOR: without it, a generated mutant
+# that loops *allocating* (not just spinning) can exhaust host RAM and reboot
+# the machine before run-generated.sh's wall-clock budget ever fires. Full
+# incident, why `docker run --memory` doesn't work on this host, and the
+# measurement behind the 512 MB figure below: docs/TEST-HARDENING-LOG.md §8.
+#
+# ulimit -v sets RLIMIT_AS, enforced per process by the kernel, no cgroup or
+# privilege needed. 512 MB is 2x the tightest value the real suite passes at
+# (256 MB) and ~3.5x below host RAM -- a runaway mutant dies with MemoryError
+# and a red exit status (a correct KILLED) instead of taking the host with it.
+MEM_KB="${PYTEST_ADDRESS_SPACE_KB:-524288}"
+[[ "$MEM_KB" =~ ^[0-9]+$ ]] || MEM_KB=524288
+
+# `exec` so pytest replaces the shell and keeps the container's exit status; the
+# cap is inherited across exec because RLIMIT_AS is a property of the process.
 docker run --rm \
     --user "$(id -u):$(id -g)" \
     -v "$ROOT:/mnt:ro" \
@@ -62,4 +80,5 @@ docker run --rm \
     -e PYTHONDONTWRITEBYTECODE=1 \
     -e PYTHONPATH=/mnt/scripts/lib \
     "$TAG" \
-    python3 -m pytest -p no:cacheprovider -q "${ARGS[@]}"
+    sh -c 'ulimit -v "$1" || exit 1; shift; exec python3 -m pytest -p no:cacheprovider -q "$@"' \
+       sh "$MEM_KB" "${ARGS[@]}"

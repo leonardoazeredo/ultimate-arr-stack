@@ -661,3 +661,82 @@ write-up in `tests/mutation/README.md`; these are the one-line forms.
   with no `trap`: two concurrent runs clobbered each other's session, every early return
   left a live cookie readable by anything on the box, and there are a dozen early returns.
   `mktemp` plus an EXIT trap is what makes "we always clean up" true rather than intended.
+
+- **A test harness that bounds time but not memory will eventually bound the whole
+  machine.** `run-generated.sh` caps a mutant's wall clock and says so in its own
+  comment: "this mutant loops forever" is the expected case. It is not the worst
+  case. The generated mutant `scripts/lib/queue_cleanup.py:209 break ==> continue`
+  turned the max-pages guard into a loop that extended `all_records` *and* emitted a
+  pytest-captured log line every iteration — two unbounded allocations per pass. It
+  exhausted this 1.8 GiB host's RAM and swap and **rebooted the machine**, twice,
+  deterministically, at the same mutant, each time destroying ~30 minutes of sweep
+  and leaving no ledger. The failure was invisible in exactly the way that costs
+  most: the sweep log ends mid-run with no summary, which is indistinguishable from
+  an agent teardown or a Ctrl-C, and the first loss was misattributed to precisely
+  that. `uptime` was the diagnostic that settled it, and it is now the first thing
+  to check when a long local job vanishes without a trailer.
+- **`docker run --memory` is accepted and ignored on a host with no memory cgroup.**
+  pi1 boots with `cgroup_disable=memory` in `/proc/cmdline`, so cgroup v2 exposes
+  only `cpuset cpu io pids`. The obvious containment for the trap above is therefore
+  decorative here — it would have read as a fix in review, in the diff, and in the
+  Dockerfile, and protected nothing. `ulimit -v` (RLIMIT_AS) is enforced per process
+  by the kernel with no cgroup and no privilege, which is why `tests/toolkit/pytest.sh`
+  uses it. Check `/sys/fs/cgroup/cgroup.controllers` before believing any
+  resource limit on this host.
+- **The cap has to be proved from inside the process it caps.** Asserting that
+  `pytest.sh` *contains* a `ulimit` line is the presence-is-not-behaviour trap this
+  document opens with. `tests/python/test_oracle_environment.py` instead reads its own
+  `RLIMIT_AS` back at run time and fails if it is `RLIM_INFINITY`, so deleting the
+  cap turns the suite red rather than quietly removing the blast door. Corpus entry:
+  `oracle-address-space-uncapped`.
+- **The containerised cap doesn't reach the native path, and `run_tests()` in
+  `tests/mutation/lib-mutate.sh` is where every mutant scores** — bash-side targets as
+  much as the Python ones that route through `pytest.sh`'s container. A native bats
+  file never goes through docker, so pytest.sh's cap simply does not apply to it. Found
+  by adversarial review of the writeup for the trap above, not by a second incident —
+  the review asked whether the fix covered every path the mutant could take, and it
+  didn't. Closed with a sibling `ulimit -S -v` around `run_tests()`'s own invocation,
+  proved the same way: `tests/mutation-framework.bats`'s `run_tests bounds the
+  oracle's memory...` test reads the limit back from inside a fake oracle process via
+  a side-channel file (`run_tests` only ever echoes its own summary triple, never the
+  oracle's stdout — an early draft tried to read it from bats' `$output` and always
+  passed for the wrong reason). Corpus entry: `oracle-native-address-space-uncapped`.
+- **`ulimit -v N` without `-S`/`-H` sets the HARD limit too, and a hard limit can never
+  be raised again by anything downstream.** `run_tests()` calls itself on every
+  mutant, including the control run — so the very first (unmutated) call permanently
+  capped the hard ceiling for the whole process tree before a mutated run predicated
+  on that same guard ever got a chance to prove anything. The corpus entry for the
+  guard was unwinnable for exactly this reason: `ulimit -v unlimited` inside the test
+  fixture only raises the *soft* limit, which stays bounded by whatever hard ceiling
+  an ancestor already set. Fixed by capping soft-only (`ulimit -S -v`), which is also
+  the more correct mechanism on its own merits — RLIMIT_AS enforcement reads the soft
+  limit, and nothing here needs an irrevocable hard cap.
+- **A Go binary reserves virtual address space up front, independent of what it
+  actually uses — so `ulimit -v` and the `docker` CLI are fundamentally at odds.**
+  Measured 2026-09-02: `docker version`/`docker info` fail under a 256 MB, 512 MB, or
+  even 1 GiB cap, and only succeed at 2 GiB+ — which exceeds this host's entire
+  1.8 GiB of physical RAM. Applying `run_tests()`'s new native cap blanket-wide broke
+  every bats file that shells out to a real `docker` daemon (`tests/python-suite.bats`,
+  `tests/shellcheck.bats`'s fallback, `tests/coverage-tool.bats`,
+  `tests/mutation-framework.bats`'s own docker-availability checks) — surfaced as a
+  silent, wrong-reason `SKIPPED` on the pre-existing `oracle-address-space-uncapped`
+  entry, not a crash, which is its own instance of this document's opening defect
+  class. No cap value serves both goals at once, so `NATIVE_MEM_EXEMPT` in
+  `lib-mutate.sh` exempts exactly the bats files that genuinely need a real daemon,
+  each for a stated reason (either the workload is already capped independently
+  inside its own container, or it's a fixed tool invocation with no mutable target of
+  its own) — a hardcoded, read-and-verified list rather than a live `grep`, so a new
+  docker-shelling file added later fails loudly under the cap instead of silently
+  slipping past an exemption nobody wrote for it.
+- **A bare redirection on its own line is a complete (no-op) command, and if it's the
+  last thing in a command substitution, its own exit status — always 0 — overwrites
+  whatever came before it.** `run_tests()`'s native-cap rewrite put `2>&1` on its own
+  line after an `if/fi` block inside `out="$( ... 2>&1)"`; bash parsed that as a
+  distinct null command, so `$?` after the substitution was always 0 regardless of
+  whether the wrapped test suite passed or failed. Every SURVIVED/ERRORED result from
+  the native-cap corpus entries during this fix was actually this bug, not the
+  mutation logic — three different entries went green for three unrelated reasons
+  until the actual test bodies were run by hand outside `run_tests()` and compared.
+  Fixed by wrapping the guarded commands in a brace group and redirecting the group:
+  `{ cmds...; } 2>&1`, so the group's own exit status (the last real command run
+  inside it) is what reaches `$?`.

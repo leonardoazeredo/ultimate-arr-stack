@@ -28,6 +28,41 @@ file, so a new one cannot arrive untested.
 The repo is mounted **read-only**. Nothing here needs to write to it, and a
 writable mount would put a test one bug away from editing tracked files.
 
+It also runs the oracle under a hard **address-space cap** (`ulimit -v`, 512 MB,
+overridable via `PYTEST_ADDRESS_SPACE_KB`). That is a blast door, not tuning.
+`run-generated.sh` bounds a mutant's wall clock and nothing else, and a mutant
+that loops *allocating* is a different animal from one that merely spins: on
+2026-09-02 `queue_cleanup.py:209 break ==> continue` exhausted this 1.8 GiB
+host's RAM and swap and rebooted the machine twice, at the same mutant, losing
+~30 minutes of sweep and its ledger each time.
+
+`docker run --memory` does not work here and fails silently — pi1 boots with
+`cgroup_disable=memory`, so cgroup v2 offers only `cpuset cpu io pids`. Check
+`/sys/fs/cgroup/cgroup.controllers` before believing any container resource
+limit on this host. `ulimit -v` needs no cgroup and no privilege.
+
+The cap is asserted from *inside* the capped process —
+`tests/python/test_oracle_environment.py` reads its own `RLIMIT_AS` back and
+fails on `RLIM_INFINITY` — because asserting that the script merely *contains* a
+`ulimit` line is the presence-is-not-behaviour trap this repo keeps paying for.
+Corpus entry: `oracle-address-space-uncapped`.
+
+This cap only covers the containerised half. `run_tests()` in
+`tests/mutation/lib-mutate.sh` is the shared entry point for every mutant —
+bash-native ones as much as the Python ones that route through this script —
+and a native bats file never goes through docker, so this cap does not reach
+it. `lib-mutate.sh` carries a sibling `ulimit -S -v` (soft-only — a bare
+`ulimit -v` sets the hard limit too, which `run_tests()` calling itself on
+every mutant's control run would then never let a later mutated run raise
+back) around its own invocation, with one deliberate carve-out:
+`NATIVE_MEM_EXEMPT` skips the small list of bats files that shell out to a
+real `docker` daemon, because the `docker` CLI itself cannot start under a
+cap tight enough to matter here — a Go-runtime quirk, verified 2026-09-02,
+where `docker version` needs 2 GiB+ of virtual address space regardless of
+actual usage, more than this host's total RAM. Corpus entry:
+`oracle-native-address-space-uncapped`. Full incident, the soft/hard-limit
+trap, and the docker-incompatibility measurement: `docs/TEST-HARDENING-LOG.md` §8.
+
 ## coverage.sh — one diagnostic, with a delete-by rule
 
 kcov is **not** load bearing and is not a gate. It exists to be run once and

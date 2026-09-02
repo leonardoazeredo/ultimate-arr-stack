@@ -124,14 +124,79 @@ oracle_budget() {
 # A run that hits the budget comes back as status 124, which the caller scores as
 # a kill -- the suite demonstrably did not pass -- but reports distinctly,
 # because a hang and a clean red are the same number and very different problems.
+#
+# `timeout` bounds wall clock only. It does not bound memory, and a mutant that
+# loops *allocating* -- not just spinning -- can exhaust the host before the
+# clock runs out: `run-generated.sh` against scripts/lib/queue_cleanup.py did
+# exactly that on 2026-09-02, rebooting this 1.8 GiB host twice. That mutant
+# routed through the containerised pytest.sh, which now carries its own
+# `ulimit -v`; this native path (every bash-side bats file) had no equivalent
+# bound. `ulimit -v` sets RLIMIT_AS, a kernel rlimit -- no cgroup or privilege
+# needed, so it applies here exactly as it does inside the container. Measured
+# the same day: tests/lib-configure-helpers.bats (55 tests) is the heaviest
+# native file checked and passes clean at 32 MB; 256 MB is 8x that floor and
+# ~7x below host RAM, so it bounds a runaway mutant without ever touching a
+# real run.
+#
+# `-S`, soft limit only: this process (run-mutations.sh/run-generated.sh)
+# calls run_tests() itself, on every mutant, including ones that target this
+# very function -- a bare `ulimit -v` sets the hard limit too, which a
+# descendant can never raise again. That turned this repo's own mutation
+# corpus entry for this guard into an unwinnable test: the harness's own
+# unmutated control run had already capped the hard ceiling for the whole
+# process tree before the mutated run ever got a chance to prove anything.
+# The soft limit alone still stops a runaway allocator -- that is what
+# RLIMIT_AS enforcement actually checks -- without leaving that trap behind.
+NATIVE_MEM_KB="${MUTATE_NATIVE_ADDRESS_SPACE_KB:-262144}"
+[[ "$NATIVE_MEM_KB" =~ ^[0-9]+$ ]] || NATIVE_MEM_KB=262144
+
+# `docker` itself cannot run under this cap. Measured 2026-09-02: `docker
+# version`/`docker info` fail at 256 MB, 512 MB and 1 GiB, and only succeed at
+# 2 GiB+ -- a Go-runtime quirk (it reserves heap arena address space up front,
+# independent of what it actually uses). 2 GiB exceeds this host's entire
+# 1.8 GiB of physical RAM, so no single cap value can both bound a runaway
+# native mutant and let docker run; the two goals are incompatible for any
+# bats file that shells out to a *real* daemon (not a stubbed `docker` on
+# PATH -- those still get capped, same as anything else). Every file below
+# does that in at least one of its own test bodies (`docker run`, `docker
+# image inspect`, `docker pull`, `docker info`), verified by reading each
+# file rather than assumed:
+#   - tests/python-suite.bats   bridges to pytest.sh, whose oracle already
+#     runs under its OWN ulimit -v applied inside the container -- the thing
+#     this cap exists to protect against is already covered there.
+#   - tests/shellcheck.bats, tests/coverage-tool.bats, tests/mutation-framework.bats
+#     invoke docker as a fixed tool call (the linter image, the kcov image,
+#     an availability probe) with no mutable target of their own -- there is
+#     nothing here for a bash mutant to make loop-and-allocate.
+# A hardcoded list rather than a live grep: cheap, and a new docker-shelling
+# bats file added later fails loudly (docker exits 2 under the cap) instead
+# of silently, which is a safer default than silently exempting it.
+NATIVE_MEM_EXEMPT=(
+    "tests/python-suite.bats"
+    "tests/shellcheck.bats"
+    "tests/coverage-tool.bats"
+    "tests/mutation-framework.bats"
+)
+
 run_tests() {
     local batsfile="$1" regex="$2" budget="${3:-0}" out
     [[ "$budget" =~ ^[0-9]+$ ]] || budget=0
-    if (( budget > 0 )); then
-        out="$(timeout "$budget" "$ROOT/tests/run-tests.sh" -f "$regex" "$batsfile" 2>&1)"
-    else
-        out="$("$ROOT/tests/run-tests.sh" -f "$regex" "$batsfile" 2>&1)"
-    fi
+
+    local rel="${batsfile#"$ROOT"/}" exempt=0 f
+    for f in "${NATIVE_MEM_EXEMPT[@]}"; do
+        [[ "$rel" == "$f" ]] && { exempt=1; break; }
+    done
+
+    out="$(
+        {
+            (( exempt )) || ulimit -S -v "$NATIVE_MEM_KB"
+            if (( budget > 0 )); then
+                timeout "$budget" "$ROOT/tests/run-tests.sh" -f "$regex" "$batsfile"
+            else
+                "$ROOT/tests/run-tests.sh" -f "$regex" "$batsfile"
+            fi
+        } 2>&1
+    )"
     local st=$?
     local plan count
     plan="$(grep -m1 -E '^1\.\.[0-9]+$' <<<"$out" || true)"

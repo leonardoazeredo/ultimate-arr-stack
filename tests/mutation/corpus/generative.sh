@@ -106,7 +106,7 @@ mutation gen-oracle-run-unbounded \
   --bats tests/mutation-framework.bats \
   --test "run_tests bounds the oracle at the budget rather than waiting on it" \
   --why "this is the defect the budget was added for: with no bound, one mutant that makes the oracle loop stalls the entire sweep - measured, a sweep of configure-helpers.sh scored 3 of 31 mutants in 90 minutes and only an external timeout ended it" \
-  --apply 'sed -i "s@^    if (( budget > 0 )); then\$@    if false; then@" "$F"'
+  --apply 'sed -i "s@^            if (( budget > 0 )); then\$@            if false; then@" "$F"'
 
 mutation gen-oracle-bounded-when-it-should-not-be \
   --file tests/mutation/lib-mutate.sh \
