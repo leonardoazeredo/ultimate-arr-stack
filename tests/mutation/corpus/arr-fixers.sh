@@ -284,3 +284,73 @@ mutation queue-log-not-a-file \
   --test "a directory in place of the log is skipped quietly" \
   --why "-e lets a directory through to \`wc -l <\`, which both prints a 0 and fails, so LINES becomes two lines and the arithmetic test throws - same exit status, same skipped trim, but a bash syntax error in the cron log where the guard was meant to read as 'nothing to trim'" \
   --apply 'sed -i "s@^if \$APPLY && \[\[ -f \"\$LOG_FILE\" \]\]; then\$@if \$APPLY \&\& [[ -e \"\$LOG_FILE\" ]]; then@" "$F"'
+
+# --- queue_cleanup.py: the seam and the entry point -----------------------
+#
+# Everything below was found by the generative sweep, not by reading. All of it
+# sat behind the same blind spot: run() and process_service() are always handed
+# a FakeApi, so ArrApi -- the class that actually shells out to curl -- had
+# never been constructed, and main() had never been called at all.
+
+mutation queue-api-loses-the-url \
+  --file scripts/lib/queue_cleanup.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "curl with no URL exits 2, which the returncode check turns into None, which fetch_queue reports as 'Failed to fetch queue' - so a run that never asked for anything looks exactly like an arr service being down (test_get_shells_out_to_curl_with_the_built_url)" \
+  --apply 'sed -i "s@^            \[\"curl\", \"-s\", \"-f\", build_url(port, path, key)\],\$@            [\"curl\", \"-s\", \"-f\"],@" "$F"'
+
+mutation queue-api-ignores-curl-status \
+  --file scripts/lib/queue_cleanup.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "curl prints nothing on failure, so skipping the returncode check hands an empty string to json.loads and the whole run dies on a JSONDecodeError inside a systemd unit - instead of the one logged line the guard was written to produce (test_a_failed_curl_yields_none_rather_than_a_parse_error)" \
+  --apply 'sed -i "0,/^        if result.returncode != 0:\$/s@^        if result.returncode != 0:\$@        if False:@" "$F"'
+
+mutation queue-age-floored-to-whole-hours \
+  --file scripts/lib/queue_cleanup.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "flooring the age agrees with the real thing on every whole-hour test input, and differs only inside the last hour before the cutoff - a download 24.5 hours dead is left in the queue for another half hour on every subsequent run, because it floors to 24 every time (test_the_age_is_measured_in_fractional_hours_not_whole_ones)" \
+  --apply 'sed -i "s@^        return (now - added).total_seconds() / 3600\$@        return (now - added).total_seconds() // 3600@" "$F"'
+
+mutation queue-null-timestamp-unguarded \
+  --file scripts/lib/queue_cleanup.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "an absent \`added\` key yields \"\" and an \`added: null\` yields None; only the first survives fromisoformat, and the except clause catches ValueError and TypeError but not the AttributeError None raises - so one null timestamp anywhere in the queue aborts the whole cleanup (test_a_null_added_timestamp_is_not_stale_and_does_not_raise)" \
+  --apply 'sed -i "s@^    if not added_str:\$@    if False:@" "$F"'
+
+mutation queue-run-drops-the-injected-clock \
+  --file scripts/lib/queue_cleanup.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "run() forwarding stops at out=, so process_service falls back to datetime.now(); every classification test still passes because they assert through process_service directly, and the one thing that changes is that the clock is no longer the one the caller chose (test_run_forwards_the_injected_clock)" \
+  --apply 'sed -i "s@^                                            out=out, now=now, sleep=sleep,\$@                                            out=out,@" "$F"'
+
+mutation queue-summary-rule-dropped \
+  --file scripts/lib/queue_cleanup.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "the rule is the only thing separating one service'\''s per-item lines from the totals in a log cron mails out; dropping it changes no status, no total and no message, and every summary assertion still passes (test_the_summary_is_introduced_by_a_rule)" \
+  --apply 'sed -i "s@^    out(f.*40}.*\$@    pass@" "$F"'
+
+mutation queue-applied-run-suggests-applying \
+  --file scripts/lib/queue_cleanup.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "telling an operator to re-run with --apply after a run that already applied invites a second pass over a queue that was just emptied; the dry-run tests cannot see it, because they only ever assert the hint is present (test_the_applied_summary_does_not_suggest_applying)" \
+  --apply 'sed -i "s@^    if not apply_changes and total_removed > 0:\$@    if True and total_removed > 0:@" "$F"'
+
+mutation queue-main-drops-the-apply-flag \
+  --file scripts/lib/queue_cleanup.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "run()'\''s next parameter is verbose, so dropping apply_changes at the call site silently promotes the verbose flag into it: \`--verbose\` alone would delete and blocklist for real, and no test that injects its own api could ever see it (test_main_maps_argv_onto_the_run_arguments)" \
+  --apply 'sed -i "s@^    run(services(sonarr_key, radarr_key), ArrApi(), apply_changes, verbose)\$@    run(services(sonarr_key, radarr_key), ArrApi(), verbose)@" "$F"'
+
+mutation queue-script-entry-inert \
+  --file scripts/lib/queue_cleanup.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "with the entry point gone the module imports, does nothing and exits 0 - which from the bash half is indistinguishable from a clean run over an empty queue, and no import-based test executes this line at all (test_the_module_actually_runs_when_executed_as_a_script)" \
+  --apply 'sed -i "s@^    sys.exit(main(sys.argv))\$@    pass@" "$F"'

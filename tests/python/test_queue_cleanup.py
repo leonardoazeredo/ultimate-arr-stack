@@ -8,6 +8,10 @@ Every test here injects the clock. A test whose result depends on when it runs
 is a test that will one day fail for a reason nobody can reproduce.
 """
 
+import json
+import os
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 
 import queue_cleanup as m
@@ -155,6 +159,22 @@ def test_the_stale_boundary_is_strictly_greater_than_twenty_four_hours():
     assert m.is_stuck(rec(size=100, sizeleft=100, added=ago(24)), NOW)[0] is None
 
 
+def test_the_age_is_measured_in_fractional_hours_not_whole_ones():
+    # `/ 3600` and `// 3600` agree on every whole-hour age, so the two tests
+    # above cannot tell them apart. Half past the boundary is where they split:
+    # 24.5 clears `> 24`, floor(24.5) does not, and the item stops being stale.
+    assert m.is_stuck(rec(size=100, sizeleft=100, added=ago(24.5)), NOW)[0] == "stale"
+
+
+def test_a_one_byte_item_still_counts_as_having_a_known_size():
+    # `size > 0` distinguishes "the size is known" from "no size info at all",
+    # and the two arms report different reasons. `size > 1` reads the same on
+    # every realistic size; one byte is where it stops meaning the same thing.
+    kind, why = m.is_stuck(rec(size=1, sizeleft=1, added=ago(25)), NOW)
+    assert kind == "stale"
+    assert why.startswith("0% progress")
+
+
 def test_a_partially_downloaded_item_is_never_stale_however_old():
     # sizeleft < size means progress was made; age alone must not delete it.
     assert m.is_stuck(rec(size=100, sizeleft=50, added=ago(1000)), NOW)[0] is None
@@ -166,6 +186,14 @@ def test_an_item_with_no_size_goes_stale_on_age_with_its_own_wording():
     assert why == "no size info for 48h"
 
 
+def test_a_sizeless_item_with_no_timestamp_is_not_stale_and_does_not_raise():
+    # The no-size arm has its own copy of the `is not None and > 24` guard, and
+    # the missing-timestamp test above only ever exercises the other one. With
+    # the None check gone this comparison raises TypeError instead of skipping.
+    assert m.is_stuck(rec(size=0, sizeleft=0), NOW)[0] is None
+    assert m.is_stuck(rec(size=0, sizeleft=0, added="not a date"), NOW)[0] is None
+
+
 def test_the_stale_reason_reports_the_measured_age():
     _, why = m.is_stuck(rec(size=100, sizeleft=100, added=ago(30)), NOW)
     assert why == "0% progress for 30h"
@@ -173,6 +201,15 @@ def test_the_stale_reason_reports_the_measured_age():
 
 def test_a_missing_added_timestamp_is_not_stale():
     assert m.is_stuck(rec(size=100, sizeleft=100), NOW)[0] is None
+
+
+def test_a_null_added_timestamp_is_not_stale_and_does_not_raise():
+    # An absent key and a key holding null are different values: `.get("added",
+    # "")` returns "" for the first and None for the second, and only ""
+    # survives the fromisoformat below -- None raises AttributeError, which the
+    # except clause does not catch. The empty-string guard is what stops it,
+    # so the test above cannot show that the guard is load bearing.
+    assert m.is_stuck(rec(size=100, sizeleft=100, added=None), NOW)[0] is None
 
 
 def test_an_unparseable_added_timestamp_is_not_stale():
@@ -420,3 +457,189 @@ def test_no_configured_service_is_a_clean_no_op():
     api = FakeApi([stuck()])
     assert m.run([], api, True, False, out=lambda *_: None, now=NOW) == (0, 0)
     assert api.deletes == []
+
+
+# --- ArrApi: the seam every other test replaces ----------------------------
+#
+# Every test above hands run()/process_service() a FakeApi, which is what makes
+# them fast and hermetic -- and also means ArrApi, the class that actually
+# shells out to curl, had never been constructed once. The mutation sweep found
+# it: the whole argv list could be truncated to `[]` and nothing went red.
+# These tests patch subprocess.run and assert on the argv that would have been
+# executed, so the command is pinned without a request ever leaving the process.
+
+class FakeRun:
+    def __init__(self, returncode=0, stdout=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.calls = []
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append((argv, kwargs))
+
+        class R:
+            pass
+        r = R()
+        r.returncode = self.returncode
+        r.stdout = self.stdout
+        return r
+
+
+CURL_KWARGS = {"capture_output": True, "text": True, "timeout": 30}
+
+
+def test_get_shells_out_to_curl_with_the_built_url(monkeypatch):
+    fake = FakeRun(stdout='{"records": [], "totalRecords": 0}')
+    monkeypatch.setattr(m.subprocess, "run", fake)
+    assert m.ArrApi().get(8989, "/api/v3/queue", "KEY") == {"records": [],
+                                                           "totalRecords": 0}
+    assert fake.calls == [(
+        ["curl", "-s", "-f", "http://localhost:8989/api/v3/queue?apikey=KEY"],
+        CURL_KWARGS,
+    )]
+
+
+def test_a_failed_curl_yields_none_rather_than_a_parse_error(monkeypatch):
+    # stdout is empty on failure, so returning it to json.loads would raise.
+    # The returncode check is the only thing standing between the two.
+    monkeypatch.setattr(m.subprocess, "run", FakeRun(returncode=22, stdout=""))
+    assert m.ArrApi().get(8989, "/api/v3/queue", "KEY") is None
+
+
+def test_delete_sends_the_delete_verb_and_reports_success(monkeypatch):
+    fake = FakeRun()
+    monkeypatch.setattr(m.subprocess, "run", fake)
+    assert m.ArrApi().delete(7878, "/api/v3/queue/9?removeFromClient=true",
+                             "KEY") is True
+    assert fake.calls == [(
+        ["curl", "-s", "-f", "-X", "DELETE",
+         "http://localhost:7878/api/v3/queue/9?removeFromClient=true&apikey=KEY"],
+        CURL_KWARGS,
+    )]
+
+
+def test_a_failed_delete_reports_false(monkeypatch):
+    monkeypatch.setattr(m.subprocess, "run", FakeRun(returncode=1))
+    assert m.ArrApi().delete(7878, "/api/v3/queue/9", "KEY") is False
+
+
+def test_post_json_sends_the_payload_as_a_json_body(monkeypatch):
+    fake = FakeRun()
+    monkeypatch.setattr(m.subprocess, "run", fake)
+    assert m.ArrApi().post_json(7878, "/api/v3/command", "KEY",
+                                {"name": "MoviesSearch", "movieIds": [3]}) is True
+    argv, kwargs = fake.calls[0]
+    assert argv == [
+        "curl", "-s", "-f", "-X", "POST",
+        "-H", "Content-Type: application/json",
+        "-d", '{"name": "MoviesSearch", "movieIds": [3]}',
+        "http://localhost:7878/api/v3/command?apikey=KEY",
+    ]
+    assert kwargs == CURL_KWARGS
+    # The body must survive a round trip, not merely look right as a string.
+    assert json.loads(argv[8]) == {"name": "MoviesSearch", "movieIds": [3]}
+
+
+def test_a_failed_post_reports_false(monkeypatch):
+    monkeypatch.setattr(m.subprocess, "run", FakeRun(returncode=7))
+    assert m.ArrApi().post_json(7878, "/api/v3/command", "KEY", {}) is False
+
+
+# --- run(): what it forwards to process_service ----------------------------
+#
+# run() passes out=, now=, sleep= and max_pages= straight through. Dropping any
+# one of them silently reinstates the production default -- the real clock, the
+# real sleep, the real page bound -- which is invisible to a test that only
+# asserts on the summary line.
+
+def test_run_forwards_the_injected_clock():
+    # Added in 2020 with zero progress: stale against any real clock, and not
+    # stale against the clock injected here. If run() stops forwarding `now`,
+    # process_service falls back to datetime.now() and deletes it.
+    api = FakeApi([rec(size=100, sizeleft=100, added="2020-01-01T00:00:00Z")])
+    removed, _ = m.run(m.services("SK", ""), api, True, False,
+                       out=lambda *_: None,
+                       now=datetime(2020, 1, 1, 1, 0, tzinfo=timezone.utc),
+                       sleep=lambda _: None)
+    assert removed == 0
+    assert api.deletes == []
+
+
+def test_run_forwards_the_injected_sleep():
+    slept = []
+    api = FakeApi([stuck()])
+    m.run(m.services("SK", ""), api, True, False, out=lambda *_: None,
+          now=NOW, sleep=slept.append)
+    assert slept, "the pause between deletes went to the real time.sleep"
+
+
+def test_run_forwards_the_page_bound():
+    lines = []
+    api = PagingApi(pages=lambda p: [rec(id=p)], total=lambda p: 10_000)
+    m.run([svc()], api, False, False, out=lines.append, now=NOW, max_pages=1)
+    assert any("Stopped after 1 pages" in line for line in lines)
+
+
+def test_the_summary_is_introduced_by_a_rule():
+    # The separator is the only thing separating one service's per-item output
+    # from the totals in a log cron mails out; dropping it changes no status
+    # and no total. Asserted by position rather than presence, so it cannot be
+    # satisfied by some other line that happens to contain the same characters.
+    api = FakeApi([stuck()])
+    lines = []
+    m.run(m.services("SK", ""), api, False, False, out=lines.append, now=NOW)
+    i = next(n for n, line in enumerate(lines) if line.startswith("Summary ("))
+    assert lines[i - 1] == "\n" + "=" * 40
+
+
+def test_the_applied_summary_does_not_suggest_applying():
+    # `not apply_changes and total_removed > 0` -> `True and ...` keeps every
+    # existing assertion true, because no test had an applied run *and* looked
+    # for the absence of the dry-run hint.
+    api = FakeApi([stuck()])
+    lines = []
+    m.run(m.services("SK", ""), api, True, False, out=lines.append, now=NOW,
+          sleep=lambda _: None)
+    assert not any("Run with --apply" in line for line in lines)
+
+
+# --- main(): the argv boundary --------------------------------------------
+
+def test_main_maps_argv_onto_the_run_arguments(monkeypatch):
+    seen = {}
+
+    def spy(svcs, api, apply_changes, verbose, **kw):
+        seen.update(svcs=svcs, api=api, apply_changes=apply_changes,
+                    verbose=verbose)
+        return 0, 0
+
+    monkeypatch.setattr(m, "run", spy)
+    assert m.main(["prog", "true", "false", "SK", "RK"]) == 0
+    assert seen["apply_changes"] is True
+    assert seen["verbose"] is False
+    assert isinstance(seen["api"], m.ArrApi)
+    assert [s["name"] for s in seen["svcs"]] == ["Sonarr", "Radarr"]
+    assert [s["key"] for s in seen["svcs"]] == ["SK", "RK"]
+
+
+def test_main_treats_anything_but_the_literal_true_as_false(monkeypatch):
+    # bash passes the lowercase words `true`/`false`; the sibling Sonarr script
+    # compared against "True" and its --apply flag was inert for that reason.
+    seen = {}
+    monkeypatch.setattr(m, "run", lambda svcs, api, a, v, **kw: seen.update(
+        apply_changes=a, verbose=v) or (0, 0))
+    m.main(["prog", "True", "1", "SK", ""])
+    assert seen == {"apply_changes": False, "verbose": False}
+
+
+def test_the_module_actually_runs_when_executed_as_a_script():
+    # `sys.exit(main(sys.argv))` is unreachable from any import-based test, and
+    # with it gone the script exits 0 having done nothing -- indistinguishable
+    # from a clean run, as far as the bash half can tell. Run with no arguments
+    # so main() dies on argv[1] before it can build an ArrApi and reach curl.
+    r = subprocess.run(
+        [sys.executable,
+         os.path.join(os.path.dirname(m.__file__), "queue_cleanup.py")],
+        capture_output=True, text=True)
+    assert r.returncode != 0
+    assert "IndexError" in r.stderr
