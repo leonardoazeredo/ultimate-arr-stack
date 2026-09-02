@@ -158,6 +158,8 @@ nobody can reach.
 | `scripts/queue-cleanup.sh` | 2026-09-02 | 25 | 19 | 6 (all `equivalent`) | **19/19** |
 | `scripts/fix-radarr-paths.sh` | 2026-09-02 | 15 | 15 | 0 | **15/15** |
 | `scripts/fix-sonarr-folders.sh` | 2026-09-02 | 11 | 10 | 1 (`equivalent`) | **10/10** |
+| `scripts/lib/fix_radarr_paths.py` | 2026-09-02 | 113 | 112 | 1 (`equivalent`) | **112/112** |
+| `scripts/lib/fix_sonarr_folders.py` | 2026-09-02 | 110 | 108 | 2 (both `equivalent`) | **108/108** |
 
 The four 2026-09-02 rows are the arr fixers, and they took two rounds to get
 there: the first sweep killed 36 of 61 (59%). Nine of the survivors were real
@@ -173,6 +175,35 @@ the fact that a temp file was made at all can catch it. `-f` → `-e` on the sam
 guard lets a directory reach `wc -l <`, which prints a 0 *and* fails, so the
 `|| echo 0` appends a second one and the arithmetic test throws — same status,
 same skipped trim, one bash error in the cron log.
+
+The three `.py` rows are the modules those scripts became, and they are the
+first targets swept with universalmutator's own `python.rules`. Two things had
+to be fixed before the numbers meant anything. The first was that a mutation
+tool will happily rewrite prose: `fix_sonarr_folders.py` generates 561 mutants,
+318 of them inside comments and docstrings, every one of which survives by
+construction and buried the 110 that are actually scoreable. `--ignore` cannot see a docstring's
+interior — it matches one line at a time — so the filter is by line number, from
+`tokenize`: COMMENT tokens, plus any STRING spanning more than one line. Single
+-line strings stay mutable, because `RADARR = "http://..."` is code.
+
+The second is what the surviving mutants then said, and all three modules said
+it identically: **every test injected the seam, so the thing behind it had never
+been constructed.** Each module has a class that shells out to curl — `ArrApi`,
+`SonarrApi`, `curl_updater` — and every `run()` test passes in a fake, which is
+what makes those tests fast and hermetic. It also meant the whole curl argv
+could be replaced with `["curl"]`, or `[]`, and nothing went red. `main()` was
+unreached for the same reason, and `sys.exit(main(sys.argv))` cannot be reached
+by an import-based test at all; it needs a real subprocess, invoked with
+arguments chosen so the module dies before it can reach the network.
+
+One survivor was not a gap and not an equivalent: a third thing. In
+`fix_sonarr_folders.py` a `[tvdbid-{TvdbId}]` replacement could never fire,
+because the `{TvdbId}` substitution five lines above had already rewritten the
+token inside the brackets. Nothing could kill it because there was nothing to
+kill — the line was dead, and deleting it was the fix. That is the third time
+in this repo an unkillable mutant turned out to mean dead code rather than an
+equivalent one, which is worth remembering before reaching for the
+`equivalent` verdict.
 
 `scripts/queue-cleanup.sh`'s six remaining survivors are all in or around
 `get_api_key`, and all six were measured rather than argued: the function

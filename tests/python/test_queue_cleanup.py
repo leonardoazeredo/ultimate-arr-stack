@@ -145,6 +145,20 @@ def test_import_pending_without_a_warning_is_left_alone():
     assert kind is None
 
 
+def test_a_still_downloading_item_is_not_judged_by_the_import_pending_rule():
+    # The state and the status are two separate conditions and the test above
+    # only removes one of them. This removes the other: a healthy download that
+    # happens to carry a warning and an "not an upgrade" message is not
+    # pending import, and deleting it would blocklist a release still in
+    # flight.
+    kind, _ = m.is_stuck(rec(trackedDownloadState="downloading",
+                             trackedDownloadStatus="warning",
+                             size=100, sizeleft=50,
+                             statusMessages=[{"messages":
+                                              ["Not an upgrade for existing file"]}]), NOW)
+    assert kind is None
+
+
 def test_downloading_metadata_is_matched_case_insensitively():
     kind, why = m.is_stuck(rec(errorMessage="Downloading Metadata"), NOW)
     assert (kind, why) == ("metadata", "stuck downloading metadata")
@@ -361,6 +375,38 @@ def test_apply_triggers_one_search_per_distinct_target():
     assert searches == 2
     assert api.posts == [{"name": "SeriesSearch", "seriesId": 7},
                          {"name": "SeriesSearch", "seriesId": 9}]
+
+
+def test_a_failed_search_says_so_against_the_item_it_failed_for():
+    # The summary counts searches *attempted*, so a service rejecting every
+    # search still reports "2 searches triggered". This per-item line is the
+    # only place the failure is visible at all -- and dropping it changes no
+    # count, no status and no other message.
+    api = FakeApi([stuck(seriesId=7)], post_ok=False)
+    lines = []
+    m.process_service(svc(), api, True, False, out=lines.append, now=NOW,
+                      sleep=lambda _: None)
+    assert any("Search seriesId=7: FAILED" in line for line in lines)
+    assert not any("queued" in line for line in lines)
+
+
+def test_a_successful_search_is_reported_as_queued():
+    api = FakeApi([stuck(seriesId=7)])
+    lines = []
+    m.process_service(svc(), api, True, False, out=lines.append, now=NOW,
+                      sleep=lambda _: None)
+    assert any("Search seriesId=7: queued" in line for line in lines)
+
+
+def test_a_dry_run_names_each_search_it_would_have_triggered():
+    # The dry run's whole output is its product; the count in the summary says
+    # how many, and only this line says which.
+    api = FakeApi([stuck(seriesId=7), stuck(id=2, seriesId=9)])
+    lines = []
+    m.process_service(svc(), api, False, False, out=lines.append, now=NOW)
+    assert any("[dry-run] Search seriesId=7" in line for line in lines)
+    assert any("[dry-run] Search seriesId=9" in line for line in lines)
+    assert api.posts == []
 
 
 def test_a_failed_delete_is_not_counted_and_triggers_no_search():

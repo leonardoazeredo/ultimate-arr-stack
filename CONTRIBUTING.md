@@ -269,11 +269,27 @@ Without the `gh release edit` step, the release stays Draft and won't show as La
 
 ## Scripts Structure
 
+<!-- SCRIPTS-TREE-ORACLE: asserted by tests/shellcheck.bats; the file names are
+     derived, the descriptions are not. Systemd units (.service/.timer) sit in
+     scripts/ too and are deliberately not listed: this section is the scripts. -->
 ```
 scripts/
-├── arr-backup.sh           # Backup all Docker named volumes
-├── fix-radarr-paths.sh     # Fix Radarr paths after TRaSH naming organize
-├── pre-commit              # Main hook (symlinked from .git/hooks/)
+├── arr-backup.sh                 # Back up the Docker named volumes
+├── backup-prune.sh               # GFS-tiered retention over those backups
+├── boot-compose-up.sh            # Reconcile every stack after a reboot or UGOS update
+├── check-network.sh              # Find and optionally clean orphaned Docker networks
+├── check-vpn.sh                  # Confirm Gluetun's exit IP differs from the NAS's
+├── configure-apps.sh             # Configure the arr apps over their APIs
+├── detect-credential-drift.sh    # Detect the credential-propagation bug class
+├── detect-vpn-zombies.sh         # Detect containers left on a stale netns binding
+├── ensure-tailscale-relay-port.sh # Re-apply node 1's relay-server-port pref
+├── fix-radarr-paths.sh           # Fix Radarr paths after a TRaSH naming reorganize
+├── fix-sonarr-folders.sh         # Fix Sonarr folder names against the folder format
+├── queue-cleanup.sh              # Remove stuck items from the Sonarr/Radarr queues
+├── restart-stack.sh              # Restart a stack without ever using `down`
+├── sync-nas.sh                   # Move the NAS deploy copy onto the local branch
+├── post-merge                    # Hook: push main, then sync the NAS to it
+├── pre-commit                    # Main hook (symlinked from .git/hooks/)
 └── lib/
     ├── common.sh               # Shared functions (NAS config, SSH, file scanning)
     ├── check-secrets.sh        # Detect API keys, private keys
@@ -287,8 +303,13 @@ scripts/
     ├── check-domains.sh        # Verify domain accessibility
     ├── check-doc-links.sh      # Resolve internal markdown links
     ├── check-image-versions.sh # Check for stale Docker image tags
-    └── configure-helpers.sh    # HTTP/JSON helpers for configure-apps.sh
+    ├── configure-helpers.sh    # HTTP/JSON helpers for configure-apps.sh
+    ├── env-file.sh             # Read a single value out of a .env file
+    ├── fix_radarr_paths.py     # The Radarr fixer's logic, as an importable module
+    ├── fix_sonarr_folders.py   # The Sonarr fixer's logic, as an importable module
+    └── queue_cleanup.py        # The queue cleaner's logic, as an importable module
 ```
+<!-- /SCRIPTS-TREE-ORACLE -->
 
 The `common.sh` library provides shared functions used by all checks:
 - **NAS config**: Reads hostname/user from `.claude/config.local.md`

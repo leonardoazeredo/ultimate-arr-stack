@@ -232,3 +232,57 @@ sourced_repo_files() {
         fail "assertion-shadowing collision"
     fi
 }
+
+# Script files CONTRIBUTING.md's tree is expected to name: everything under
+# scripts/ that is a script. Systemd units live there too and are deliberately
+# out of scope -- the section is titled "Scripts Structure", and listing a
+# .timer beside a .sh would blur what the tree is for.
+documented_script_files() {
+    { find "$REPO_ROOT/scripts" -maxdepth 1 -type f \
+           \( -name '*.sh' -o -name '*.py' \) -printf 'scripts/%f\n'
+      find "$REPO_ROOT/scripts/lib" -maxdepth 1 -type f \
+           \( -name '*.sh' -o -name '*.py' \) -printf 'scripts/lib/%f\n'
+      printf '%s\n' scripts/pre-commit scripts/post-merge
+    } | sort -u
+}
+
+@test "the scripts tree in CONTRIBUTING.md names every script that exists" {
+    # Same reasoning as the no-sweep list above, applied to the other
+    # hand-maintained inventory in this repo. When this was written the tree
+    # named 3 of the 16 files in scripts/ and was missing env-file.sh and all
+    # three extracted Python modules -- it had been accurate once.
+    #
+    # Only the NAMES are derived. The descriptions beside them are prose and
+    # nobody can generate those, so adding a script fails this test until
+    # somebody writes one line about it. That is the intended cost.
+    local expected actual
+    expected="$(documented_script_files)"
+
+    # Compared as PATHS, not bare names. The first version of this compared
+    # basenames across both sections at once, and a corpus entry caught it:
+    # a bogus `check-dns-duplicates.sh` under scripts/ was masked by the real
+    # one under scripts/lib/, so the tree could name a file in the wrong place
+    # and still pass. Indentation is what says which section a line is in.
+    actual="$(sed -n '/<!-- SCRIPTS-TREE-ORACLE:/,/<!-- \/SCRIPTS-TREE-ORACLE -->/p' \
+                  "$REPO_ROOT/CONTRIBUTING.md" \
+              | sed -nE 's/^(├──|└──) ([A-Za-z0-9_.-]+) .*/scripts\/\2/p;
+                         s/^    (├──|└──) ([A-Za-z0-9_.-]+) .*/scripts\/lib\/\2/p' \
+              | sort -u)"
+
+    # Neither side may be empty, for the same reason as above: an empty
+    # `expected` means the discovery broke, an empty `actual` means the markers
+    # moved, and either way the comparison would pass by matching nothing.
+    [ -n "$expected" ] || fail "found no scripts to document; the discovery is broken"
+    [ -n "$actual" ]   || fail "no SCRIPTS-TREE-ORACLE block found in CONTRIBUTING.md"
+
+    if [ "$expected" != "$actual" ]; then
+        {
+            echo "CONTRIBUTING.md's scripts tree disagrees with scripts/ on disk."
+            echo "--- in the tree but not on disk (stale, remove the line) ---"
+            comm -13 <(echo "$expected") <(echo "$actual")
+            echo "--- on disk but not in the tree (add it, with a description) ---"
+            comm -23 <(echo "$expected") <(echo "$actual")
+        } >&2
+        fail "scripts tree is out of date"
+    fi
+}

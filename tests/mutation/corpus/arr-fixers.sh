@@ -354,3 +354,24 @@ mutation queue-script-entry-inert \
   --test "the extracted modules pass their pytest suite" \
   --why "with the entry point gone the module imports, does nothing and exits 0 - which from the bash half is indistinguishable from a clean run over an empty queue, and no import-based test executes this line at all (test_the_module_actually_runs_when_executed_as_a_script)" \
   --apply 'sed -i "s@^    sys.exit(main(sys.argv))\$@    pass@" "$F"'
+
+mutation queue-search-result-silent \
+  --file scripts/lib/queue_cleanup.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "the summary counts searches attempted, not searches accepted, so a service rejecting every one still reports them as triggered - this per-item line is the only place the FAILED is visible, and removing it leaves an operator reading a clean report of work that did not happen (test_a_failed_search_says_so_against_the_item_it_failed_for)" \
+  --apply 'sed -i "s@^                out(f\".*{status}.*\$@                pass@" "$F"'
+
+mutation queue-dry-run-search-unnamed \
+  --file scripts/lib/queue_cleanup.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "a dry run's entire product is its output; the summary says how many searches would be triggered and only this line says for which items, so dropping it makes the dry run unable to answer the question it exists to answer (test_a_dry_run_names_each_search_it_would_have_triggered)" \
+  --apply 'sed -i "s@^                out(f\".*.dry-run. Search.*\$@                pass@" "$F"'
+
+mutation queue-import-pending-ignores-state \
+  --file scripts/lib/queue_cleanup.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "the state and the status are two conditions and dropping the state one lets any warning-flagged record with an 'not an upgrade' message be treated as pending import - which deletes and blocklists releases that are still downloading (test_a_still_downloading_item_is_not_judged_by_the_import_pending_rule)" \
+  --apply 'sed -i "s@^    if tracked_state == \"importPending\" and tracked_status == \"warning\":\$@    if True and tracked_status == \"warning\":@" "$F"'
