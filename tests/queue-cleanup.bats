@@ -260,13 +260,23 @@ esac
 # --- the harness's own claim ----------------------------------------------
 
 @test "queue-cleanup: a failing mktemp aborts rather than trimming to nowhere" {
-    # Without errexit the script carries on with TMPLOG unset, redirects the
-    # tail into the empty string, and exits 0 -- reporting a clean run for a
-    # trim that could not even start.
+    # errexit must stop the script at the failed assignment, before the trim is
+    # attempted at all. Exit status alone cannot show that: without errexit the
+    # script carries on with TMPLOG empty, `> ""` fails, and the enclosing `if`
+    # compound returns 1 too -- so both variants exit non-zero. What separates
+    # them is stderr. The errexit path says nothing; the other emits bash's own
+    # `: No such file or directory` from a redirect into the empty string, and
+    # an operator reading cron's mail sees a confusing redirect error instead
+    # of a clean abort. Assert on the stream, not just the status.
+    #
+    # The stub fails only for the script's own template: `run --separate-stderr`
+    # calls mktemp itself to make the stderr file, so a blanket `exit 1` breaks
+    # the harness rather than the script under test.
     seq 1 1200 > "$LOG"
-    stub_tool mktemp 'exit 1'
-    run "$SCRIPT" --apply
+    stub_tool mktemp "case \"\$1\" in \"$LOG\".*) exit 1;; esac; exec /usr/bin/mktemp \"\$@\""
+    run --separate-stderr "$SCRIPT" --apply
     [ "$status" -ne 0 ]
+    [[ "$stderr" != *"No such file or directory"* ]]
     [ "$(wc -l < "$LOG")" -eq 1200 ]
 }
 
