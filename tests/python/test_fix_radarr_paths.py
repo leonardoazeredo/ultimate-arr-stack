@@ -367,7 +367,9 @@ def test_main_triggers_a_refresh_only_when_something_was_fixed(tmp_path, monkeyp
     m.main(["prog", "KEY", str(tmp_path)])
     out = capsys.readouterr().out
     assert refreshed == ["KEY"]
-    assert "Triggering Radarr refresh..." in out
+    # The blank line is part of it: the refresh notice has to be separated from
+    # run()'s summary or it reads as another summary line.
+    assert "\n\nTriggering Radarr refresh..." in out
     assert "Wait ~30 seconds" in out
 
 
