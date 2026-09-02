@@ -277,3 +277,10 @@ mutation sonarr-no-errexit \
   --test "a missing library aborts rather than blaming the API key" \
   --why "without errexit a failed source is ignored, env_value is not a command, and the empty key makes the script report a missing SONARR_API_KEY - a confident wrong diagnosis that sends the operator to edit an .env that was fine" \
   --apply 'sed -i "s@^set -euo pipefail\$@set -uo pipefail@" "$F"'
+
+mutation queue-log-not-a-file \
+  --file scripts/queue-cleanup.sh \
+  --bats tests/queue-cleanup.bats \
+  --test "a directory in place of the log is skipped quietly" \
+  --why "-e lets a directory through to \`wc -l <\`, which both prints a 0 and fails, so LINES becomes two lines and the arithmetic test throws - same exit status, same skipped trim, but a bash syntax error in the cron log where the guard was meant to read as 'nothing to trim'" \
+  --apply 'sed -i "s@^if \$APPLY && \[\[ -f \"\$LOG_FILE\" \]\]; then\$@if \$APPLY \&\& [[ -e \"\$LOG_FILE\" ]]; then@" "$F"'

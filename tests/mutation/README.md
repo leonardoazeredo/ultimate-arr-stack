@@ -154,6 +154,32 @@ nobody can reach.
 | --- | --- | --- | --- | --- | --- |
 | `scripts/lib/check-secrets.sh` | 2026-09-01 | 11 | 8 | 3 (all `equivalent`) | **8/8** |
 | `scripts/lib/configure-helpers.sh` | 2026-09-01 | 31 | 23 | 8 (all `equivalent`) | **23/23** |
+| `scripts/lib/env-file.sh` | 2026-09-02 | 8 | 8 | 0 | **8/8** |
+| `scripts/queue-cleanup.sh` | 2026-09-02 | 25 | 19 | 6 (all `equivalent`) | **19/19** |
+| `scripts/fix-radarr-paths.sh` | 2026-09-02 | 15 | 15 | 0 | **15/15** |
+| `scripts/fix-sonarr-folders.sh` | 2026-09-02 | 11 | 10 | 1 (`equivalent`) | **10/10** |
+
+The four 2026-09-02 rows are the arr fixers, and they took two rounds to get
+there: the first sweep killed 36 of 61 (59%). Nine of the survivors were real
+gaps and got tests; the largest single class was assertions that could not see
+which *stream* a message went to, because `run` merges stdout and stderr. For a
+script cron runs, that is the difference between reaching the operator's mail
+and only ever landing in a log nobody reads.
+
+Two more survivors closed on a second pass, and both are worth naming because
+neither changed an exit status — the usual thing a test asserts on. `-gt` →
+`-ge` on the log trim rewrites a live log with a byte-identical copy, so only
+the fact that a temp file was made at all can catch it. `-f` → `-e` on the same
+guard lets a directory reach `wc -l <`, which prints a 0 *and* fails, so the
+`|| echo 0` appends a second one and the arithmetic test throws — same status,
+same skipped trim, one bash error in the cron log.
+
+`scripts/queue-cleanup.sh`'s six remaining survivors are all in or around
+`get_api_key`, and all six were measured rather than argued: the function
+writes the key to stdout before it returns, and every caller discards its status
+through `|| true`, so no reachable combination of `return 0`/`return 1`/`&&`/
+`||` changes the key the caller ends up with. An absent container and an empty
+key already converge on the same "Could not get API keys" exit.
 
 Both files' survivors are the same shape: `cmd || true` → `cmd && true` on a
 line whose exit status nothing reads. In `check-secrets.sh` every call site is

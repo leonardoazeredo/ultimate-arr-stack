@@ -232,6 +232,19 @@ esac
     [ "$(wc -l < "$LOG")" -eq 1000 ]
 }
 
+@test "queue-cleanup: a directory in place of the log is skipped quietly" {
+    # -e gets as far as `wc -l < <dir>`, which prints a 0 *and* fails, so the
+    # `|| echo 0` appends a second one and `[[ "0\n0" -gt 1000 ]]` throws an
+    # arithmetic syntax error. The trim is skipped either way and the exit
+    # status is 0 either way -- the only trace is a bash error in the cron log
+    # for a condition that is supposed to read as "no log to trim".
+    rm -f "$LOG"
+    mkdir -p "$LOG"
+    run --separate-stderr "$SCRIPT" --apply
+    [ "$status" -eq 0 ]
+    [ -z "$stderr" ]
+}
+
 @test "queue-cleanup: an absent log is not an error" {
     rm -f "$LOG"
     run "$SCRIPT" --apply
