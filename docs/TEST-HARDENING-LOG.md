@@ -589,6 +589,55 @@ write-up in `tests/mutation/README.md`; these are the one-line forms.
   every test sets it, no test can ever exercise the default it falls back to. A mutation
   of that default is unkillable by construction. Mutate the *call site* instead, and
   write the one test that proves the resolution rule (run it from `/`).
+- ▸ **`run` merges stdout and stderr, so a test cannot see which stream a message went
+  to.** Moving an error from `>&2` to stdout changed nothing any assertion here could
+  observe, and it was the single largest survivor class in the first sweep of the arr
+  fixers. For a script cron runs, that is the difference between reaching the operator's
+  mail and only ever landing in a log nobody reads. `run --separate-stderr` (and
+  `bats_require_minimum_version 1.5.0` at the top of the file) is what makes the stream
+  assertable.
+- ▸ **When both variants fail, the exit status is not the discriminator — the stream
+  is.** A test written to prove `set -e` mattered in `scripts/queue-cleanup.sh` asserted
+  only `status -ne 0`, and passed against the mutant: without errexit the script carries
+  on, the redirect into the now-empty `$TMPLOG` fails, and the enclosing `if` compound
+  returns 1 too. What actually separates them is that errexit aborts silently where the
+  other leaves bash's own `: No such file or directory` behind. The test was written to
+  catch a "guard that cannot fail" and was one itself until the corpus said so.
+- ▸ **Stubbing a tool the harness itself uses breaks the harness, not the code under
+  test.** `run --separate-stderr` calls `mktemp` to make its stderr file, so
+  `stub_tool mktemp 'exit 1'` failed at the `run` line and looked like a bug in the
+  script. Stub conditionally — fail only for the argument the script itself passes, and
+  `exec` the real tool otherwise.
+- ▸ **A blank-line assertion is vacuous when a second blank line sits next to it.**
+  `out[1] == ""` proved nothing about the header's blank line while the library was
+  empty, because the summary's blank line was the very next entry. The fixture has to
+  put something *between* the two.
+- ▸ **A mutation tool will happily rewrite prose, and every one of those mutants
+  survives.** universalmutator turned "imported and tested" into "imported and True"
+  144 times in one Python module, burying the handful of real findings. `--ignore`
+  matches one line at a time and cannot see the interior of a docstring, so the filter
+  has to be by line number — `tokenize`, comments plus any multi-line string. Leave
+  single-line strings mutable: `RADARR = "http://..."` is code.
+- ▸ **An unkillable mutant on a line that is supposed to do something is a finding, not
+  a coverage gap — the line is dead.** Three times in this pass: five unused helpers in
+  `queue-cleanup.sh`, and `fix_sonarr_folders.py`'s `[tvdbid-{TvdbId}]` replacement,
+  which could never fire because the `{TvdbId}` substitution five lines above already
+  rewrites the token inside the brackets. Reading the file caught none of them.
+- ▸ **Injecting a seam everywhere hides the thing behind it.** Every test of both arr
+  fixers passed in a fake updater or a fake API, so the code that actually talks to
+  Radarr and Sonarr — the `-X PUT`, the `?moveFiles=true`, the API-key header — had
+  never been constructed once, and the sweep said so in about forty survivors. A seam
+  needs its own test on the real side of it.
+- ▸ **`sys.exit(main(sys.argv))` is unreachable from any import-based test**, so with it
+  deleted the script exits 0 having done nothing — indistinguishable from a clean run to
+  the bash half. It takes an actual subprocess to pin, with arguments chosen so the
+  module dies before it can reach the network.
+- **An argv-type mismatch across a process boundary is invisible on both sides.** The
+  bash half wrote `true`/`false`; the Python half compared against `"True"`, so
+  `--apply` was inert and every run reported a dry run's output. Neither file is wrong
+  read on its own. Moving such a boundary (a heredoc to a real module) deserves a proved
+  equivalence — byte-identical stdout, stderr and status against the same fixture —
+  rather than an assurance.
 
 **Operational**
 
