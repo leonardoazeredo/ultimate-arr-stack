@@ -350,12 +350,26 @@ def stuck(**kw):
     return rec(trackedDownloadState="importBlocked", **kw)
 
 
+def test_process_service_announces_the_service_and_queue_size():
+    api = FakeApi([stuck(), rec(id=2, added=ago(1))])
+    lines = []
+    m.process_service(svc(), api, False, False, out=lines.append, now=NOW)
+    assert any("--- Sonarr (port 8989) ---" in line for line in lines)
+    assert any("Queue size: 2 items" in line for line in lines)
+
+
 def test_a_dry_run_issues_no_delete_and_no_search():
     api = FakeApi([stuck()])
+    lines = []
     removed, searches = m.process_service(svc(), api, False, False,
-                                          out=lambda *_: None, now=NOW)
+                                          out=lines.append, now=NOW)
     assert api.deletes == [] and api.posts == []
     assert (removed, searches) == (1, 1)
+    assert any("[dry-run] Would remove: Item" in line for line in lines)
+    # The dry-run branch's own reason line -- the apply branch prints the same
+    # text from a different call site, so a test only covering that one leaves
+    # this one droppable.
+    assert any("Reason: import blocked" in line for line in lines)
 
 
 def test_apply_deletes_from_the_client_and_blocklists():
@@ -396,6 +410,9 @@ def test_a_successful_search_is_reported_as_queued():
     m.process_service(svc(), api, True, False, out=lines.append, now=NOW,
                       sleep=lambda _: None)
     assert any("Search seriesId=7: queued" in line for line in lines)
+    assert any("✓ Removed: Item" in line for line in lines)
+    assert any("Reason: import blocked" in line for line in lines)
+    assert any("Triggering searches for 1 sonarr item(s):" in line for line in lines)
 
 
 def test_a_dry_run_names_each_search_it_would_have_triggered():
@@ -407,15 +424,19 @@ def test_a_dry_run_names_each_search_it_would_have_triggered():
     assert any("[dry-run] Search seriesId=7" in line for line in lines)
     assert any("[dry-run] Search seriesId=9" in line for line in lines)
     assert api.posts == []
+    assert any("Found 2 stuck item(s):" in line for line in lines)
+    assert any("Would trigger searches for 2 sonarr item(s):" in line for line in lines)
 
 
 def test_a_failed_delete_is_not_counted_and_triggers_no_search():
     api = FakeApi([stuck()], delete_ok=False)
+    lines = []
     removed, searches = m.process_service(svc(), api, True, False,
-                                          out=lambda *_: None, now=NOW,
+                                          out=lines.append, now=NOW,
                                           sleep=lambda _: None)
     assert (removed, searches) == (0, 0)
     assert api.posts == []
+    assert any("✗ Failed to remove: Item" in line for line in lines)
 
 
 def test_a_healthy_queue_reports_nothing_stuck_and_writes_nothing():
@@ -426,6 +447,10 @@ def test_a_healthy_queue_reports_nothing_stuck_and_writes_nothing():
     assert (removed, searches) == (0, 0)
     assert api.deletes == []
     assert any("No stuck items found" in line for line in lines)
+    # The early return this message sits on skips the rest of the function --
+    # with it gone, the same return value comes back via fallthrough, and only
+    # this "was the found-count line printed too" check can tell the two apart.
+    assert not any("Found" in line for line in lines)
 
 
 def test_an_item_with_no_target_id_is_removed_without_a_search():

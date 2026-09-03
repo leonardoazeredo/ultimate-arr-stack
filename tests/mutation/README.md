@@ -160,6 +160,7 @@ nobody can reach.
 | `scripts/fix-sonarr-folders.sh` | 2026-09-02 | 11 | 10 | 1 (`equivalent`) | **10/10** |
 | `scripts/lib/fix_radarr_paths.py` | 2026-09-02 | 113 | 112 | 1 (`equivalent`) | **112/112** |
 | `scripts/lib/fix_sonarr_folders.py` | 2026-09-02 | 110 | 108 | 2 (both `equivalent`) | **108/108** |
+| `scripts/lib/queue_cleanup.py` | 2026-09-04 | 372 | 371 | 1 (`equivalent`) | **371/371** |
 
 The four 2026-09-02 rows are the arr fixers, and they took two rounds to get
 there: the first sweep killed 36 of 61 (59%). Nine of the survivors were real
@@ -224,6 +225,24 @@ established it.
 budget: one mutant (`|| true` → `&& true` inside `wait_for_service`'s HTTP-code
 test, `:109`) makes the wait loop unsatisfiable, and the unbounded sweep spent
 90 minutes on it. It is now killed at the budget, and the summary says so.
+
+`scripts/lib/queue_cleanup.py` is the fourth `.py` target, swept later than the
+other three and for a reason worth recording on its own: the first attempt at
+this sweep rebooted the host twice (see `docs/TEST-HARDENING-LOG.md` §8 and the
+`oracle-memory-cap` corpus entries) and had to wait on a memory cap for both
+the containerised and native oracle paths before it could run at all. Once it
+ran, all nine of its survivors were the same shape: an `out(...)` line the
+oracle's tests never captured, so the mutant's `pass` produced no observable
+difference to anything a test actually checked — the header line, the queue-size
+line, the removal/reason/failure lines, the search-summary line, and one early
+`return 0, 0` whose fallthrough happened to reach the same return value by a
+different path. The fix in every case was the same one-line addition: the file
+already runs every scenario through `out=lines.append`, so each gap closed by
+adding an `assert any(... in line for line in lines)` rather than by writing
+new test infrastructure. The remaining survivor, `_age_hours`'s `114 return
+None ==> pass`, is the same equivalent shape as `fix_radarr_paths.py:70` above
+— the last statement is already `return None`, so falling off the end returns
+it just the same.
 
 ## Targets with no oracle
 
