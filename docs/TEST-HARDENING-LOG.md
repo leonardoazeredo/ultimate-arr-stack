@@ -22,7 +22,7 @@ them read as coverage right up until it was watched.
 | | Re-check |
 | --- | --- |
 | Merged | `86d5fcf`, 2026-09-01, local merge — the `post-merge` hook fired and synced the NAS. `git log --oneline --no-decorate a56d2cc..86d5fcf` |
-| pi1 suite | Green at merge bar 2 pre-existing `jq: command not found` failures (see §7). `./tests/run-tests.sh` |
+| pi1 suite | Fully green, 693/693, no exceptions — the 2 pre-existing `jq: command not found` failures closed 2026-09-04 (see §7). `./tests/run-tests.sh` |
 | NAS suite | Green at merge. `ssh arr-stack-nas 'cd /volume1/docker/arr-stack && ./tests/run-tests.sh'` |
 | Mutation corpus | All killed at merge, none survived. `./tests/mutation/run-mutations.sh` — the count is whatever the corpus holds now, not a number to copy |
 | Merge gate | CONTESTED → all findings explicitly accepted or rejected on the record (§6) |
@@ -258,15 +258,15 @@ dropped:
 "Open items" list that silently loses entries is indistinguishable from one nobody
 has touched.
 
-- **The 04:00 cron log redirection — needs interactive sudo on the NAS.** The nightly
-  backup runs (tarball `20260831-040002`, root-owned) but writes **no log**, so its
-  only failure signals reach nobody. Replacement crontab staged and verified intact at
-  `/volume1/docker/arr-stack-backups/root-crontab.proposed-20260831-171220`
-  (mode 0600, sha256 `50e22c3bcbd3eab8ecb4b23dc4fe1f7814cae597a57efbd878cbe94e48940e9d`),
-  both `@reboot` lines preserved, backup beside it as `root-crontab.bak-20260831-171220`.
-  One command: `sudo crontab <that file>`.
-- **`sudo apt install jq` on pi1** clears the only 2 failures in the local suite
-  (`tests/credential-propagation.bats`, both `exit 127`).
+- **DONE 2026-09-04 — the 04:00 cron log redirection.** Applied via
+  `sudo crontab /volume1/docker/arr-stack-backups/root-crontab.proposed-20260831-171220`
+  after re-verifying the hash unchanged. `sudo crontab -l` confirmed both `@reboot`
+  lines intact and the backup line now redirecting to `/var/log/arr-backup.log` with
+  a timestamped header per run.
+- **DONE 2026-09-04 — `jq` installed on pi1** (`sudo apt install -y jq`), clearing the
+  last 2 known failures in the local suite (`tests/credential-propagation.bats`, both
+  previously `exit 127`). `./tests/run-tests.sh` now passes all 693 tests with zero
+  known-failure exceptions.
 - **DONE 2026-09-01 — generative mutation testing installed.** universalmutator,
   containerised and pinned, wired to the bats suite as `run-generated.sh`. See §4.1.
 - **DONE 2026-09-01 — every `scripts/lib/` file now has a bats file and a `TARGETS`
