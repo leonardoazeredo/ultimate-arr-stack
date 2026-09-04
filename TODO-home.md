@@ -4,7 +4,11 @@
 
 Fixed remotely via Seerr — deleted request, re-requested, new download kicked off.
 
-**Follow-up:** Check qBit for orphaned stuck torrent from the old STC release. May need manual cleanup.
+**Follow-up:** ~~Check qBit for orphaned stuck torrent from the old STC release.~~ DONE
+(2026-09-04) — checked `qbit.lan` directly, no STC-release entry present. The only
+S05E01 item left is the new ELiTE-release download from the re-request, complete at
+100%. The old STC torrent is already gone, most likely swept by `queue-cleanup.sh`'s
+weekly stuck-item removal before this was checked manually. No action needed.
 
 ## 2. ~~Set up Tailscale for remote admin access~~ DONE
 
