@@ -278,9 +278,13 @@ has touched.
   The count is deliberately not restated here — `tests/mutation/README.md`'s no-sweep
   list is derived at run time and asserted by `tests/shellcheck.bats`, so it cannot go
   stale the way this bullet just did.
-- **Operational scripts (`scripts/*.sh`, `duc-service/app/*`) still have no tests.**
-  That is the remaining gap, and it is the one that needs the PATH stub harness in
-  `tests/helpers/stubs.bash`, because those scripts restart containers for a living.
+- **DONE — operational scripts (`scripts/*.sh`, `duc-service/app/*`) now have tests.**
+  Closed via `feat/test-coverage-safety-harness` (`301085b`), using the PATH stub harness in
+  `tests/helpers/stubs.bash` this bullet originally called for, because those scripts restart
+  containers for a living. Verified by content (not filename): every script that lacked
+  coverage when this bullet was written is now exercised by a bats file, several under a
+  differently-named file (e.g. `detect-credential-drift.sh` → `credential-drift.bats`,
+  `fix-radarr-paths.sh`/`fix-sonarr-folders.sh` → `fix-arr-paths.bats`).
 
 ---
 
