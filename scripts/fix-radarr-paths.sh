@@ -52,20 +52,25 @@ echo "=== Radarr Path Fixer ==="
 echo "Movies dir: $MOVIES_DIR"
 echo ""
 
+RADARR_URL="http://localhost:7878"
+
 # Use unique temp files (avoids /tmp sticky-bit issues across users)
 TMPDIR=$(mktemp -d /tmp/fix-radarr-XXXXXX)
 trap 'rm -rf "$TMPDIR"' EXIT
 
 # Dump current state
-curl -s "http://localhost:7878/api/v3/movie?apikey=${RADARR_API_KEY}" > "$TMPDIR/movies.json"
+curl -s "${RADARR_URL}/api/v3/movie?apikey=${RADARR_API_KEY}" > "$TMPDIR/movies.json"
 ls -1 "$MOVIES_DIR" > "$TMPDIR/disk_dirs.txt"
 
 # Run the fix
 # The Python half lives in its own file rather than a heredoc: bats cannot
 # reach a heredoc, universalmutator cannot parse one, and pytest cannot
 # import one. Argument indices are unchanged -- `python3 -` and
-# `python3 file.py` both put the first argument at sys.argv[1].
-if ! python3 "${SCRIPT_DIR}/lib/fix_radarr_paths.py" "$RADARR_API_KEY" "$TMPDIR"; then
+# `python3 file.py` both put the first argument at sys.argv[1]. RADARR_URL is
+# passed through rather than duplicated as a second hardcoded constant in the
+# Python module -- see fix-sonarr-folders.sh/fix_sonarr_folders.py for the
+# same pattern.
+if ! python3 "${SCRIPT_DIR}/lib/fix_radarr_paths.py" "$RADARR_API_KEY" "$TMPDIR" "$RADARR_URL"; then
     echo "ERROR: the path fixer exited non-zero; nothing further was attempted." >&2
     exit 1
 fi

@@ -284,7 +284,7 @@ class FakeRun:
 def test_curl_updater_returns_a_callable_rather_than_acting_immediately(tmp_path, monkeypatch):
     fake = FakeRun()
     monkeypatch.setattr(m, "subprocess", type("S", (), {"run": fake}))
-    update = m.curl_updater(str(tmp_path), "KEY")
+    update = m.curl_updater(str(tmp_path), "KEY", "http://127.0.0.1:7878")
     assert callable(update)
     assert fake.calls == []
 
@@ -292,7 +292,7 @@ def test_curl_updater_returns_a_callable_rather_than_acting_immediately(tmp_path
 def test_curl_updater_puts_the_movie_at_its_own_id_with_the_key(tmp_path, monkeypatch):
     fake = FakeRun()
     monkeypatch.setattr(m, "subprocess", type("S", (), {"run": fake}))
-    update = m.curl_updater(str(tmp_path), "KEY")
+    update = m.curl_updater(str(tmp_path), "KEY", "http://127.0.0.1:7878")
     update({"id": 42, "path": "/data/media/movies/Beta (1999)"})
     argv, kwargs = fake.calls[0]
     assert argv == [
@@ -309,7 +309,7 @@ def test_curl_updater_writes_the_movie_body_it_points_curl_at(tmp_path, monkeypa
     fake = FakeRun()
     monkeypatch.setattr(m, "subprocess", type("S", (), {"run": fake}))
     movie = {"id": 42, "path": "/data/media/movies/Beta (1999)"}
-    m.curl_updater(str(tmp_path), "KEY")(movie)
+    m.curl_updater(str(tmp_path), "KEY", "http://127.0.0.1:7878")(movie)
     with open(os.path.join(str(tmp_path), "update.json")) as f:
         assert json.load(f) == movie
 
@@ -321,7 +321,7 @@ def test_curl_updater_returns_the_http_code_curl_printed():
     old = m.subprocess
     m.subprocess = mod
     try:
-        assert m.curl_updater("/tmp", "KEY")({"id": 1}) == "202"
+        assert m.curl_updater("/tmp", "KEY", "http://127.0.0.1:7878")({"id": 1}) == "202"
     finally:
         m.subprocess = old
 
@@ -329,7 +329,7 @@ def test_curl_updater_returns_the_http_code_curl_printed():
 def test_refresh_asks_radarr_to_rescan_with_the_key(monkeypatch):
     fake = FakeRun()
     monkeypatch.setattr(m, "subprocess", type("S", (), {"run": fake}))
-    m.refresh("KEY")
+    m.refresh("KEY", "http://127.0.0.1:7878")
     argv, kwargs = fake.calls[0]
     assert argv == [
         "curl", "-s", "-X", "POST",
@@ -349,24 +349,24 @@ def write_inputs(tmp_path, movies, disk_dirs):
         f.write("\n".join(disk_dirs) + "\n")
 
 
-def test_main_reads_the_key_from_argv1_and_the_tmpdir_from_argv2(tmp_path, monkeypatch, capsys):
+def test_main_reads_the_key_tmpdir_and_url_from_argv(tmp_path, monkeypatch, capsys):
     seen = {}
     monkeypatch.setattr(m, "curl_updater",
-                        lambda d, k: seen.update(tmpdir=d, key=k) or (lambda mv: "200"))
-    monkeypatch.setattr(m, "refresh", lambda k: None)
+                        lambda d, k, u: seen.update(tmpdir=d, key=k, url=u) or (lambda mv: "200"))
+    monkeypatch.setattr(m, "refresh", lambda k, u: None)
     write_inputs(tmp_path, [], [])
-    assert m.main(["prog", "KEY", str(tmp_path)]) == 0
-    assert seen == {"tmpdir": str(tmp_path), "key": "KEY"}
+    assert m.main(["prog", "KEY", str(tmp_path), "http://127.0.0.1:7878"]) == 0
+    assert seen == {"tmpdir": str(tmp_path), "key": "KEY", "url": "http://127.0.0.1:7878"}
 
 
 def test_main_triggers_a_refresh_only_when_something_was_fixed(tmp_path, monkeypatch, capsys):
     refreshed = []
-    monkeypatch.setattr(m, "curl_updater", lambda d, k: (lambda mv: "200"))
-    monkeypatch.setattr(m, "refresh", refreshed.append)
+    monkeypatch.setattr(m, "curl_updater", lambda d, k, u: (lambda mv: "200"))
+    monkeypatch.setattr(m, "refresh", lambda k, u: refreshed.append((k, u)))
     write_inputs(tmp_path, [{"id": 2, "path": "/x/Beta", "year": 1999}], ["Beta (1999)"])
-    m.main(["prog", "KEY", str(tmp_path)])
+    m.main(["prog", "KEY", str(tmp_path), "http://127.0.0.1:7878"])
     out = capsys.readouterr().out
-    assert refreshed == ["KEY"]
+    assert refreshed == [("KEY", "http://127.0.0.1:7878")]
     # The blank line is part of it: the refresh notice has to be separated from
     # run()'s summary or it reads as another summary line.
     assert "\n\nTriggering Radarr refresh..." in out
@@ -375,24 +375,24 @@ def test_main_triggers_a_refresh_only_when_something_was_fixed(tmp_path, monkeyp
 
 def test_main_says_so_and_skips_the_refresh_when_nothing_was_fixed(tmp_path, monkeypatch, capsys):
     refreshed = []
-    monkeypatch.setattr(m, "curl_updater", lambda d, k: (lambda mv: "200"))
-    monkeypatch.setattr(m, "refresh", refreshed.append)
+    monkeypatch.setattr(m, "curl_updater", lambda d, k, u: (lambda mv: "200"))
+    monkeypatch.setattr(m, "refresh", lambda k, u: refreshed.append((k, u)))
     write_inputs(tmp_path, [{"id": 1, "path": "/x/Alpha (1999)", "year": 1999}],
                  ["Alpha (1999)"])
-    m.main(["prog", "KEY", str(tmp_path)])
+    m.main(["prog", "KEY", str(tmp_path), "http://127.0.0.1:7878"])
     out = capsys.readouterr().out
     assert refreshed == []
     assert "No fixes needed." in out
 
 
 def test_main_ignores_blank_lines_in_the_disk_listing(tmp_path, monkeypatch):
-    monkeypatch.setattr(m, "curl_updater", lambda d, k: (lambda mv: "200"))
-    monkeypatch.setattr(m, "refresh", lambda k: None)
+    monkeypatch.setattr(m, "curl_updater", lambda d, k, u: (lambda mv: "200"))
+    monkeypatch.setattr(m, "refresh", lambda k, u: None)
     with open(os.path.join(str(tmp_path), "movies.json"), "w") as f:
         json.dump([{"id": 2, "path": "/x/Beta", "year": 1999}], f)
     with open(os.path.join(str(tmp_path), "disk_dirs.txt"), "w") as f:
         f.write("\n  \nBeta (1999)\n\n")
-    assert m.main(["prog", "KEY", str(tmp_path)]) == 0
+    assert m.main(["prog", "KEY", str(tmp_path), "http://127.0.0.1:7878"]) == 0
 
 
 def test_the_module_actually_runs_when_executed_as_a_script(tmp_path):
@@ -405,7 +405,7 @@ def test_the_module_actually_runs_when_executed_as_a_script(tmp_path):
     r = subprocess.run(
         [sys.executable, os.path.join(os.path.dirname(m.__file__),
                                       "fix_radarr_paths.py"),
-         "KEY", str(tmp_path)],
+         "KEY", str(tmp_path), "http://127.0.0.1:7878"],
         capture_output=True, text=True)
     assert r.returncode == 0
     assert "No fixes needed." in r.stdout

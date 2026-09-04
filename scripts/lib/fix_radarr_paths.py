@@ -14,7 +14,6 @@ import subprocess
 import sys
 import unicodedata
 
-RADARR = "http://127.0.0.1:7878"
 MOVIE_ROOT = "/data/media/movies"
 
 
@@ -70,7 +69,7 @@ def find_match(dirname, year, disk_dirs):
     return None
 
 
-def curl_updater(tmpdir, key):
+def curl_updater(tmpdir, key, url):
     """The real side effect, kept behind a seam so a test never forks curl."""
     def update(movie):
         update_file = os.path.join(tmpdir, "update.json")
@@ -79,7 +78,7 @@ def curl_updater(tmpdir, key):
         result = subprocess.run(
             ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
              "-X", "PUT",
-             "%s/api/v3/movie/%s?apikey=%s" % (RADARR, movie["id"], key),
+             "%s/api/v3/movie/%s?apikey=%s" % (url, movie["id"], key),
              "-H", "Content-Type: application/json",
              "-d", "@%s" % update_file],
             capture_output=True, text=True
@@ -88,10 +87,10 @@ def curl_updater(tmpdir, key):
     return update
 
 
-def refresh(key):
+def refresh(key, url):
     subprocess.run(
         ["curl", "-s", "-X", "POST",
-         "%s/api/v3/command?apikey=%s" % (RADARR, key),
+         "%s/api/v3/command?apikey=%s" % (url, key),
          "-H", "Content-Type: application/json",
          "-d", '{"name":"RefreshMovie"}'],
         capture_output=True
@@ -149,6 +148,7 @@ def run(movies, disk_dirs, update, out=print):
 def main(argv):
     key = argv[1]
     tmpdir = argv[2]
+    url = argv[3]
 
     with open(os.path.join(tmpdir, "movies.json")) as f:
         movies = json.load(f)
@@ -156,12 +156,12 @@ def main(argv):
     with open(os.path.join(tmpdir, "disk_dirs.txt")) as f:
         disk_dirs = set(line.strip() for line in f if line.strip())
 
-    fixed, _, _, _ = run(movies, disk_dirs, curl_updater(tmpdir, key))
+    fixed, _, _, _ = run(movies, disk_dirs, curl_updater(tmpdir, key, url))
 
     if fixed > 0:
         print("")
         print("Triggering Radarr refresh...")
-        refresh(key)
+        refresh(key, url)
         print("Done. Wait ~30 seconds for Radarr to rescan, then check the Health page.")
     else:
         print("No fixes needed.")
