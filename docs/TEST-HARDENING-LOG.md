@@ -384,6 +384,19 @@ write-up in `tests/mutation/README.md`; these are the one-line forms.
   the branch is real, and no test that feeds stdin from a file or a here-string will
   ever see it — so a test asserting on the prompt fails for a reason that has nothing
   to do with the code.
+- **`grep -q` piped from a command run under `set -o pipefail` can fail the pipeline
+  even after it finds its match.** `queue-cleanup.sh`'s `get_api_key` did
+  `docker ps --format '{{.Names}}' | grep -q "^${container}$"`: `grep -q` exits the
+  instant it matches, and if the match is not on the *last* line, `docker ps` can still
+  be mid-write when the pipe closes under it — the resulting SIGPIPE gives `docker ps`
+  a non-zero exit, which `pipefail` reports as the whole check failing, though `grep`
+  found exactly what it was looking for. It read as a flaky test — a bats test with two
+  containers stubbed (sonarr first, radarr last) failed on the first check maybe 40% of
+  the time and never on the second, because only the non-last name is at risk. Isolated
+  with a 200-iteration loop: 123/200 failures checking the first name, 0/200 checking
+  the last. Fix: capture the producer's output into a variable before grepping it —
+  `running=$(docker ps ...); grep -qx "$container" <<< "$running"` — so there is no pipe
+  left to race.
 
 **Test**
 

@@ -82,9 +82,19 @@ echo "========================================"
 # --- Discover API keys from running containers ---
 get_api_key() {
   local container="$1"
-  if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${container}$"; then
-    return 1
-  fi
+  # Capture docker ps's output before grepping it, rather than piping
+  # straight into grep -q: under `set -o pipefail`, grep -q exits the
+  # instant it matches, and if that match lands on anything but the LAST
+  # line, docker ps can still be mid-write when the pipe closes underneath
+  # it. The resulting SIGPIPE gives docker ps a non-zero exit, which
+  # pipefail then reports as the whole check failing -- even though grep
+  # found exactly what it was looking for. Reproduced directly: piping
+  # straight through failed 123/200 times when checking the first of two
+  # container names, 0/200 for the last. A plain variable has no pipe to
+  # race against.
+  local running
+  running=$(docker ps --format '{{.Names}}' 2>/dev/null) || return 1
+  grep -qx "$container" <<< "$running" || return 1
   docker exec "$container" cat /config/config.xml 2>/dev/null \
     | grep -oP '(?<=<ApiKey>)[^<]+' || return 1
 }
