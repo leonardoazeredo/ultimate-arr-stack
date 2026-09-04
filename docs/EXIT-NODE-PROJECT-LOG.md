@@ -284,6 +284,7 @@ are ping-derived** — see §8.1.
 | Phone, cellular, DERP, **after** MSS clamp | **22.6 ↓ / 22.9 ↑ Mbps / 0.0 % loss** |
 | Phone, ProtonVPN app alone (no `.lan`) | 55 Mbps |
 | Phone, no VPN | 103 Mbps |
+| Phone (Android), exit node, `185.107.44.149` (good draw), **after** `rx-udp-gro-forwarding on` on NAS `eth0` | **2.85 Mbps** (1 sample, 2026-09-04) |
 
 ### What the numbers establish
 
@@ -298,9 +299,28 @@ are ping-derived** — see §8.1.
   while moving 8.5 Mbps), the MSS clamp (`tailscale0` 1280 / `tun0` 1320 /
   clamp 1240 — correct), underlay MTU nesting (`tailscaled` reaches the relay
   over `eth0` at MTU 1500).
-- **Remaining hypothesis for #86:** the `tailscaled`-inside-`gluetun`-netns
-  nesting. Parallelism nearly tripling aggregate throughput points at a
-  per-flow, congestion-control-shaped limit rather than a capacity limit.
+- **Root cause identified, 2026-09-04:** `gluetun-exit`'s own Proton tunnel is
+  already kernel-mode WireGuard (`[wireguard] Using available kernelspace
+  implementation` in its logs; `ip -d link show tun0` reports `link/none ...
+  wireguard` with populated `gso_max_size`/`gro_max_size`/`tso_max_size`) — that
+  layer is not the bottleneck. Tailscale's own UDP-GSO/GRO batching throughput
+  work needs Linux kernel 6.2+; the NAS is on **6.1.84**. Confirmed empirically,
+  not just by kernel-version inference: enabling `rx-udp-gro-forwarding on
+  rx-gro-list off` on the NAS's `eth0` (via a throwaway `--net=host` container,
+  since the vendor OS has no `ethtool`) made **no measurable difference** — the
+  phone-through-exit-node sample taken right after was 2.85 Mbps, same band as
+  every prior sample. `ethtool -k eth0` shows why: `generic-segmentation-offload:
+  off [requested on]` — the driver refuses to actually enable GSO regardless of
+  the forwarding flag, a hardware/driver ceiling underneath the kernel-version
+  one. This is a dead end on this NAS; not worth retrying.
+- **The real lever is architectural, not a config fix:** running Tailscale
+  nested inside `gluetun-exit`'s netns, inside Docker, on a NAS that also runs a
+  dozen unrelated services, versus running it natively on dedicated routing
+  hardware. See task #86's row in §7 — a router-based exit node
+  (`GL-MT6000`/Flint 2, already has `kmod-wireguard` + `tailscale` installed,
+  independently benchmarked at ~810–900 Mbps real-world WireGuard client
+  throughput) is being piloted as the replacement, staged so the NAS path stays
+  up until it's proven end-to-end.
 
 ### Gate check I — the leak test: **PASS**
 
@@ -327,7 +347,7 @@ needed a manual Tailscale toggle — task #90, and the reason
 
 | Task | What | Next action |
 |---|---|---|
-| #86 | The ~6–9 Mbps per-flow ceiling | Controlled A/B (n≥5 each way, alternating, one server) to confirm the DERP-vs-relay direction, then test the netns-nesting hypothesis. **Biggest remaining lever** |
+| #86 | The ~6–9 Mbps per-flow ceiling | ✅ **NAS-side root-caused (2026-09-04)** — kernel-6.2 UDP-GSO wall + driver-level `generic-segmentation-offload: off [requested on]`, confirmed dead end empirically (§6). **Piloting a router-based exit node** (`GL-MT6000`, native `kmod-wireguard` + `tailscale`, staged rollout with the NAS path left running until proven — see the active plan) as the actual fix |
 | #90 | Android does not recover when `tailscale-exit` restarts | Needs the phone. Drive `tailscale-exit` restart frequency toward zero — that is the lever we control |
 | #77 | Drop `--reset` from node 1 | ✅ **Done** — dropped from `docker-compose.tailscale.yml`'s `TS_EXTRA_ARGS`, verified live on the NAS |
 | #79 | bats guard against `--reset` returning | ✅ **Done** — `node 1 (tailscale) does NOT pass --reset in TS_EXTRA_ARGS` in `tests/compose-validation.bats` |
