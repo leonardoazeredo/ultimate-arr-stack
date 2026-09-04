@@ -334,6 +334,7 @@ needed a manual Tailscale toggle — task #90, and the reason
 | #78, #80, #81 | Relay sidecar, docs, commit | **Premise weakened** (§3). Latency-only justification. Decide before building |
 | #91 | `RelayServerPort` doesn't survive ANY node-1 restart | ✅ **Done** — `scripts/ensure-tailscale-relay-port.{sh,service,timer}`, a `--user` systemd timer re-applying it every 30 min. Discovered while deploying #77/#79 (2026-08-25) — dropping `--reset` did not fix this, it was never the cause. A `post_start:` container hook was considered and rejected: NAS reboots restore containers via Docker's own `restart: always` policy, not through Compose (see `docs/TROUBLESHOOTING.md`'s DNS-after-reboot section, the same fact that motivated `boot-compose-up.service`), so a Compose-only hook would never fire on that path. Live-verified end-to-end: `docker restart tailscale` reproduces the loss, the service restores it without any manual `tailscale set`, per §5 item 1 |
 | — | ACL grant still `autogroup:member` | Plan Phase 1 wanted `tag:personal-device`. Narrow it if the relay work proceeds |
+| #92 | `gluetun-exit`'s WireGuard tunnel dropped on its own (2026-09-04), no error logged | **Root cause still unknown** — `docker logs --since 2h` showed zero VPN-subsystem lines around the drop, just routine DNS-blocklist refreshes. Recovery needed a full `docker compose restart gluetun-exit`, not just the control-server API (see trap 12, §8). If this recurs, capture `docker logs gluetun-exit` for the *whole* uptime window before restarting anything — the 2h-back window this time captured nothing useful |
 
 ---
 
@@ -387,6 +388,32 @@ the detail.
     review of this very document*, which is how much this class of error likes
     to recur.
 
+12. **Gluetun's control server has two status endpoints for one tunnel, and
+    only one of them matches this container's config.** `/v1/openvpn/status`
+    is the legacy endpoint — `PUT {"status":"running"}` there launches the
+    **openvpn** client specifically, regardless of `VPN_TYPE`. This container
+    runs WireGuard (`VPN_TYPE=wireguard`, real `WIREGUARD_PRIVATE_KEY` set,
+    zero OpenVPN credentials anywhere). Recovering a genuinely-dropped tunnel
+    (#92) by hitting `/v1/openvpn/status` made gluetun try to start openvpn
+    with no auth method configured, which failed immediately and pushed the
+    tunnel from a recoverable `"stopped"` into a hard `"crashed"` state.
+    `/v1/vpn/status` is the generic, type-respecting endpoint and is the one
+    that should be used going forward — but even that could not clear
+    `"crashed"` once reached (`PUT` returned `{"outcome":"already crashed"}`
+    on every stop/start toggle tried). **The operational hard rule below
+    ("use the control-server API, which swaps the WireGuard peer in place")
+    is true only for `/v1/vpn/status`, and even then has no recovery path out
+    of `"crashed"` — a `docker compose restart gluetun-exit` was the only
+    thing that actually worked.** That restart cascaded to
+    `gluetun-exit-rotator`, `tailscale-exit-routing`, and `tailscale-exit`
+    (all `network_mode: service:gluetun-exit`), and the phone did **not**
+    reconnect from a simple Tailscale on/off toggle afterward — it needed a
+    full app close-and-relaunch before it showed up as online on the tailnet
+    again. That's a new, sharper data point for #90: the existing entry
+    describes restart-avoidance as the mitigation, but when a restart is
+    unavoidable, "toggle Tailscale" is not sufficient recovery guidance on
+    Android — say "fully close and reopen the app."
+
 ### Operational hard rules
 
 The first four are repeated from `CLAUDE.md` on purpose: that file is skimmed
@@ -403,8 +430,14 @@ rather than picking one.
   and every `.lan` URL dies.
 - **Never rotate `gluetun-exit` with `docker restart`.** Its netns is shared by
   `tailscale-exit`; a restart orphans it for ~2 min and **strands Android
-  clients until Tailscale is manually toggled**. Use the control-server API,
-  which swaps the WireGuard peer in place.
+  clients until Tailscale is fully closed and reopened** (a simple on/off
+  toggle was not enough — see trap 12). For rotation, use the control-server
+  API — but hit `/v1/vpn/status`, not `/v1/openvpn/status`; this container
+  runs WireGuard and the openvpn-named endpoint tries to launch openvpn with
+  no credentials configured. Note the API has no way out of a `"crashed"`
+  status once reached — that state needs the real restart this rule warns
+  against, so avoiding "crashed" in the first place (right endpoint, don't
+  toggle blind) matters more than this rule's phrasing implied.
 - **Recreating node 1 severs every path to the NAS at once** (§4.7). Do it
   detached, with a state-volume backup and an auto-rollback.
 - Every containerized-git invocation on the NAS needs `-c safe.directory=/repo`.
