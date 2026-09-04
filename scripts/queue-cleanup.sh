@@ -18,7 +18,9 @@ set -euo pipefail
 #
 # Prerequisites:
 #   - Sonarr and Radarr running and accessible on localhost
-#   - SONARR_API_KEY / RADARR_API_KEY set in .env
+#   - SONARR_API_KEY / RADARR_API_KEY set in .env, matching each app's
+#     current key (Settings > General in each app's UI) -- a key rotated
+#     there without updating .env will 401 here
 #   - python3 and curl available
 #
 # What gets removed:
