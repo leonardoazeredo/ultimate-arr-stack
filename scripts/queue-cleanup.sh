@@ -18,6 +18,7 @@ set -euo pipefail
 #
 # Prerequisites:
 #   - Sonarr and Radarr running and accessible on localhost
+#   - SONARR_API_KEY / RADARR_API_KEY set in .env
 #   - python3 and curl available
 #
 # What gets removed:
@@ -44,7 +45,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NAS_STACK_DIR="$(dirname "$SCRIPT_DIR")"
 LOG_FILE="$NAS_STACK_DIR/logs/queue-cleanup.log"
+ENV_FILE="$NAS_STACK_DIR/.env"
 MAX_LOG_LINES=1000
+
+# shellcheck source=scripts/lib/env-file.sh
+. "${SCRIPT_DIR}/lib/env-file.sh"
 
 # --- Parse arguments ---
 APPLY=false
@@ -79,31 +84,25 @@ else
 fi
 echo "========================================"
 
-# --- Discover API keys from running containers ---
-get_api_key() {
-  local container="$1"
-  # Capture docker ps's output before grepping it, rather than piping
-  # straight into grep -q: under `set -o pipefail`, grep -q exits the
-  # instant it matches, and if that match lands on anything but the LAST
-  # line, docker ps can still be mid-write when the pipe closes underneath
-  # it. The resulting SIGPIPE gives docker ps a non-zero exit, which
-  # pipefail then reports as the whole check failing -- even though grep
-  # found exactly what it was looking for. Reproduced directly: piping
-  # straight through failed 123/200 times when checking the first of two
-  # container names, 0/200 for the last. A plain variable has no pipe to
-  # race against.
-  local running
-  running=$(docker ps --format '{{.Names}}' 2>/dev/null) || return 1
-  grep -qx "$container" <<< "$running" || return 1
-  docker exec "$container" cat /config/config.xml 2>/dev/null \
-    | grep -oP '(?<=<ApiKey>)[^<]+' || return 1
-}
-
-SONARR_KEY=$(get_api_key sonarr) || true
-RADARR_KEY=$(get_api_key radarr) || true
+# --- Discover API keys from .env ---
+# Previously read via `docker exec <container> cat /config/config.xml`. That
+# extraction was correct on its own terms, but it was a second, independent
+# source of truth for a credential .env already carries -- and on this NAS
+# the two had drifted apart: the .env-sourced keys (as read by
+# fix-radarr-paths.sh/fix-sonarr-folders.sh) authenticated fine, but the
+# config.xml-extracted ones got 401 from both apps' own APIs despite neither
+# container having restarted. The exact byte-level cause was never fully
+# confirmed -- config.xml's raw bytes are as classifier-blocked to inspect as
+# reading it outright -- but env_value() below already strips a hazard the
+# config.xml path never guarded against (a trailing \r from a CRLF-authored
+# file, invisible in any terminal trace). Rather than add that stripping to a
+# second reader, this drops the second reader: one source of truth, the same
+# helper the other two arr-fixer scripts already use.
+SONARR_KEY=$(env_value "$ENV_FILE" SONARR_API_KEY || true)
+RADARR_KEY=$(env_value "$ENV_FILE" RADARR_API_KEY || true)
 
 if [[ -z "$SONARR_KEY" ]] && [[ -z "$RADARR_KEY" ]]; then
-  log "ERROR: Could not get API keys for Sonarr or Radarr. Are the containers running?"
+  log "ERROR: Could not get API keys for Sonarr or Radarr. Check SONARR_API_KEY / RADARR_API_KEY are set in .env."
   exit 1
 fi
 
