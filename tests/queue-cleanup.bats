@@ -24,21 +24,21 @@ setup() {
     mkdir -p "$STACK/scripts/lib" "$STACK/logs"
     cp "$REPO_ROOT/scripts/queue-cleanup.sh" "$STACK/scripts/"
     cp "$REPO_ROOT/scripts/lib/queue_cleanup.py" "$STACK/scripts/lib/"
+    cp "$REPO_ROOT/scripts/lib/env-file.sh" "$STACK/scripts/lib/"
     SCRIPT="$STACK/scripts/queue-cleanup.sh"
     LOG="$STACK/logs/queue-cleanup.log"
+    ENV="$STACK/.env"
 
-    # Both containers up, each handing back a config.xml with an API key.
-    stub_docker '
-case "$1" in
-  ps)   printf "sonarr\nradarr\n" ;;
-  exec) echo "<Config><ApiKey>KEY-$2</ApiKey></Config>" ;;
-  *)    exit 1 ;;
-esac
-'
+    env_with SONARR_API_KEY=KEY-sonarr RADARR_API_KEY=KEY-radarr
+
     # No queue anywhere: curl -f fails, which the Python half reports as a
     # failed fetch. Tests that care about queue contents live in the pytest
     # file; these care about the bash around it.
     stub_curl 'exit 22'
+}
+
+env_with() {
+    printf '%s\n' "$@" > "$ENV"
 }
 
 # --- argument parsing -----------------------------------------------------
@@ -50,9 +50,10 @@ esac
     [[ "$output" == *"--apply"* ]]
 }
 
-@test "queue-cleanup: --help does not reach the containers" {
+@test "queue-cleanup: --help does not require .env to exist" {
+    rm -f "$ENV"
     run "$SCRIPT" --help
-    assert_stub_not_called docker ""
+    [ "$status" -eq 0 ]
 }
 
 @test "queue-cleanup: the default mode is a dry run" {
@@ -125,35 +126,23 @@ esac
 
 # --- API key discovery ----------------------------------------------------
 
-@test "queue-cleanup: exits 1 when neither container is running" {
-    stub_docker 'case "$1" in ps) : ;; *) exit 1 ;; esac'
+@test "queue-cleanup: exits 1 when neither key is set in .env" {
+    rm -f "$ENV"
     run "$SCRIPT"
     [ "$status" -eq 1 ]
     [[ "$output" == *"Could not get API keys"* ]]
 }
 
-@test "queue-cleanup: one container running is enough to proceed" {
-    stub_docker '
-case "$1" in
-  ps)   printf "sonarr\n" ;;
-  exec) [ "$2" = sonarr ] || exit 1; echo "<ApiKey>KEY-sonarr</ApiKey>" ;;
-  *)    exit 1 ;;
-esac
-'
+@test "queue-cleanup: one key set is enough to proceed" {
+    env_with SONARR_API_KEY=KEY-sonarr
     stub_tool python3 'echo "ARGV: $*"'
     run "$SCRIPT"
     [ "$status" -eq 0 ]
     [[ "$output" == *"queue_cleanup.py false false KEY-sonarr "* ]]
 }
 
-@test "queue-cleanup: a container with no ApiKey in its config is not a key" {
-    stub_docker '
-case "$1" in
-  ps)   printf "sonarr\nradarr\n" ;;
-  exec) echo "<Config></Config>" ;;
-  *)    exit 1 ;;
-esac
-'
+@test "queue-cleanup: a .env with unrelated keys set is not enough" {
+    env_with SOME_OTHER_KEY=irrelevant
     run "$SCRIPT"
     [ "$status" -eq 1 ]
     [[ "$output" == *"Could not get API keys"* ]]

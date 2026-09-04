@@ -401,6 +401,29 @@ write-up in `tests/mutation/README.md`; these are the one-line forms.
   critical-service check — both found by grepping for the shape rather than assuming
   the one fixed call site was the only one. Same fix in both: hoist a single
   `docker ps` capture above the loop that checks each name.
+- **Two independent readers of the same credential can silently drift apart, and the
+  one that looks more authoritative isn't necessarily the one still working.**
+  `get_api_key`'s `docker exec <container> cat /config/config.xml | grep -oP
+  '(?<=<ApiKey>)[^<]+'` read straight from each app's own on-disk config — as
+  authoritative a source as it gets, and the regex itself was correct. `.env`'s
+  `SONARR_API_KEY`/`RADARR_API_KEY`, read by `fix-radarr-paths.sh`/
+  `fix-sonarr-folders.sh` via `env_value()`, is a second, independent copy of the same
+  key. On the live NAS the two had drifted apart: `.env`'s key authenticated fine
+  against each app's own API, `config.xml`'s extracted key got 401 from both, despite
+  neither container having restarted in two weeks and `config.xml`'s mtime landing
+  within seconds of each container's boot (ordinary startup housekeeping, not an
+  out-of-band edit). The exact byte-level cause was never confirmed — inspecting
+  `config.xml`'s raw bytes, even just to check for a stray trailing `\r`, is exactly as
+  classifier-blocked as reading it outright — but `env_value()` already strips one
+  hazard the `config.xml` reader never guarded against: a trailing `\r` left by a
+  CRLF-authored file, invisible in any terminal trace (see its own comment in
+  `scripts/lib/env-file.sh`). Fix: stop maintaining two readers of one credential.
+  `queue-cleanup.sh` now reads `SONARR_API_KEY`/`RADARR_API_KEY` out of `.env` via the
+  same `env_value()` the other two arr-fixer scripts use, and no longer touches
+  `docker` at all. Worth remembering generally: when two independent sources of the
+  same secret disagree, the one sourced more directly from the "real" system is not
+  automatically the correct one — a reader-side bug can corrupt what looks like the
+  more authoritative copy just as easily as the credential itself can go stale.
 
 **Test**
 
