@@ -55,8 +55,8 @@ mutation configure-apps-container-name-substring-match \
   --file scripts/configure-apps.sh \
   --bats tests/configure-apps.bats \
   --test "configure-apps: a container whose name merely contains a required one does not count" \
-  --why "drops the anchors from the running-container check. This NAS runs gluetun-exit alongside gluetun, so an unanchored match reports the VPN as present when only the exit-node tunnel is up, and the script then waits four minutes for services that share a namespace which does not exist" \
-  --apply 'sed -i "s@grep -q \"\^\${c}\\\$\"@grep -q \"\${c}\"@" "$F"'
+  --why "drops -x from the running-container check, so it stops requiring a whole-line match. This NAS runs gluetun-exit alongside gluetun, so a substring match reports the VPN as present when only the exit-node tunnel is up, and the script then waits four minutes for services that share a namespace which does not exist" \
+  --apply 'sed -i "s@grep -qx \"\$c\" <<< \"\$running\"@grep -q \"\$c\" <<< \"\$running\"@" "$F"'
 
 mutation configure-apps-gluetun-health-unchecked \
   --file scripts/configure-apps.sh \

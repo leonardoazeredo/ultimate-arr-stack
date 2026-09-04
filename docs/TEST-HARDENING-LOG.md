@@ -396,7 +396,11 @@ write-up in `tests/mutation/README.md`; these are the one-line forms.
   with a 200-iteration loop: 123/200 failures checking the first name, 0/200 checking
   the last. Fix: capture the producer's output into a variable before grepping it —
   `running=$(docker ps ...); grep -qx "$container" <<< "$running"` — so there is no pipe
-  left to race.
+  left to race. The same pattern was still live in two more scripts —
+  `configure-apps.sh`'s required-container and SABnzbd checks, `arr-backup.sh`'s
+  critical-service check — both found by grepping for the shape rather than assuming
+  the one fixed call site was the only one. Same fix in both: hoist a single
+  `docker ps` capture above the loop that checks each name.
 
 **Test**
 

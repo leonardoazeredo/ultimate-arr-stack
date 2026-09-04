@@ -86,8 +86,17 @@ ensure_services_running() {
   CRITICAL="gluetun pihole sonarr radarr prowlarr qbittorrent jellyfin sabnzbd"
   STOPPED=""
 
+  # Capture docker ps's output once before grepping it, rather than piping
+  # straight into grep -q: under `set -o pipefail`, grep -q exits the instant
+  # it matches, and if that match lands on anything but the LAST line, docker
+  # ps can still be mid-write when the pipe closes underneath it, giving
+  # docker ps a SIGPIPE-caused non-zero exit that pipefail reports as the
+  # whole check failing even though grep found its match. See
+  # scripts/queue-cleanup.sh's get_api_key() for the original diagnosis.
+  RUNNING=$(docker ps --format '{{.Names}}' 2>/dev/null) || RUNNING=""
+
   for svc in $CRITICAL; do
-    if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${svc}$"; then
+    if ! grep -qx "$svc" <<< "$RUNNING"; then
       STOPPED="$STOPPED $svc"
     fi
   done

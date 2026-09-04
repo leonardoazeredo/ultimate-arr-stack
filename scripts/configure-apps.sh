@@ -167,9 +167,19 @@ check_prerequisites() {
     fi
     echo ""
 
+    # Capture docker ps's output once before grepping it, rather than piping
+    # straight into grep -q: under `set -o pipefail`, grep -q exits the
+    # instant it matches, and if that match lands on anything but the LAST
+    # line, docker ps can still be mid-write when the pipe closes underneath
+    # it, giving docker ps a SIGPIPE-caused non-zero exit that pipefail
+    # reports as the whole check failing even though grep found its match.
+    # See scripts/queue-cleanup.sh's get_api_key() for the original diagnosis.
+    local running
+    running=$(docker ps --format '{{.Names}}')
+
     local c missing=""
     for c in $REQUIRED_CONTAINERS; do
-        if ! docker ps --format '{{.Names}}' | grep -q "^${c}$"; then
+        if ! grep -qx "$c" <<< "$running"; then
             missing="$missing $c"
         fi
     done
@@ -191,8 +201,9 @@ check_prerequisites() {
         return 1
     fi
 
-    # SABnzbd is optional.
-    if docker ps --format '{{.Names}}' | grep -q "^sabnzbd$"; then
+    # SABnzbd is optional. Reuses $running captured above -- same pipefail
+    # hazard as the required-containers check, same fix.
+    if grep -qx "sabnzbd" <<< "$running"; then
         SABNZBD_RUNNING=true
     fi
     return 0
