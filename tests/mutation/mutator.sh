@@ -1,7 +1,11 @@
 #!/bin/bash
 set -uo pipefail
 #
-# Generate shell mutants of one file, using universalmutator in a container.
+# Generate mutants of one file, using universalmutator in a container.
+#
+# Shell and Python are both handled; the language is picked from the file's
+# extension, because that is the only thing that distinguishes them here and a
+# flag would just be a second place for the two to disagree.
 #
 # Usage:
 #   ./tests/mutation/mutator.sh <source-file> <output-dir>
@@ -51,13 +55,28 @@ RAW="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR" "$RAW"' EXIT
 
 BASE="$(basename "$SRC")"
-# universalmutator picks its language from the file extension, and the two
-# load-bearing hook scripts here (scripts/pre-commit, scripts/post-merge) have
-# none. Give the copy a .sh name so they are mutable like everything else; the
-# original name is irrelevant once the bytes are in a scratch directory.
-[[ "$BASE" == *.sh ]] || BASE="${BASE}.sh"
+if [[ "$BASE" == *.py ]]; then
+    # python.rules ships inside universalmutator itself, so unlike shell.rules
+    # there is nothing to copy in -- `--only python.rules` resolves against the
+    # package. `python` is a real language argument here (the extension lookup
+    # succeeds), where the shell path has to pass `none`.
+    LANG_ARG="python"
+    RULES="python.rules"
+    IGNORE="python.ignore"
+else
+    # universalmutator picks its language from the file extension, and the two
+    # load-bearing hook scripts here (scripts/pre-commit, scripts/post-merge)
+    # have none. Give the copy a .sh name so they are mutable like everything
+    # else; the original name is irrelevant once the bytes are in a scratch
+    # directory.
+    [[ "$BASE" == *.sh ]] || BASE="${BASE}.sh"
+    LANG_ARG="none"
+    RULES="shell.rules"
+    IGNORE="shell.ignore"
+    cp "$HERE/shell.rules" "$WORKDIR/" || exit 1
+fi
 cp "$SRC" "$WORKDIR/$BASE" || exit 1
-cp "$HERE/shell.rules" "$HERE/shell.ignore" "$WORKDIR/" || exit 1
+cp "$HERE/$IGNORE" "$WORKDIR/" || exit 1
 
 mkdir -p "$OUTDIR"
 
@@ -79,22 +98,85 @@ mkdir -p "$OUTDIR"
 # sudo available, and root-owned mutants would be undeletable.
 docker run --rm --user "$(id -u):$(id -g)" \
     -v "$WORKDIR:/work" -v "$RAW:/out" -w /work \
-    "$MUT_IMAGE" "$BASE" none --only shell.rules \
-    --mutantDir /out --noCheck --ignore shell.ignore >/dev/null 2>&1
+    "$MUT_IMAGE" "$BASE" "$LANG_ARG" --only "$RULES" \
+    --mutantDir /out --noCheck --ignore "$IGNORE" >/dev/null 2>&1
 
-# Keep only mutants that are valid bash. A mutant that does not parse cannot
-# distinguish a good test suite from a bad one -- every test fails on it for the
-# same uninteresting reason, and it would be scored KILLED, inflating the score
-# with mutants that prove nothing.
-kept=0; dropped=0
+# Prose line numbers: comments, and any string literal spanning more than one
+# line -- i.e. every docstring in the file. universalmutator mutates them
+# happily, and the first Python sweep here proved what that costs: of 144
+# survivors on fix_radarr_paths.py, all but a handful were edits to the module
+# docstring ("imported and tested" -> "imported and True"). Nothing can kill
+# those, so they are not findings; they are 144 rows of noise burying the few
+# that were.
+#
+# shell.ignore handles the same class with `^\s*#`, and python.ignore carries
+# that plus the triple-quote delimiters -- but --ignore matches one line at a
+# time, so it cannot see the *interior* of a docstring at all. That has to be
+# done by line number, after generation, which is what this is.
+#
+# A single-line string is left mutable on purpose: `RADARR = "http://..."` is
+# code, and a mutant that rewrites it is a real one.
+prose_lines() {
+    python3 - "$1" <<'PYEOF' 2>/dev/null
+import sys, tokenize
+prose = set()
+with open(sys.argv[1], "rb") as fh:
+    try:
+        for tok in tokenize.tokenize(fh.readline):
+            if tok.type == tokenize.COMMENT or (
+                tok.type == tokenize.STRING and tok.end[0] > tok.start[0]
+            ):
+                prose.update(range(tok.start[0], tok.end[0] + 1))
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        pass
+print("\n".join(str(n) for n in sorted(prose)))
+PYEOF
+}
+
+# The first line number this mutant changed, or empty if diff cannot say.
+# Empty means keep: dropping a mutant we could not place would silently shrink
+# the sweep, which is the failure this whole directory exists to catch.
+changed_line() {
+    diff --unchanged-line-format= --old-line-format='%dn
+' --new-line-format= "$1" "$2" 2>/dev/null | head -1
+}
+
+declare -A PROSE=()
+if [[ "$BASE" == *.py ]]; then
+    while read -r n; do [[ -n "$n" ]] && PROSE["$n"]=1; done < <(prose_lines "$WORKDIR/$BASE")
+fi
+
+# Keep only mutants that parse. A mutant that does not cannot distinguish a good
+# test suite from a bad one -- every test fails on it for the same uninteresting
+# reason, and it would be scored KILLED, inflating the score with mutants that
+# prove nothing.
+#
+# `ast.parse` rather than py_compile: py_compile writes a .pyc beside the file,
+# and a syntax checker with a side effect is not one this directory should own.
+parses() {
+    if [[ "$BASE" == *.py ]]; then
+        python3 -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' "$1" 2>/dev/null
+    else
+        bash -n "$1" 2>/dev/null
+    fi
+}
+
+kept=0; dropped=0; prose=0
 for m in "$RAW"/*; do
     [[ -f "$m" ]] || continue
-    if bash -n "$m" 2>/dev/null; then
-        cp "$m" "$OUTDIR/$(basename "$m")"
-        kept=$((kept + 1))
-    else
+    if ! parses "$m"; then
         dropped=$((dropped + 1))
+        continue
     fi
+    if [[ ${#PROSE[@]} -gt 0 ]]; then
+        cl="$(changed_line "$WORKDIR/$BASE" "$m")"
+        if [[ -n "$cl" && -n "${PROSE[$cl]:-}" ]]; then
+            prose=$((prose + 1))
+            continue
+        fi
+    fi
+    cp "$m" "$OUTDIR/$(basename "$m")"
+    kept=$((kept + 1))
 done
 
 if [[ "$kept" -eq 0 ]]; then
@@ -102,4 +184,8 @@ if [[ "$kept" -eq 0 ]]; then
     exit 1
 fi
 
-echo "$kept kept, $dropped unparseable"
+if [[ "$prose" -gt 0 ]]; then
+    echo "$kept kept, $dropped unparseable, $prose in comments or docstrings"
+else
+    echo "$kept kept, $dropped unparseable"
+fi

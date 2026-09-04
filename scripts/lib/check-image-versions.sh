@@ -9,6 +9,34 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 _IMAGE_CACHE="/tmp/arr-stack-image-cache.json"
 _CACHE_TTL=86400  # seconds (24 hours)
 
+# File mtime as a bare integer, or 0 if it cannot be read.
+#
+# This used to be inline as
+#
+#     $(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo 0)
+#
+# which looks like a portable BSD-then-GNU fallback and is not one. `-f` is
+# "format" on BSD but `--file-system` on GNU, where it is a perfectly VALID
+# flag: it prints a multi-line filesystem report to STDOUT and exits 1. Only
+# stderr was suppressed, so on Linux the `||` fired anyway and appended the real
+# mtime to that report, and the `$(( ))` consuming it died on a syntax error --
+# which aborted _cache_get rather than yielding a wrong number. The cache was
+# therefore never READ at all: every run re-queried all 31 registries and then
+# wrote an entry nothing would ever look at again. It cost about eighty seconds
+# per commit and looked exactly like a working cache.
+#
+# GNU is tried first because `-c` is simply unrecognised on BSD, so this order
+# has no matching trap in the other direction. The integer check does not depend
+# on that reasoning holding: a value is only accepted if it is actually a number,
+# so a stdout-printing failure on some third platform degrades to 0 rather than
+# to garbage.
+_file_mtime() {
+    local f="$1" m
+    m=$(stat -c %Y "$f" 2>/dev/null) && [[ "$m" =~ ^[0-9]+$ ]] && { printf '%s\n' "$m"; return 0; }
+    m=$(stat -f %m "$f" 2>/dev/null) && [[ "$m" =~ ^[0-9]+$ ]] && { printf '%s\n' "$m"; return 0; }
+    echo 0
+}
+
 # Get cached result for an image, or empty if stale/missing
 _cache_get() {
     local image="$1"
@@ -17,7 +45,7 @@ _cache_get() {
     fi
 
     local cache_age
-    cache_age=$(( $(date +%s) - $(stat -f %m "$_IMAGE_CACHE" 2>/dev/null || stat -c %Y "$_IMAGE_CACHE" 2>/dev/null || echo 0) ))
+    cache_age=$(( $(date +%s) - $(_file_mtime "$_IMAGE_CACHE") ))
     if [[ $cache_age -gt $_CACHE_TTL ]]; then
         rm -f "$_IMAGE_CACHE"
         return 1

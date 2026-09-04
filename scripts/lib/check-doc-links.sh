@@ -55,7 +55,7 @@ check_doc_links() {
         local in_code_block=false
         local line_num=0
         while IFS= read -r line; do
-            ((line_num++))
+            line_num=$((line_num + 1))
 
             # Track fenced code blocks
             if [[ "$line" == '```'* ]]; then
@@ -115,15 +115,25 @@ check_doc_links() {
                     # Resolve relative path from the file's directory
                     check_file="$file_dir/$target_file"
                     # Normalize: remove ./ segments and resolve ../
-                    # Use Python for portable path normalization (available on macOS and Linux)
-                    check_file=$(python3 -c "import os.path; print(os.path.normpath('$check_file'))" 2>/dev/null || echo "$check_file")
+                    # Use Python for portable path normalization (available on macOS and Linux).
+                    #
+                    # The path goes through argv, NOT through the -c string. It
+                    # used to be interpolated into a single-quoted python
+                    # literal, so a path holding a quote ended the literal --
+                    # which at best fell through to the `|| echo` and at worst
+                    # ran whatever followed. The input is this repo's own docs,
+                    # so the threat model is small; passing argv costs nothing
+                    # and removes the shape entirely.
+                    check_file=$(python3 -c \
+                        'import os.path, sys; print(os.path.normpath(sys.argv[1]))' \
+                        "$check_file" 2>/dev/null || echo "$check_file")
                 fi
 
                 # Check if target file exists
                 if [[ -n "$target_file" ]]; then
                     if [[ ! -f "$repo_root/$check_file" ]]; then
                         echo "    ERROR: $md_file:$line_num — broken link to '$target_file' (file not found)"
-                        ((errors++))
+                        errors=$((errors + 1))
                         continue
                     fi
                 fi
@@ -134,7 +144,7 @@ check_doc_links() {
                     anchors=$(_get_file_anchors "$repo_root/$check_file")
                     if ! echo "$anchors" | grep -qFx -- "$target_anchor"; then
                         echo "    ERROR: $md_file:$line_num — broken anchor '#$target_anchor' in '$(basename "$check_file")'"
-                        ((errors++))
+                        errors=$((errors + 1))
                     fi
                 fi
             done <<< "$targets"
@@ -143,7 +153,14 @@ check_doc_links() {
 
     if [[ $errors -eq 0 ]]; then
         echo "    OK: All internal doc links valid"
+        return 0
     fi
 
-    return $errors
+    # The count goes in the message, the status stays a boolean. `return $errors`
+    # put an unbounded count into one byte, so exactly 256 broken links returned
+    # 0 and the hook reported the docs were fine. The only caller,
+    # scripts/pre-commit:174, is `if check_doc_links; then` -- it read the value
+    # as a boolean all along, so the count was never reaching anyone anyway.
+    echo "    ERROR: $errors broken internal doc link(s)"
+    return 1
 }

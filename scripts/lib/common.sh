@@ -29,7 +29,13 @@ get_files_to_scan() {
     local staged tracked
     staged=$(get_staged_files)
     tracked=$(get_all_tracked_files)
-    echo -e "$staged\n$tracked" | sort -u | grep -v '^$'
+    # printf, not `echo -e`. A path is DATA: `echo -e` interprets backslash
+    # escapes in it, so a tracked file named 'a\tb' would be emitted with a real
+    # tab in place of the two characters actually in its name -- and every
+    # caller would then scan a path that does not exist while the real file went
+    # unscanned. Filenames may legally contain backslashes; this is the same
+    # class as passing a path into a python -c string.
+    printf '%s\n%s\n' "$staged" "$tracked" | sort -u | grep -v '^$'
 }
 
 # Read file content safely
@@ -63,7 +69,11 @@ _NAS_HOSTNAME=""  # Just the hostname part without .local
 # Load NAS config from .claude/config.local.md
 # Call this once before using get_nas_* functions
 load_nas_config() {
-    if $_NAS_CONFIG_LOADED; then
+    # A string comparison, not `if $_NAS_CONFIG_LOADED`. The bare form RUNS the
+    # variable's value as a command -- unquoted, so it word-splits too. That is
+    # a command-execution path through a variable for no benefit; "true"/"false"
+    # read the same either way.
+    if [[ "$_NAS_CONFIG_LOADED" == true ]]; then
         return 0
     fi
 
@@ -121,7 +131,7 @@ get_nas_ip() {
     env_backup="$repo_root/.env.nas.backup"
 
     if [[ -f "$env_backup" ]]; then
-        grep -E '^NAS_IP=' "$env_backup" 2>/dev/null | cut -d= -f2 | tr -d '"' | tr -d "'"
+        grep -E '^NAS_IP=' "$env_backup" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'"
     fi
 }
 
@@ -134,9 +144,9 @@ get_nas_stack_dir() {
     env_backup="$repo_root/.env.nas.backup"
 
     if [[ -f "$env_file" ]]; then
-        stack_dir=$(grep -E '^NAS_STACK_DIR=' "$env_file" 2>/dev/null | cut -d= -f2 | tr -d '"' | tr -d "'")
+        stack_dir=$(grep -E '^NAS_STACK_DIR=' "$env_file" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'")
     elif [[ -f "$env_backup" ]]; then
-        stack_dir=$(grep -E '^NAS_STACK_DIR=' "$env_backup" 2>/dev/null | cut -d= -f2 | tr -d '"' | tr -d "'")
+        stack_dir=$(grep -E '^NAS_STACK_DIR=' "$env_backup" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'")
     fi
 
     echo "${stack_dir:-/volume1/docker/arr-stack}"
@@ -151,7 +161,7 @@ _DOMAIN=""
 
 # Load domain from .env or .env.nas.backup
 load_domain_config() {
-    if $_DOMAIN_LOADED; then
+    if [[ "$_DOMAIN_LOADED" == true ]]; then
         return 0
     fi
 
@@ -168,7 +178,7 @@ load_domain_config() {
     fi
 
     if [[ -n "$secrets_file" ]]; then
-        _DOMAIN=$(grep -E '^DOMAIN=' "$secrets_file" 2>/dev/null | cut -d= -f2 | tr -d '"' | tr -d "'")
+        _DOMAIN=$(grep -E '^DOMAIN=' "$secrets_file" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'")
     fi
 
     _DOMAIN_LOADED=true
@@ -207,8 +217,14 @@ is_ssh_available() {
     local nas_host
     nas_host=$(get_nas_host)
     [[ -z "$nas_host" ]] && return 1
-    # Use timeout to prevent hanging on slow/blocked connections
-    timeout 2 bash -c "exec 3<>/dev/tcp/$nas_host/22" 2>/dev/null
+    # The host is passed as an ARGUMENT to bash -c, not interpolated into the
+    # string it parses. Interpolated, the host name is code: bash parses it
+    # before /dev/tcp ever sees it, so anything shell-special in a host name
+    # runs. Today the extraction in load_nas_config happens to constrain the
+    # host to [a-zA-Z0-9_-]+.local, which is the only reason the interpolated
+    # form was not exploitable -- a guarantee held by a grep in a different
+    # function, not by this line. Same class as passing a path into python -c.
+    timeout 2 bash -c 'exec 3<>/dev/tcp/"$1"/22' _ "$nas_host" 2>/dev/null
 }
 
 # Run SSH command on NAS (with timeout to prevent hanging)
@@ -220,7 +236,7 @@ ssh_to_nas() {
     nas_host=$(get_nas_host)
     nas_user=$(get_nas_user)
 
-    if [[ -n "$NAS_SSH_PASS" ]] && command -v sshpass &>/dev/null; then
+    if [[ -n "${NAS_SSH_PASS:-}" ]] && command -v sshpass &>/dev/null; then
         timeout 10 sshpass -p "$NAS_SSH_PASS" ssh $SSH_OPTS "$nas_user@$nas_host" "$cmd" 2>/dev/null
     else
         # Use BatchMode for non-interactive, but allow SSH agent keys

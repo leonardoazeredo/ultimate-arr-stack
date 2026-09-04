@@ -60,3 +60,64 @@ mutation gen-mktemp-failure-unchecked \
   --test "arms the restore path when called plainly" \
   --why "an unchecked mktemp -d leaves WORK empty, so every backup path becomes /<tag>.orig at the filesystem root and the real fault (a full /tmp) is reported as 'could not copy the target aside'" \
   --apply 'sed -i "s@^WORK=\"\$(mktemp -d)\"\$@WORK=\"\"@" "$F"'
+
+# --- The runner's own verdict integrity ------------------------------------
+#
+# Both of these exist because the runner reported a wrong verdict during the
+# 2026-09-01 coverage work, and in both cases the wrongness was silent: it
+# looked exactly like a real finding.
+
+mutation runner-scores-a-skipped-oracle-as-survived \
+  --file tests/mutation/run-mutations.sh \
+  --bats tests/mutation-framework.bats \
+  --test "reports SKIPPED, not SURVIVED, when the whole oracle skipped" \
+  --why "TAP spells a skip as 'ok N name # skip', so an oracle that skipped is indistinguishable from one that passed and the mutant is scored SURVIVED - a coverage gap invented out of an environment condition. Two entries in this very file read that way, because their oracle skips on a dirty scripts/lib and the run was measuring a fix to scripts/lib" \
+  --apply 'sed -i "s@^    if \[\[ \"\$skipped\" -eq \"\$count\" \]\]; then\$@    if false; then@" "$F"'
+
+mutation gen-dirty-guard-ignores-the-filter \
+  --file tests/mutation/run-generated.sh \
+  --bats tests/mutation-framework.bats \
+  --test "the dirty-tree guard only considers targets the filter actually selected" \
+  --why "the dirty-tree guard reads SELECTED, so building SELECTED before applying -k made it refuse over files the run would never touch - and -k exists precisely to sweep one target while the rest of the tree is mid-edit. An over-broad precondition does not just block a run, it launders itself into false SURVIVED readings downstream" \
+  --apply 'perl -0pi -e "s/^if \[\[ -n \\\"\\\$FILTER\\\" \]\]; then\n    _kept=\(\)\n/if false; then\n    _kept=()\n/m" "$F"'
+
+# --- The oracle's time budget ----------------------------------------------
+#
+# Added with the budget itself (2026-09-01). A bound that cannot be observed
+# firing is decorative, and one that fires when it should not turns every slow
+# oracle into a fake kill -- so both directions get an entry.
+
+mutation gen-budget-floor-removed \
+  --file tests/mutation/lib-mutate.sh \
+  --bats tests/mutation-framework.bats \
+  --test "oracle_budget scales with the control run and floors at a minute" \
+  --why "without the floor a sub-second control run hands the mutant a sub-second budget, so on a loaded machine every mutant times out - which reads as a 100% kill rate while measuring nothing at all" \
+  --apply 'sed -i "s@^    if (( budget < floor )); then\$@    if false; then@" "$F"'
+
+mutation gen-budget-takes-an-unvalidated-control \
+  --file tests/mutation/lib-mutate.sh \
+  --bats tests/mutation-framework.bats \
+  --test "oracle_budget refuses a control time it cannot trust" \
+  --why "(( )) evaluates rather than coerces, so an unvalidated control time is an injection surface as well as a wrong-answer risk - bash expands command substitution inside an arithmetic subscript" \
+  --apply 'sed -i "s@^    \[\[ .* \]\] || control=0\$@    :@" "$F"'
+
+mutation gen-oracle-run-unbounded \
+  --file tests/mutation/lib-mutate.sh \
+  --bats tests/mutation-framework.bats \
+  --test "run_tests bounds the oracle at the budget rather than waiting on it" \
+  --why "this is the defect the budget was added for: with no bound, one mutant that makes the oracle loop stalls the entire sweep - measured, a sweep of configure-helpers.sh scored 3 of 31 mutants in 90 minutes and only an external timeout ended it" \
+  --apply 'sed -i "s@^            if (( budget > 0 )); then\$@            if false; then@" "$F"'
+
+mutation gen-oracle-bounded-when-it-should-not-be \
+  --file tests/mutation/lib-mutate.sh \
+  --bats tests/mutation-framework.bats \
+  --test "run_tests leaves the oracle unbounded when no budget is given" \
+  --why "a default budget applies the bound to callers that never asked for one, so a slow-but-passing oracle comes back 124 and is scored a kill - a fake measurement in the direction nobody checks" \
+  --apply 'sed -i "s@^    local batsfile=\"\$1\" regex=\"\$2\" budget=\"\${3:-0}\" out\$@    local batsfile=\"\$1\" regex=\"\$2\" budget=\"\${3:-1}\" out@" "$F"'
+
+mutation gen-timeout-tallied-as-an-ordinary-kill \
+  --file tests/mutation/run-mutations.sh \
+  --bats tests/mutation-framework.bats \
+  --test "hangs the oracle is scored a kill and named as a timeout" \
+  --why "a hang and a clean red are the same exit status once the bound fires, so folding them together hides the only thing that explains a sweep getting slower - and a budget nobody can see firing is a budget nobody trusts" \
+  --apply 'sed -i "s@^    if \[\[ \"\$st\" -eq 124 \]\]; then\$@    if false; then@" "$F"'

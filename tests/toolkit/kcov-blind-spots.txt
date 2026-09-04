@@ -1,0 +1,19 @@
+# Files kcov cannot see, and why.
+#
+# kcov instruments by file path. This repo's oldest test idiom extracts a
+# function body with awk and eval's it into the bats shell, which produces code
+# with no file path at all -- so the lines kcov reports as never executed are,
+# in these files, the most thoroughly tested lines in the repo. A zero here is a
+# property of the measurement, not of the coverage.
+#
+# The summary marks these rows BLIND rather than 0%, so nobody has to re-derive
+# that fact from scratch each run. Cross-check any other zero against the
+# mutation ledger before believing it.
+#
+# One name per line. Comments and blanks ignored.
+scripts/arr-backup.sh
+scripts/backup-prune.sh
+scripts/boot-compose-up.sh
+scripts/configure-apps.sh
+scripts/ensure-tailscale-relay-port.sh
+scripts/restart-stack.sh

@@ -31,7 +31,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck source=tests/mutation/lib-mutate.sh
 source "$ROOT/tests/mutation/lib-mutate.sh"
 
-LEDGER="$ROOT/tests/mutation/survivors.tsv"
+# Overridable so a test can exercise the ledger-merge rules without writing to
+# the repo's real one. It used to be hardcoded, and tests/mutation-framework.bats
+# had to overwrite the tracked file in place and copy it back afterwards. That
+# restore is a bare `cp` with nothing guarding it, so an interrupt anywhere in
+# the sweep -- a timeout, a Ctrl-C -- left the committed ledger holding the
+# test's sentinel rows. Observed, not theorised: a 2-minute timeout during this
+# work did exactly that, and the wreckage looked enough like real triage output
+# to be committed by accident.
+LEDGER="${MUTATION_LEDGER:-$ROOT/tests/mutation/survivors.tsv}"
 MUTANT_DIR="$ROOT/tests/mutation/.mutants"
 
 # target file : bats oracle : test-name regex
@@ -40,21 +48,72 @@ MUTANT_DIR="$ROOT/tests/mutation/.mutants"
 # with no oracle does not belong here: against an untested file EVERY mutant
 # survives by construction, which is not a finding, it is a restatement of
 # "this file has no tests" -- and a few hundred guaranteed survivors would bury
-# the real signal. The nine untested scripts/lib/ files are recorded as a
-# missing-test gap in tests/mutation/README.md instead of being swept.
+# the real signal. The scripts/lib/ files that still have no oracle are recorded
+# as a missing-test gap in tests/mutation/README.md instead of being swept.
+#
+# No count is written down here on purpose. This table IS the list of covered
+# files, so a number beside it can only ever disagree with it; the staleness
+# test in tests/shellcheck.bats derives the uncovered set from field 1 at run
+# time rather than from anything anyone remembered to edit.
 TARGETS=(
 # The third field is a bats `-f` regex, so it is anchored: an unanchored
 # substring would silently widen the oracle as tests are added, and a mutant
 # that then survived would have survived for a reason unrelated to coverage.
-  "scripts/lib/check-secrets.sh:tests/pre-commit-checks.bats:^check_secrets "
+  "scripts/lib/check-secrets.sh:tests/lib-secrets.bats:^secrets: "
   "scripts/lib/check-env-vars.sh:tests/pre-commit-checks.bats:^check_env_vars "
   "scripts/lib/check-conflicts.sh:tests/pre-commit-checks.bats:^check_conflicts "
-  # scripts/lib/common.sh is deliberately NOT here. It was swept once, on the
-  # theory that being sourced by three tested files made it covered: 78 mutants
-  # generated, 78 survived, 0 killed. Sourced is not covered -- the four tests
-  # exercise none of its NAS/SSH/domain helpers. It belongs on the missing-test
-  # list in README.md with the other nine, and leaving it in the sweep would add
-  # 78 guaranteed survivors that say nothing beyond "this file has no tests".
+  "scripts/lib/check-hardcoded-domain.sh:tests/lib-hardcoded-domain.bats:^hardcoded-domain: "
+  "scripts/lib/check-uptime-monitors.sh:tests/lib-uptime-monitors.bats:^uptime-monitors: "
+  "scripts/lib/check-image-versions.sh:tests/lib-image-versions.bats:^image-versions: "
+  "scripts/lib/configure-helpers.sh:tests/lib-configure-helpers.bats:^configure-helpers: "
+  "scripts/lib/check-doc-links.sh:tests/lib-doc-links.bats:^doc-links: "
+  "scripts/lib/check-yaml-syntax.sh:tests/lib-yaml-syntax.bats:^yaml-syntax: "
+  "scripts/lib/check-env-backup.sh:tests/lib-env-backup.bats:^env-backup: "
+  "scripts/lib/check-dns-duplicates.sh:tests/lib-dns-duplicates.bats:^dns-duplicates: "
+  # scripts/lib/common.sh IS here now, and the reason it was not is worth
+  # keeping: it was swept once on the theory that being sourced by three tested
+  # files made it covered, and produced 78 mutants of which 78 survived. Sourced
+  # is not covered. It stayed off this list until it had an oracle of its own,
+  # because a target with no tests contributes only guaranteed survivors, which
+  # say nothing beyond "this file has no tests" - something README.md's derived
+  # no-sweep list already says, for free.
+  "scripts/lib/common.sh:tests/lib-common.bats:^common: "
+  "scripts/lib/check-domains.sh:tests/lib-domains.bats:^domains: "
+  "scripts/restart-stack.sh:tests/restart-stack.bats:^restart-stack: "
+  "setup-hooks.sh:tests/setup-hooks.bats:^setup-hooks: "
+  "scripts/ensure-tailscale-relay-port.sh:tests/ensure-relay-port.bats:^ensure-relay-port: "
+  "scripts/check-vpn.sh:tests/check-vpn.bats:^check-vpn: "
+  "scripts/boot-compose-up.sh:tests/boot-compose-up.bats:^boot-compose-up: "
+  "scripts/check-network.sh:tests/check-network.bats:^check-network: "
+  "scripts/configure-apps.sh:tests/configure-apps.bats:^configure-apps: "
+  "scripts/lib/env-file.sh:tests/lib-env-file.bats:^env-file: "
+  "scripts/queue-cleanup.sh:tests/queue-cleanup.bats:^queue-cleanup: "
+  # Both fixers share tests/fix-arr-paths.bats and both anchor on `^fix-`
+  # rather than on their own half of it, so the one cross-script test in that
+  # file (neither reaches a destructive operation) is part of both oracles
+  # instead of belonging to neither.
+  "scripts/fix-radarr-paths.sh:tests/fix-arr-paths.bats:^fix-"
+  "scripts/fix-sonarr-folders.sh:tests/fix-arr-paths.bats:^fix-"
+  # The Python halves of the three fixers. universalmutator's own python.rules
+  # applies here, picked by extension in mutator.sh; the oracle is pytest,
+  # reached through the one bats test that runs it.
+  #
+  # The regex names a single test rather than the file's `^python: ` prefix,
+  # which is the one place this table deliberately narrows instead of widening.
+  # The other three tests in that file assert properties of pytest.sh itself --
+  # that it exits 77 without docker, that every module has a test file -- and no
+  # mutation of a module can make any of them fail. Including them would only
+  # add wall-clock to every one of a few hundred mutants.
+  "scripts/lib/queue_cleanup.py:tests/python-suite.bats:^python: the extracted modules pass"
+  "scripts/lib/fix_radarr_paths.py:tests/python-suite.bats:^python: the extracted modules pass"
+  "scripts/lib/fix_sonarr_folders.py:tests/python-suite.bats:^python: the extracted modules pass"
+  # The four duc files share one oracle because they are one protocol: the cgi
+  # produces a request marker, the poller consumes it, scan.sh holds the lock
+  # both of them branch on. A mutant in any of them is scored against all of it.
+  "duc-service/app/scan.sh:tests/duc-service.bats:^duc: "
+  "duc-service/app/manual_scan.sh:tests/duc-service.bats:^duc: "
+  "duc-service/app/manual_scan.cgi:tests/duc-service.bats:^duc: "
+  "duc-service/app/startup.sh:tests/duc-service.bats:^duc: "
 )
 
 FILTER=""
@@ -73,11 +132,33 @@ else
     for t in "${TARGETS[@]}"; do SELECTED+=("${t%%:*}"); done
 fi
 
+# Apply -k HERE, not only in the sweep loop below. The dirty-tree guard that
+# follows reads SELECTED, so a SELECTED holding every target made the guard
+# refuse on files the run was never going to touch -- and `-k` exists precisely
+# to narrow a run down to one target while the rest of the tree is mid-edit.
+#
+# That cost three corpus entries at once, and two of them failed in the shape
+# worth remembering: the guard refused identically with and without the defect,
+# so the oracle could not distinguish them and they were scored SURVIVED -- a
+# coverage gap reported against tests that were in fact never reached. An
+# over-broad precondition does not merely block a run, it can launder itself
+# into a false measurement downstream.
+if [[ -n "$FILTER" ]]; then
+    _kept=()
+    for t in "${SELECTED[@]}"; do [[ "$t" == *"$FILTER"* ]] && _kept+=("$t"); done
+    SELECTED=(${_kept+"${_kept[@]}"})
+fi
+
 # This overwrites tracked files in place. On a dirty tree a failed restore is
 # indistinguishable from the user's own uncommitted work, and `git checkout --`
 # -- the documented recovery -- would destroy that work. Refuse.
 cd "$ROOT" || exit 2
-DIRTY="$(git status --porcelain -- "${SELECTED[@]}" 2>/dev/null)"
+# An empty SELECTED must not reach `git status --porcelain --`: with no pathspec
+# git reports the ENTIRE tree, so a filter matching no target would trip a guard
+# about files the run had already decided to ignore. Empty means nothing to
+# sweep, which means nothing to protect.
+DIRTY=""
+[[ ${#SELECTED[@]} -gt 0 ]] && DIRTY="$(git status --porcelain -- "${SELECTED[@]}" 2>/dev/null)"
 if [[ -n "$DIRTY" ]]; then
     echo "run-generated: refusing to start - these targets have uncommitted changes:" >&2
     sed 's/^/  /' <<<"$DIRTY" >&2
@@ -120,7 +201,7 @@ describe() {
     printf '%s\t%s\n' "$line" "$text"
 }
 
-TOTAL=0; KILLED=0; SURVIVED=0; ERRORED=0; SKIPPED=0
+TOTAL=0; KILLED=0; SURVIVED=0; ERRORED=0; SKIPPED=0; TIMEDOUT=0
 declare -a NEW_SURVIVORS=()
 # Targets this run actually swept to completion. The ledger is rewritten only
 # for these; rows belonging to any other target are carried through untouched.
@@ -144,7 +225,9 @@ for target in "${SELECTED[@]}"; do
 
     # Control, once per target rather than once per mutant. A suite that is
     # already red would score every mutant KILLED and report a perfect sweep.
-    res=$(run_tests "$ROOT/$batsfile" "$testre"); st=${res% *}; count=${res#* }
+    control_start=$SECONDS
+    res=$(run_tests "$ROOT/$batsfile" "$testre"); read -r st count _skipped <<<"$res"
+    budget=$(oracle_budget $(( SECONDS - control_start )))
     if [[ "$count" -eq 0 ]]; then
         echo "   ERROR: -f '$testre' matched NO tests. bats exits 0 having run"
         echo "          nothing, which reads exactly like a pass. Fix the regex."
@@ -192,14 +275,21 @@ for target in "${SELECTED[@]}"; do
             ERRORED=$((ERRORED + 1)); restore_current || exit 3; continue
         fi
 
-        res=$(run_tests "$ROOT/$batsfile" "$testre"); st=${res% *}
+        res=$(run_tests "$ROOT/$batsfile" "$testre" "$budget"); read -r st _count _skipped <<<"$res"
 
         # Restore before classifying. Stop the whole run if it failed: mutating
         # the next target on top of a tree we could not put back turns one
         # recoverable problem into an unrecoverable one.
         restore_current || exit 3
 
-        if [[ "$st" -ne 0 ]]; then
+        if [[ "$st" -eq 124 ]]; then
+            # Counted as a kill -- the oracle demonstrably did not pass -- but
+            # named, because a hang and a clean red are the same status here and
+            # very different problems. The tally reports them separately so a
+            # sweep whose wall-clock quietly went up says why.
+            KILLED=$((KILLED + 1)); TIMEDOUT=$((TIMEDOUT + 1))
+            echo "   KILLED (oracle hit the ${budget}s budget)  $desc"
+        elif [[ "$st" -ne 0 ]]; then
             KILLED=$((KILLED + 1))
         else
             SURVIVED=$((SURVIVED + 1))
@@ -268,6 +358,12 @@ cp "$WORK/ledger.tsv" "$LEDGER"
 
 echo
 echo "killed $KILLED / $TOTAL   survived $SURVIVED   errored $ERRORED   skipped $SKIPPED"
+if [[ "$TIMEDOUT" -gt 0 ]]; then
+    # Not folded into the line above. These are counted as kills, but they are
+    # the reason a sweep's wall-clock moves, and a number nobody prints is a
+    # number nobody notices.
+    echo "  of those, $TIMEDOUT hit the oracle time budget rather than failing outright"
+fi
 if [[ "$SURVIVED" -gt 0 ]]; then
     echo "ledger: $LEDGER  (survivors are findings to triage, not failures)"
 fi

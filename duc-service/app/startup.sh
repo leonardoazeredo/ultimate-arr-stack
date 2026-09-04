@@ -2,39 +2,83 @@
 
 set -euo pipefail
 
+# Overridable so tests/duc-service.bats can drive this against a throwaway tree.
+# Nothing in the image sets any of them - the defaults are what the container
+# runs, and each one is the value that was hardcoded here before.
 LOG_FILE="${DUC_LOG_FILE:-/var/log/duc.log}"
-touch "$LOG_FILE"
+CRON_FILE="${DUC_CRON_FILE:-/etc/cron.d/duc-index}"
+CRON_BIN="${DUC_CRON_BIN:-cron}"
+SCAN_SH="${DUC_SCAN_SH:-/scan.sh}"
+MANUAL_SCAN_SH="${DUC_MANUAL_SCAN_SH:-/manual_scan.sh}"
+FALLBACK_SCHEDULE="0 0 * * *"
 
-echo "Starting initial recursive scan"
-echo "This may take a while..."
-echo "Now: $(date)"
-/scan.sh || echo "Initial scan failed (exit $?)" | tee -a "$LOG_FILE"
-echo "Now: $(date)"
-echo "Scan complete"
+# A cron schedule is exactly five whitespace-separated fields on exactly one
+# line.
+#
+# This used to be `echo "$SCHEDULE" | awk 'NF==5'`, which is a PRINT FILTER and
+# not a test: awk with a pattern and no action prints the matching lines and
+# exits 0 whatever it matched. The negation could therefore never be true and
+# the fallback below was unreachable code - any value at all, including an empty
+# one, went straight into /etc/cron.d, where cron ignores a malformed line
+# without comment and the daily scan simply never runs.
+#
+# NR==1 matters as much as NF==5: /etc/cron.d entries are newline-delimited, so
+# a multi-line SCHEDULE whose first line happens to carry five fields would
+# otherwise append arbitrary extra crontab lines, running as root.
+valid_schedule() {
+    printf '%s' "${1-}" | awk 'NF == 5 { ok = 1 } END { exit !(ok && NR == 1) }'
+}
 
-# Basic validation for SCHEDULE (5 fields). If invalid, fallback to midnight.
-if ! echo "$SCHEDULE" | awk 'NF==5' >/dev/null 2>&1; then
-	echo "Invalid SCHEDULE '$SCHEDULE' - falling back to '0 0 * * *'" | tee -a "$LOG_FILE"
-	SCHEDULE="0 0 * * *"
+write_cron_file() {
+    local schedule="$1" dest="$2"
+    {
+        echo "# Auto-generated Duc cron tasks"
+        echo "# Manual scan request poller"
+        echo "* * * * * root $MANUAL_SCAN_SH"
+        echo "# Scheduled full scan"
+        echo "$schedule root $SCAN_SH"
+    } > "$dest"
+    chmod 0644 "$dest"
+}
+
+# A seam. Everything in here is process-level setup that a test has no business
+# performing - and tests/duc-service.bats overrides it so main() can be driven
+# end to end without fcgiwrap or nginx being installed.
+start_webserver() {
+    echo "Launching webserver"
+    rm -f /var/run/fcgiwrap.socket
+    nohup fcgiwrap -s unix:/var/run/fcgiwrap.socket &
+    while ! [ -S /var/run/fcgiwrap.socket ]; do sleep .2; done
+    chmod 777 /var/run/fcgiwrap.socket
+    test -f nohup.out && rm -f ./nohup.out
+
+    nginx
+}
+
+main() {
+    touch "$LOG_FILE"
+
+    echo "Starting initial recursive scan"
+    echo "This may take a while..."
+    echo "Now: $(date)"
+    "$SCAN_SH" || echo "Initial scan failed (exit $?)" | tee -a "$LOG_FILE"
+    echo "Now: $(date)"
+    echo "Scan complete"
+
+    local schedule="${SCHEDULE:-}"
+    if ! valid_schedule "$schedule"; then
+        echo "Invalid SCHEDULE '$schedule' - falling back to '$FALLBACK_SCHEDULE'" | tee -a "$LOG_FILE"
+        schedule="$FALLBACK_SCHEDULE"
+    fi
+
+    echo "Creating cron schedule: $schedule"
+    write_cron_file "$schedule" "$CRON_FILE"
+    "$CRON_BIN"
+
+    start_webserver
+}
+
+# Sourced by tests/duc-service.bats, executed by the image's CMD.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
 fi
-
-echo "Creating cron schedule: $SCHEDULE"
-CRON_FILE=/etc/cron.d/duc-index
-{
-	echo "# Auto-generated Duc cron tasks"
-	echo "# Manual scan request poller"
-	echo "* * * * * root /manual_scan.sh"
-	echo "# Scheduled full scan"
-	echo "$SCHEDULE root /scan.sh"
-} > "$CRON_FILE"
-chmod 0644 "$CRON_FILE"
-cron
-
-echo "Launching webserver"
-rm -f /var/run/fcgiwrap.socket
-nohup fcgiwrap -s unix:/var/run/fcgiwrap.socket &
-while ! [ -S /var/run/fcgiwrap.socket ]; do sleep .2; done
-chmod 777 /var/run/fcgiwrap.socket
-test -f nohup.out && rm -f ./nohup.out
-
-nginx

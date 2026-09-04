@@ -94,7 +94,7 @@ docker exec gluetun wget -qO- https://ipinfo.io/ip     # Should show VPN IP
 docker exec qbittorrent wget -qO- https://ipinfo.io/ip  # Should match Gluetun's IP
 ```
 
-The `check-vpn.sh` script compares Gluetun's exit IP against your NAS LAN IP and exits non-zero if they match (leak detected). You can add it to cron for periodic monitoring:
+The `check-vpn.sh` script compares Gluetun's exit IP against your household's WAN IP — taken from a bridge-only container's egress, since every IP involved is a public address as seen by `ifconfig.me` — and exits non-zero if they match (leak detected). It then checks that each VPN-tunneled service's egress matches Gluetun's exactly. You can add it to cron for periodic monitoring:
 
 ```bash
 # Check every 5 minutes, log failures

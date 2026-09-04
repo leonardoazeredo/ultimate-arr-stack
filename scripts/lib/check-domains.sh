@@ -55,7 +55,14 @@ check_domains() {
     local lan_ok=0
     local lan_fail=0
     local tmpdir
-    tmpdir=$(mktemp -d)
+    # Checked. Unchecked, a failed mktemp leaves tmpdir empty, every touch
+    # below becomes a write to the filesystem ROOT, and all fourteen names get
+    # reported as not resolving -- a DNS verdict manufactured entirely out of a
+    # local filesystem error.
+    if ! tmpdir=$(mktemp -d); then
+        echo "    SKIP: Could not create temp dir"
+        return 0
+    fi
 
     for domain_name in "${lan_domains[@]}"; do
         (
@@ -95,7 +102,10 @@ check_domains() {
         local ext_ok=0
         local ext_fail=0
         local ext_tmpdir
-        ext_tmpdir=$(mktemp -d)
+        if ! ext_tmpdir=$(mktemp -d); then
+            echo "    SKIP: Could not create temp dir"
+            return 0
+        fi
 
         for ext_domain in "${external_domains[@]}"; do
             (

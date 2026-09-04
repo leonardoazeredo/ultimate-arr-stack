@@ -47,7 +47,7 @@ shift $((OPTIND - 1))
 # shellcheck source=tests/mutation/lib-mutate.sh
 source "$ROOT/tests/mutation/lib-mutate.sh"
 
-TOTAL=0; KILLED=0; SURVIVED=0; ERRORED=0; SKIPPED=0
+TOTAL=0; KILLED=0; SURVIVED=0; ERRORED=0; SKIPPED=0; TIMEDOUT=0
 
 # mutation <id> --file F --bats B --test REGEX --why TEXT --apply 'SHELL'
 #
@@ -97,9 +97,13 @@ mutation() {
     }
     backup="$BACKUP_PATH"
 
-    # 1. Control.
-    local res st count
-    res=$(run_tests "$batsfile" "$testre"); st=${res% *}; count=${res#* }
+    # 1. Control. Timed, because the control run is the only honest yardstick
+    # for how long the mutated run should be allowed to take -- see
+    # oracle_budget() in lib-mutate.sh.
+    local res st count skipped control_start budget
+    control_start=$SECONDS
+    res=$(run_tests "$batsfile" "$testre"); read -r st count skipped <<<"$res"
+    budget=$(oracle_budget $(( SECONDS - control_start )))
     if [[ "$count" -eq 0 ]]; then
         echo "ERROR  $id"
         echo "       --test '$testre' matched NO tests in $(basename "$batsfile")."
@@ -114,6 +118,16 @@ mutation() {
         sed 's/^/       | /' "$WORK/last-output.txt" | head -20
         ERRORED=$((ERRORED + 1)); restore_current || exit 3; return 0
     fi
+    if [[ "$skipped" -eq "$count" ]]; then
+        # Every test in the oracle skipped, so running it against a mutant would
+        # compare nothing to nothing and report SURVIVED -- a coverage gap
+        # invented out of an environment condition. Say what actually happened.
+        echo "SKIPPED $id"
+        echo "        the whole oracle skipped, so it cannot judge this mutant:"
+        grep -m1 -E '^ok [0-9]+ .*# skip' "$WORK/last-output.txt" \
+            | sed 's/^/        | /'
+        SKIPPED=$((SKIPPED + 1)); restore_current || exit 3; return 0
+    fi
 
     # 2. Apply, 3. assert it actually landed.
     ( cd "$ROOT" && F="$file" bash -c "$apply" ) >/dev/null 2>&1
@@ -125,15 +139,21 @@ mutation() {
         ERRORED=$((ERRORED + 1)); restore_current || exit 3; return 0
     fi
 
-    # 4. The test must now fail.
-    res=$(run_tests "$batsfile" "$testre"); st=${res% *}; count=${res#* }
+    # 4. The test must now fail -- within the budget. A recorded defect that
+    # makes the oracle hang instead of fail still means the oracle did not
+    # pass, so it counts as a kill; it is just named differently so the reason
+    # a corpus run's wall-clock moved is visible.
+    res=$(run_tests "$batsfile" "$testre" "$budget"); read -r st count skipped <<<"$res"
 
     # 5. Restore, verified. If it did not work, stop the entire run here --
     # mutating the next target on top of a tree we could not put back turns one
     # recoverable problem into an unrecoverable one.
     restore_current || exit 3
 
-    if [[ "$st" -ne 0 ]]; then
+    if [[ "$st" -eq 124 ]]; then
+        echo "KILLED $id  (oracle hit the ${budget}s budget)"
+        KILLED=$((KILLED + 1)); TIMEDOUT=$((TIMEDOUT + 1))
+    elif [[ "$st" -ne 0 ]]; then
         echo "KILLED $id  ($count test(s))"
         KILLED=$((KILLED + 1))
     else
@@ -165,6 +185,9 @@ done
 
 echo
 echo "killed $KILLED / $TOTAL   survived $SURVIVED   errored $ERRORED   skipped $SKIPPED"
+if [[ "$TIMEDOUT" -gt 0 ]]; then
+    echo "  of those, $TIMEDOUT hit the oracle time budget rather than failing outright"
+fi
 if [[ "$SURVIVED" -gt 0 || "$ERRORED" -gt 0 ]]; then exit 1; fi
 [[ "$TOTAL" -eq 0 ]] && { echo "no mutations ran" >&2; exit 2; }
 exit 0

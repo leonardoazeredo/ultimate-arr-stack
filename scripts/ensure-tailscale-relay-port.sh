@@ -43,8 +43,18 @@ fi
 # Extract the value rather than matching a hardcoded-comma string, so this
 # doesn't silently stop detecting a correct value if `tailscale debug prefs`'s
 # JSON formatting ever changes (e.g. no trailing comma, extra whitespace).
+#
+# The whitespace has to be allowed on BOTH sides of the colon and the value has
+# to be allowed to arrive quoted, because the older pattern -- literal `":"`,
+# bare digits -- did not actually deliver the robustness this comment claims:
+# `"RelayServerPort" : 41641` and `"RelayServerPort": "41641"` both read as
+# missing. Neither is dangerous on its own, since re-applying a value that is
+# already correct is a no-op, but the failure is silent and permanent: the timer
+# would re-apply on every tick forever and the "already correct" branch would
+# never be taken again. tests/ensure-relay-port.bats pins every shape, in both
+# directions.
 actual_port=$(docker exec tailscale tailscale debug prefs 2>/dev/null \
-  | grep -o '"RelayServerPort":[[:space:]]*[0-9]*' \
+  | grep -oE '"RelayServerPort"[[:space:]]*:[[:space:]]*"?[0-9]+' \
   | grep -o '[0-9]*$' || true)
 
 if [[ "$actual_port" == "$RELAY_PORT" ]]; then

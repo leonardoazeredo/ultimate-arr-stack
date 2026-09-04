@@ -142,6 +142,108 @@ both tests asserted that the *expected* message appeared and neither asserted
 that the *wrong* one did not. Getting the right output is not proof — the check
 also has to not emit the wrong one.
 
+### Measured kill ratios
+
+Recorded per target and dated, because a ratio with no date is a claim about a
+tree that no longer exists. Two ratios are given: the raw one, and the one
+against *killable* mutants — a mutant verdicted `equivalent` in the ledger
+cannot be killed by any test, so counting it against coverage would set a floor
+nobody can reach.
+
+| Target | Swept | Kept | Killed | Survived | Killable |
+| --- | --- | --- | --- | --- | --- |
+| `scripts/lib/check-secrets.sh` | 2026-09-01 | 11 | 8 | 3 (all `equivalent`) | **8/8** |
+| `scripts/lib/configure-helpers.sh` | 2026-09-01 | 31 | 23 | 8 (all `equivalent`) | **23/23** |
+| `scripts/lib/env-file.sh` | 2026-09-02 | 8 | 8 | 0 | **8/8** |
+| `scripts/queue-cleanup.sh` | 2026-09-02 | 25 | 19 | 6 (all `equivalent`) | **19/19** |
+| `scripts/fix-radarr-paths.sh` | 2026-09-02 | 15 | 15 | 0 | **15/15** |
+| `scripts/fix-sonarr-folders.sh` | 2026-09-02 | 11 | 10 | 1 (`equivalent`) | **10/10** |
+| `scripts/lib/fix_radarr_paths.py` | 2026-09-02 | 113 | 112 | 1 (`equivalent`) | **112/112** |
+| `scripts/lib/fix_sonarr_folders.py` | 2026-09-02 | 110 | 108 | 2 (both `equivalent`) | **108/108** |
+| `scripts/lib/queue_cleanup.py` | 2026-09-04 | 372 | 371 | 1 (`equivalent`) | **371/371** |
+
+The four 2026-09-02 rows are the arr fixers, and they took two rounds to get
+there: the first sweep killed 36 of 61 (59%). Nine of the survivors were real
+gaps and got tests; the largest single class was assertions that could not see
+which *stream* a message went to, because `run` merges stdout and stderr. For a
+script cron runs, that is the difference between reaching the operator's mail
+and only ever landing in a log nobody reads.
+
+Two more survivors closed on a second pass, and both are worth naming because
+neither changed an exit status — the usual thing a test asserts on. `-gt` →
+`-ge` on the log trim rewrites a live log with a byte-identical copy, so only
+the fact that a temp file was made at all can catch it. `-f` → `-e` on the same
+guard lets a directory reach `wc -l <`, which prints a 0 *and* fails, so the
+`|| echo 0` appends a second one and the arithmetic test throws — same status,
+same skipped trim, one bash error in the cron log.
+
+The three `.py` rows are the modules those scripts became, and they are the
+first targets swept with universalmutator's own `python.rules`. Two things had
+to be fixed before the numbers meant anything. The first was that a mutation
+tool will happily rewrite prose: `fix_sonarr_folders.py` generates 561 mutants,
+318 of them inside comments and docstrings, every one of which survives by
+construction and buried the 110 that are actually scoreable. `--ignore` cannot see a docstring's
+interior — it matches one line at a time — so the filter is by line number, from
+`tokenize`: COMMENT tokens, plus any STRING spanning more than one line. Single
+-line strings stay mutable, because `RADARR = "http://..."` is code.
+
+The second is what the surviving mutants then said, and all three modules said
+it identically: **every test injected the seam, so the thing behind it had never
+been constructed.** Each module has a class that shells out to curl — `ArrApi`,
+`SonarrApi`, `curl_updater` — and every `run()` test passes in a fake, which is
+what makes those tests fast and hermetic. It also meant the whole curl argv
+could be replaced with `["curl"]`, or `[]`, and nothing went red. `main()` was
+unreached for the same reason, and `sys.exit(main(sys.argv))` cannot be reached
+by an import-based test at all; it needs a real subprocess, invoked with
+arguments chosen so the module dies before it can reach the network.
+
+One survivor was not a gap and not an equivalent: a third thing. In
+`fix_sonarr_folders.py` a `[tvdbid-{TvdbId}]` replacement could never fire,
+because the `{TvdbId}` substitution five lines above had already rewritten the
+token inside the brackets. Nothing could kill it because there was nothing to
+kill — the line was dead, and deleting it was the fix. That is the third time
+in this repo an unkillable mutant turned out to mean dead code rather than an
+equivalent one, which is worth remembering before reaching for the
+`equivalent` verdict.
+
+`scripts/queue-cleanup.sh`'s six remaining survivors are all in or around
+`get_api_key`, and all six were measured rather than argued: the function
+writes the key to stdout before it returns, and every caller discards its status
+through `|| true`, so no reachable combination of `return 0`/`return 1`/`&&`/
+`||` changes the key the caller ends up with. An absent container and an empty
+key already converge on the same "Could not get API keys" exit.
+
+Both files' survivors are the same shape: `cmd || true` → `cmd && true` on a
+line whose exit status nothing reads. In `check-secrets.sh` every call site is
+an `if` condition, which suppresses errexit for the whole call *including the
+callee's body*; in `configure-helpers.sh` the entry point sets `set -uo
+pipefail` and deliberately no `-e`. Neither is a coverage gap, and neither can
+be closed by writing a test — the ledger says so, with the empirical check that
+established it.
+
+`configure-helpers.sh` is also the target that motivated the oracle's time
+budget: one mutant (`|| true` → `&& true` inside `wait_for_service`'s HTTP-code
+test, `:109`) makes the wait loop unsatisfiable, and the unbounded sweep spent
+90 minutes on it. It is now killed at the budget, and the summary says so.
+
+`scripts/lib/queue_cleanup.py` is the fourth `.py` target, swept later than the
+other three and for a reason worth recording on its own: the first attempt at
+this sweep rebooted the host twice (see `docs/TEST-HARDENING-LOG.md` §8 and the
+`oracle-memory-cap` corpus entries) and had to wait on a memory cap for both
+the containerised and native oracle paths before it could run at all. Once it
+ran, all nine of its survivors were the same shape: an `out(...)` line the
+oracle's tests never captured, so the mutant's `pass` produced no observable
+difference to anything a test actually checked — the header line, the queue-size
+line, the removal/reason/failure lines, the search-summary line, and one early
+`return 0, 0` whose fallthrough happened to reach the same return value by a
+different path. The fix in every case was the same one-line addition: the file
+already runs every scenario through `out=lines.append`, so each gap closed by
+adding an `assert any(... in line for line in lines)` rather than by writing
+new test infrastructure. The remaining survivor, `_age_hours`'s `114 return
+None ==> pass`, is the same equivalent shape as `fix_radarr_paths.py:70` above
+— the last statement is already `return None`, so falling off the end returns
+it just the same.
+
 ## Targets with no oracle
 
 Mutation testing needs a test as its oracle. Against a file with no tests, every
@@ -151,20 +253,73 @@ real signal. So the sweep covers only files that have one.
 
 `scripts/lib/common.sh` was swept once on the theory that being sourced by three
 tested files made it covered. **78 mutants generated, 78 survived, 0 killed.**
-Sourced is not covered: the four `pre-commit-checks.bats` tests exercise none of
-its NAS, SSH, or domain helpers. It is listed below with the rest.
+Sourced is not covered: the four `pre-commit-checks.bats` tests exercised none of
+its NAS, SSH, or domain helpers. It has an oracle of its own now
+(`tests/lib-common.bats`) and is swept; it stayed off `TARGETS` until it did,
+because a target with no tests contributes nothing but guaranteed survivors.
 
-These files are sourced by `scripts/pre-commit`, so a defect in any of them
-silently weakens every commit's checks. **Ten `scripts/lib/` files have no bats
-test whatsoever:**
+Every file under `scripts/lib/` is swept as of 2026-09-01. What is left below is
+operational scripts — the ones that restart containers, so they need the stub
+harness before they can have an oracle at all.
 
-`common.sh`, `check-dns-duplicates.sh`, `check-doc-links.sh`,
-`check-domains.sh`, `check-env-backup.sh`, `check-hardcoded-domain.sh`,
-`check-image-versions.sh`, `check-uptime-monitors.sh`, `check-yaml-syntax.sh`,
-`configure-helpers.sh`
+### What is not swept
 
-That is a bigger finding than anything the sweep produced, and writing those
-tests is separate work.
+The list below is every tracked production shell file with no `TARGETS` entry,
+which is to say every one a generated mutant could not be scored against.
+Some of them do have bats tests and are simply not swept yet; others have no
+test at all. The list does not distinguish the two, because only the first is
+mechanically knowable — "has a test" has no honest definition here, as
+`setup-hooks.sh` demonstrated, for as long as it was *named* by a bats file that
+only asserted the hook symlinks already existed and never ran the script that
+creates them.
+
+There is no count written down, and the list is not maintained by hand. It is
+derived from field 1 of `TARGETS` at run time by
+`tests/shellcheck.bats`, which fails if the two disagree in either direction.
+The previous version of this paragraph was a hand-written count that went stale
+the day the first of those tests was written, which is the same way `CLAUDE.md`'s
+old "14 tests" claim went stale.
+
+<!-- NO-SWEEP-ORACLE: asserted by tests/shellcheck.bats; do not edit by hand -->
+- `duc-service/app/duc.cgi`
+- `duc-service/app/log.cgi`
+- `scripts/arr-backup.sh`
+- `scripts/backup-prune.sh`
+- `scripts/detect-credential-drift.sh`
+- `scripts/detect-vpn-zombies.sh`
+- `scripts/post-merge`
+- `scripts/pre-commit`
+- `scripts/sync-nas.sh`
+- `terraform/apply.sh`
+<!-- /NO-SWEEP-ORACLE -->
+
+## The stub harness, and why it has its own corpus entries
+
+`tests/helpers/stubs.bash` puts real executables named `docker`, `curl`, `ssh` and
+`git` at the front of `$PATH` so a test can drive an operational script without the
+script reaching a live daemon. It is the only thing standing between
+`tests/restart-stack.bats` and a `docker compose up` against the NAS that serves the
+house's DNS.
+
+That makes it a guard, and this repo's whole reason for owning a mutation framework is
+that four guards were merged here while being incapable of failing. So the harness is
+mutated too, in `corpus/stub-harness.sh`: neuter `forbid()`, remove the absolute-path
+rule, silence the breadcrumb, require adjacency in the verb matcher — each one must
+turn a named test red. Mutating it is safe to run, because with the denylist disabled
+the `docker` stub still runs and that stub does nothing but print and exit 1.
+
+Two rules that are easy to get wrong, both learned here:
+
+- **Match the argv array, not the joined command line.** Word comparison is what lets
+  `docker  compose   up` (doubled spaces) trip while `./scripts/restart-stack.sh` does
+  not. A substring denylist would refuse to let a test so much as name the script it
+  is testing.
+- **Reserve an exit status.** `forbid()` exits 99, which none of these tools return. A
+  test that means to reach a forbidden call asserts 99 *and* the breadcrumb file; a
+  bare `assert_failure` would pass if the script had died for any reason at all.
+
+The breadcrumb exists because the status alone is not enough: a `|| true` or an `if`
+in the script under test swallows it. The file does not get swallowed.
 
 ## What the runner refuses to do
 
@@ -199,6 +354,42 @@ own mutations are at the bottom of `corpus/nas-sync.sh`.
 proved able to emit KILLED, SURVIVED, and all three ERRORs against a fixture
 built for the purpose. A mutation runner that cannot report SURVIVED is worse
 than none — it turns every vacuous test in the suite into a certificate.
+
+## The oracle runs on a clock
+
+Every mutated oracle run is bounded. The budget is **ten times the unmutated
+control run, with a 60-second floor**, computed per mutation rather than
+hardcoded, so a slow oracle gets a proportionally longer rope and a fast one is
+never strangled by a fixed number that was right on somebody else's machine.
+
+This was not a precaution. A generative sweep of
+`scripts/lib/configure-helpers.sh` on 2026-09-01 ran past a 90-minute external
+cap having scored **3 of its 31 mutants**; there was no per-mutant bound at all,
+so one mutant that made the oracle loop stalled the whole sweep, and only a
+`timeout` outside the tool ended it. For a tool whose entire job is injecting
+pathological code, "this mutant hangs" is the expected case, not an edge one.
+
+A run that hits the budget comes back as status 124 and is scored a **kill** —
+the oracle demonstrably did not pass — but it is tallied and printed separately
+(`of those, N hit the oracle time budget`). A hang and a clean red are the same
+exit status once the bound fires, and folding them together would hide the only
+thing that explains a sweep's wall-clock moving.
+
+Two implementation details are load-bearing and both are asserted:
+
+- **`timeout` wraps `tests/run-tests.sh`, not a shell function.** `timeout`
+  execs its argument, so wrapping a function does nothing at all (recorded trap,
+  `docs/TEST-HARDENING-LOG.md` §8).
+- **The whole process group has to die.** `run-tests.sh` forks bats, and bats
+  forks a subshell per test, so signalling only the direct child would leave the
+  hung grandchild holding the command substitution's stdout pipe — the bound
+  would report 124 and still wait out the full hang. GNU `timeout` puts its
+  child in a new process group and signals the group, which is why this works;
+  `tests/mutation-framework.bats` drives it against a runner that *forks* its
+  hang, for exactly that reason, and asserts on elapsed time and not just status.
+
+`ORACLE_BUDGET_FLOOR` exists only so that the timeout-scoring branch can be
+watched firing in seconds instead of a minute. Nothing outside `tests/` sets it.
 
 ## Adding a mutation
 

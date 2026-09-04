@@ -40,9 +40,14 @@ check_dns_duplicates() {
     pihole_domains=$(ssh_to_nas "docker exec pihole cat /etc/pihole/pihole.toml 2>/dev/null | grep -oP '\"[0-9.]+\s+\K[^\"]+(?=\.lan)' | sort -u") || true
 
     # Find duplicates
+    # -xF, not -w. `grep -w` treats a hyphen as a word boundary, so "sonarr"
+    # matched inside "sonarr-4k" and this reported a conflict between two names
+    # pointing at different hosts. And without -F the name is compiled as a
+    # regex, so a dot in it matches any character. Both make the check fire on
+    # correct config, which is the fastest way to teach people to ignore it.
     local duplicates=""
     for domain in $dnsmasq_domains; do
-        if echo "$pihole_domains" | grep -qw "$domain" 2>/dev/null; then
+        if echo "$pihole_domains" | grep -qxF -- "$domain" 2>/dev/null; then
             duplicates="$duplicates $domain.lan"
         fi
     done

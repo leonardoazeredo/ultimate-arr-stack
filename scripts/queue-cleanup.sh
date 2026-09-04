@@ -61,12 +61,12 @@ for arg in "$@"; do
 done
 
 # --- Output helpers ---
+# Only log() survives. The other five (ok/skip/fail/info/verbose) were never
+# called by anything -- the Python half prints its own ✓/✗/[verbose] lines --
+# and the generative sweep found them the way dead code is usually found: two
+# mutants of verbose() that no test could possibly kill, because nothing runs
+# it.
 log()  { echo "[queue-cleanup] $1"; }
-ok()   { echo "  ✓ $1"; }
-skip() { echo "  - $1"; }
-fail() { echo "  ✗ $1"; }
-info() { echo "  $1"; }
-verbose() { $VERBOSE && echo "  [verbose] $1" || true; }
 
 # --- Timestamp ---
 echo ""
@@ -82,9 +82,19 @@ echo "========================================"
 # --- Discover API keys from running containers ---
 get_api_key() {
   local container="$1"
-  if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${container}$"; then
-    return 1
-  fi
+  # Capture docker ps's output before grepping it, rather than piping
+  # straight into grep -q: under `set -o pipefail`, grep -q exits the
+  # instant it matches, and if that match lands on anything but the LAST
+  # line, docker ps can still be mid-write when the pipe closes underneath
+  # it. The resulting SIGPIPE gives docker ps a non-zero exit, which
+  # pipefail then reports as the whole check failing -- even though grep
+  # found exactly what it was looking for. Reproduced directly: piping
+  # straight through failed 123/200 times when checking the first of two
+  # container names, 0/200 for the last. A plain variable has no pipe to
+  # race against.
+  local running
+  running=$(docker ps --format '{{.Names}}' 2>/dev/null) || return 1
+  grep -qx "$container" <<< "$running" || return 1
   docker exec "$container" cat /config/config.xml 2>/dev/null \
     | grep -oP '(?<=<ApiKey>)[^<]+' || return 1
 }
@@ -98,241 +108,15 @@ if [[ -z "$SONARR_KEY" ]] && [[ -z "$RADARR_KEY" ]]; then
 fi
 
 # --- Main cleanup logic (python3 for JSON processing) ---
-python3 - "$APPLY" "$VERBOSE" "$SONARR_KEY" "$RADARR_KEY" << 'PYEOF'
-import json, sys, subprocess, time
-from datetime import datetime, timezone
-
-APPLY = sys.argv[1] == "true"
-VERBOSE = sys.argv[2] == "true"
-SONARR_KEY = sys.argv[3]
-RADARR_KEY = sys.argv[4]
-
-SERVICES = []
-if SONARR_KEY:
-    SERVICES.append({
-        "name": "Sonarr",
-        "port": 8989,
-        "key": SONARR_KEY,
-        "id_field": "seriesId",
-        "search_cmd": "SeriesSearch",
-        "search_key": "seriesId",
-    })
-if RADARR_KEY:
-    SERVICES.append({
-        "name": "Radarr",
-        "port": 7878,
-        "key": RADARR_KEY,
-        "id_field": "movieId",
-        "search_cmd": "MoviesSearch",
-        "search_key": "movieIds",
-    })
-
-total_removed = 0
-total_searches = 0
-
-def api_get(port, path, key):
-    url = f"http://localhost:{port}{path}"
-    if "?" in url:
-        url += f"&apikey={key}"
-    else:
-        url += f"?apikey={key}"
-    result = subprocess.run(
-        ["curl", "-s", "-f", url],
-        capture_output=True, text=True, timeout=30
-    )
-    if result.returncode != 0:
-        return None
-    return json.loads(result.stdout)
-
-def api_delete(port, path, key):
-    url = f"http://localhost:{port}{path}"
-    if "?" in url:
-        url += f"&apikey={key}"
-    else:
-        url += f"?apikey={key}"
-    result = subprocess.run(
-        ["curl", "-s", "-f", "-X", "DELETE", url],
-        capture_output=True, text=True, timeout=30
-    )
-    return result.returncode == 0
-
-def api_post_json(port, path, key, data):
-    url = f"http://localhost:{port}{path}?apikey={key}"
-    result = subprocess.run(
-        ["curl", "-s", "-f", "-X", "POST",
-         "-H", "Content-Type: application/json",
-         "-d", json.dumps(data), url],
-        capture_output=True, text=True, timeout=30
-    )
-    return result.returncode == 0
-
-def is_stuck(record):
-    """Determine if a queue record is stuck and should be removed."""
-    status = record.get("status", "")
-    tracked_status = record.get("trackedDownloadStatus", "")
-    tracked_state = record.get("trackedDownloadState", "")
-    error_msg = (record.get("errorMessage", "") or "").lower()
-    size = record.get("size", 0)
-    sizeleft = record.get("sizeleft", 0)
-
-    # Error-based: stalled, unavailable, missing, etc.
-    if tracked_status == "warning":
-        error_keywords = ["stall", "not available", "no files found",
-                          "import failed", "missing"]
-        if any(kw in error_msg for kw in error_keywords):
-            return "error", error_msg.strip()
-
-    # Stuck imports (completed download but can't import)
-    if tracked_state == "importing" and tracked_status == "warning":
-        return "import_stuck", "completed but stuck importing"
-
-    # Import blocked (already imported, not an upgrade, etc.)
-    if tracked_state == "importBlocked":
-        msgs = []
-        for sm in record.get("statusMessages", []):
-            msgs.extend(sm.get("messages", []))
-        reason = "; ".join(msgs[:2]) if msgs else "import blocked"
-        return "import_blocked", reason
-
-    # Import pending with warnings (e.g. executable files, not an upgrade)
-    if tracked_state == "importPending" and tracked_status == "warning":
-        msgs = []
-        for sm in record.get("statusMessages", []):
-            msgs.extend(sm.get("messages", []))
-        all_msgs = " ".join(msgs).lower()
-        if "executable" in all_msgs or "not an upgrade" in all_msgs:
-            reason = "; ".join(msgs[:2]) if msgs else "import pending with warnings"
-            return "import_warning", reason
-
-    # Stuck downloading metadata (no peers at all)
-    if "downloading metadata" in error_msg:
-        return "metadata", "stuck downloading metadata"
-
-    # Age-based: 0% progress for 24+ hours
-    if size > 0 and sizeleft == size:
-        added_str = record.get("added", "")
-        if added_str:
-            try:
-                added = datetime.fromisoformat(added_str.replace("Z", "+00:00"))
-                age_hours = (datetime.now(timezone.utc) - added).total_seconds() / 3600
-                if age_hours > 24:
-                    return "stale", f"0% progress for {age_hours:.0f}h"
-            except (ValueError, TypeError):
-                pass
-    elif size == 0:
-        # No size info at all — likely metadata-only, check age
-        added_str = record.get("added", "")
-        if added_str:
-            try:
-                added = datetime.fromisoformat(added_str.replace("Z", "+00:00"))
-                age_hours = (datetime.now(timezone.utc) - added).total_seconds() / 3600
-                if age_hours > 24:
-                    return "stale", f"no size info for {age_hours:.0f}h"
-            except (ValueError, TypeError):
-                pass
-
-    return None, None
-
-for svc in SERVICES:
-    print(f"\n--- {svc['name']} (port {svc['port']}) ---")
-
-    # Paginate through queue
-    all_records = []
-    page = 1
-    while True:
-        data = api_get(svc["port"], f"/api/v3/queue?page={page}&pageSize=50", svc["key"])
-        if data is None:
-            print(f"  ✗ Failed to fetch queue")
-            break
-        records = data.get("records", [])
-        all_records.extend(records)
-        total_records = data.get("totalRecords", 0)
-        if page * 50 >= total_records:
-            break
-        page += 1
-
-    print(f"  Queue size: {len(all_records)} items")
-
-    stuck_items = []
-    for record in all_records:
-        reason_type, reason_msg = is_stuck(record)
-        if reason_type:
-            stuck_items.append((record, reason_type, reason_msg))
-
-    if not stuck_items:
-        print(f"  - No stuck items found")
-        continue
-
-    print(f"  Found {len(stuck_items)} stuck item(s):")
-
-    removed_ids = set()   # queue IDs successfully removed
-    search_targets = set()  # unique series/movie IDs to re-search
-    removed_count = 0
-
-    for record, reason_type, reason_msg in stuck_items:
-        title = record.get("title", "unknown")[:70]
-        qid = record.get("id")
-        target_id = record.get(svc["id_field"])
-
-        if APPLY:
-            success = api_delete(
-                svc["port"],
-                f"/api/v3/queue/{qid}?removeFromClient=true&blocklist=true",
-                svc["key"]
-            )
-            if success:
-                print(f"  ✓ Removed: {title}")
-                print(f"    Reason: {reason_msg}")
-                removed_ids.add(qid)
-                removed_count += 1
-                if target_id:
-                    search_targets.add(target_id)
-                time.sleep(0.5)
-            else:
-                print(f"  ✗ Failed to remove: {title}")
-        else:
-            print(f"  [dry-run] Would remove: {title}")
-            print(f"    Reason: {reason_msg}")
-            removed_count += 1
-            if target_id:
-                search_targets.add(target_id)
-
-        if VERBOSE:
-            pct = 0
-            if record.get("size", 0) > 0:
-                pct = round((1 - record.get("sizeleft", 0) / record["size"]) * 100, 1)
-            print(f"    [verbose] Status: {record.get('status')} | "
-                  f"Tracked: {record.get('trackedDownloadStatus')} | "
-                  f"State: {record.get('trackedDownloadState')} | "
-                  f"Progress: {pct}% | Type: {reason_type}")
-
-    # Trigger re-searches
-    if search_targets:
-        action = "Triggering" if APPLY else "Would trigger"
-        print(f"\n  {action} searches for {len(search_targets)} {svc['name'].lower()} item(s):")
-        for target_id in sorted(search_targets):
-            if svc["search_key"] == "movieIds":
-                payload = {"name": svc["search_cmd"], svc["search_key"]: [target_id]}
-            else:
-                payload = {"name": svc["search_cmd"], svc["search_key"]: target_id}
-
-            if APPLY:
-                success = api_post_json(svc["port"], "/api/v3/command", svc["key"], payload)
-                status = "queued" if success else "FAILED"
-                print(f"    ✓ Search {svc['id_field']}={target_id}: {status}")
-            else:
-                print(f"    [dry-run] Search {svc['id_field']}={target_id}")
-
-    total_removed += removed_count
-    total_searches += len(search_targets)
-
-# --- Summary ---
-print(f"\n{'=' * 40}")
-mode = "APPLIED" if APPLY else "DRY RUN"
-print(f"Summary ({mode}): {total_removed} items removed, {total_searches} searches triggered")
-if not APPLY and total_removed > 0:
-    print("Run with --apply to actually remove stuck items")
-PYEOF
+# The Python half lives in its own file rather than a heredoc: bats cannot
+# reach a heredoc, universalmutator cannot parse one, and pytest cannot
+# import one. Argument indices are unchanged -- `python3 -` and
+# `python3 file.py` both put the first argument at sys.argv[1].
+if ! python3 "${SCRIPT_DIR}/lib/queue_cleanup.py" \
+        "$APPLY" "$VERBOSE" "$SONARR_KEY" "$RADARR_KEY"; then
+    echo "ERROR: the queue cleanup exited non-zero; no webhook was sent." >&2
+    exit 1
+fi
 
 # --- Optional: HA webhook notification ---
 if $APPLY && [[ -n "${HA_WEBHOOK_URL:-}" ]]; then
@@ -342,10 +126,19 @@ if $APPLY && [[ -n "${HA_WEBHOOK_URL:-}" ]]; then
 fi
 
 # --- Trim log file ---
-if [[ -f "$LOG_FILE" ]]; then
+# Gated on --apply. This used to run in both modes, which made it the one thing
+# a dry run changed on disk -- and what it changed was the operator's record of
+# previous runs, i.e. exactly what someone is reading when they dry-run to
+# decide whether to apply.
+if $APPLY && [[ -f "$LOG_FILE" ]]; then
   LINES=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
   if [[ "$LINES" -gt "$MAX_LOG_LINES" ]]; then
-    TMPLOG=$(mktemp)
+    # Beside the log rather than in /tmp: on the NAS those are different
+    # filesystems, so `mv` was a copy-then-unlink that can leave the log
+    # half-written if it dies partway, not the atomic rename it looks like.
+    # The trap is why a failing `tail` no longer leaks a temp file per run.
+    TMPLOG=$(mktemp "${LOG_FILE}.XXXXXX")
+    trap 'rm -f "$TMPLOG"' EXIT
     tail -n "$MAX_LOG_LINES" "$LOG_FILE" > "$TMPLOG" && mv "$TMPLOG" "$LOG_FILE"
   fi
 fi
