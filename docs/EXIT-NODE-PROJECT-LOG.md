@@ -285,6 +285,7 @@ are ping-derived** — see §8.1.
 | Phone, ProtonVPN app alone (no `.lan`) | 55 Mbps |
 | Phone, no VPN | 103 Mbps |
 | Phone (Android), exit node, `185.107.44.149` (good draw), **after** `rx-udp-gro-forwarding on` on NAS `eth0` | **2.85 Mbps** (1 sample, 2026-09-04) |
+| Phone, **router-based exit node** (`arr-stack-router`, London), client in remote Brazil Airbnb, ~245ms idle ping, 3.7% loss | **68.6 ↓ / 47.6 ↑ Mbps** (Speedtest app, 1 sample, 2026-09-05) — 8–10× the old ceiling, despite far worse network conditions than any prior sample |
 
 ### What the numbers establish
 
