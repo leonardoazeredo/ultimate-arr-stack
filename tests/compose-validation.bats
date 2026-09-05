@@ -159,23 +159,15 @@ get_service_block() {
     #     look fine until you actually select it.
     #   - Fixing it would leak: a WORKING node-1 exit node egresses via the
     #     HOME IP, exactly the fallback the Go/No-Go leak test exists to catch.
-    # Internet egress must leave via ProtonVPN through tailscale-exit.
-    # The ACL's autoApprovers.exitNode grants tag:nas-router, so unapproving
-    # in the admin console does not hold -- not advertising is the only fix.
+    # The Tailscale exit-node role now runs on arr-stack-router (native
+    # Tailscale + WireGuard, live device config outside this repo) — see
+    # docs/EXIT-NODE-PROJECT-LOG.md. The ACL's autoApprovers.exitNode grants
+    # tag:nas-router, so unapproving in the admin console does not hold --
+    # not advertising is the only fix.
     local block
     block=$(get_service_block "tailscale" "$REPO_ROOT/docker-compose.tailscale.yml")
     run grep -E '^[[:space:]]+- TS_EXTRA_ARGS=.*--advertise-exit-node' <<<"$block"
     assert_failure
-}
-
-@test "tailscale-exit DOES advertise itself as an exit node" {
-    # The mirror of the guard above: the Proton-backed node is the one that is
-    # supposed to offer exit-node service. If this ever stops being true the
-    # stack has no exit node at all.
-    local block
-    block=$(get_service_block "tailscale-exit" "$REPO_ROOT/docker-compose.tailscale.yml")
-    run grep -E '^[[:space:]]+- TS_EXTRA_ARGS=.*--advertise-exit-node' <<<"$block"
-    assert_success
 }
 
 @test "node 1 still advertises its LAN subnet routes" {

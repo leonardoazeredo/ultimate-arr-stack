@@ -8,11 +8,17 @@ wrong, and what is still open. If you are picking this work up cold, read
 and [§8](#8-traps) first — those three carry the knowledge that is expensive to
 rediscover.
 
-Last updated: **2026-08-23**. Sections 2, 5, 6 and 8 are historical and stay
+Last updated: **2026-09-05**. Sections 2, 5, 6 and 8 are historical and stay
 true; **§1 and §7 decay.** Every claim in §1 now carries the command to re-check
 it rather than a copied value, because the first version of this document
 embedded a commit SHA and a commit count that its own commit invalidated the
 moment it landed. If you find a bare number in §1, treat it as a bug.
+
+**2026-09-05: the NAS-based exit node described below is decommissioned.**
+Sections 1-9 describe the original `gluetun-exit`/`tailscale-exit` build and
+stay as the historical record of how the architecture was arrived at and what
+it cost to build — nothing below is rewritten to pretend otherwise. §10
+records what replaced it and why.
 
 ---
 
@@ -20,7 +26,7 @@ moment it landed. If you find a bare number in §1, treat it as a bug.
 
 | | |
 |---|---|
-| Status | **Merged to `main`** in `5fc6776` (PR #38), 2026-08-23. Delivered from `feat/tailscale-protonvpn-exit-node` |
+| Status | **Superseded 2026-09-05.** The `gluetun-exit`/`tailscale-exit` build described below (merged to `main` in `5fc6776`, PR #38, 2026-08-23) was decommissioned — see §10. The exit-node role now runs natively on `arr-stack-router` |
 | HEAD | **Do not trust a number written here.** Re-check: `git rev-parse --short HEAD`. When counting commits, compare against `origin/main`, *never* a local `main` ref — see §8 trap 11 |
 | Deployed | NAS tracks `main`. Re-check on the NAS: `arrgit rev-parse --short HEAD`, compare to local |
 | Merge gate | **Cleared.** MergeGate `adversarial-review` ran against the full branch diff and returned CONTESTED; both accepted findings were fixed in `57d11e8` before the merge. See §9 |
@@ -348,14 +354,15 @@ needed a manual Tailscale toggle — task #90, and the reason
 
 | Task | What | Next action |
 |---|---|---|
-| #86 | The ~6–9 Mbps per-flow ceiling | ✅ **NAS-side root-caused (2026-09-04)** — kernel-6.2 UDP-GSO wall + driver-level `generic-segmentation-offload: off [requested on]`, confirmed dead end empirically (§6). **Piloting a router-based exit node** (`GL-MT6000`, native `kmod-wireguard` + `tailscale`, staged rollout with the NAS path left running until proven — see the active plan) as the actual fix |
-| #90 | Android does not recover when `tailscale-exit` restarts | Needs the phone. Drive `tailscale-exit` restart frequency toward zero — that is the lever we control |
+| #86 | The ~6–9 Mbps per-flow ceiling | ✅ **Closed (2026-09-05)** — resolved by decommissioning the NAS-based path entirely rather than fixing its ceiling. Kernel-6.2 UDP-GSO wall + driver-level `generic-segmentation-offload: off [requested on]` confirmed dead end empirically (§6); the router-based replacement (`arr-stack-router`, native `kmod-wireguard` + `tailscale`) measured 68.6 ↓ / 47.6 ↑ Mbps under adverse conditions, 8–10x the old ceiling. See §10 |
+| — | No leak/kill-switch test exists for the router-based exit-node path | **Open, new (2026-09-05).** §6 Gate check I proved the NAS-based path (`gluetun-exit`) failed closed rather than leaking on VPN drop; that test (`tests/e2e/vpn-security.spec.ts`'s exit-node chaos test) was deleted along with the container it exercised, and no equivalent exists for `arr-stack-router`. The decommission plan explicitly did not close this gap — it inherited it, on the user's explicit choice to proceed on the throughput margin alone (see §10). Next action: devise a way to test router-side kill-switch behavior (e.g. drop the router's WireGuard interface while a Tailscale client is using it as exit node, confirm traffic fails closed rather than falling back to the router's raw WAN route) |
+| #90 | Android does not recover when `tailscale-exit` restarts | ✅ **Moot (2026-09-05)** — `tailscale-exit` no longer exists; see §10. If the router-based exit node ever needs to restart, this class of bug (Android not re-establishing the tunnel afterward) may resurface and would need re-verifying fresh, not assumed fixed by this closure |
 | #77 | Drop `--reset` from node 1 | ✅ **Done** — dropped from `docker-compose.tailscale.yml`'s `TS_EXTRA_ARGS`, verified live on the NAS |
 | #79 | bats guard against `--reset` returning | ✅ **Done** — `node 1 (tailscale) does NOT pass --reset in TS_EXTRA_ARGS` in `tests/compose-validation.bats` |
 | #78, #80, #81 | Relay sidecar, docs, commit | ✅ **Dropped (2026-09-04)** — premise weakened (§3), latency-only justification, decided not to build. Closed, not revisiting without new evidence of a throughput benefit |
 | #91 | `RelayServerPort` doesn't survive ANY node-1 restart | ✅ **Done** — `scripts/ensure-tailscale-relay-port.{sh,service,timer}`, a `--user` systemd timer re-applying it every 30 min. Discovered while deploying #77/#79 (2026-08-25) — dropping `--reset` did not fix this, it was never the cause. A `post_start:` container hook was considered and rejected: NAS reboots restore containers via Docker's own `restart: always` policy, not through Compose (see `docs/TROUBLESHOOTING.md`'s DNS-after-reboot section, the same fact that motivated `boot-compose-up.service`), so a Compose-only hook would never fire on that path. Live-verified end-to-end: `docker restart tailscale` reproduces the loss, the service restores it without any manual `tailscale set`, per §5 item 1 |
 | — | ACL grant still `autogroup:member` | ✅ **Closed (2026-09-04)** — stays `autogroup:member`. Narrowing to `tag:personal-device` was only motivated by the relay sidecar, which was dropped above |
-| #92 | `gluetun-exit`'s WireGuard tunnel dropped on its own (2026-09-04), no error logged | **Root cause still unknown** — `docker logs --since 2h` showed zero VPN-subsystem lines around the drop, just routine DNS-blocklist refreshes. Recovery needed a full `docker compose restart gluetun-exit`, not just the control-server API (see trap 12, §8). If this recurs, capture `docker logs gluetun-exit` for the *whole* uptime window before restarting anything — the 2h-back window this time captured nothing useful |
+| #92 | `gluetun-exit`'s WireGuard tunnel dropped on its own (2026-09-04), no error logged | ✅ **Moot (2026-09-05)** — `gluetun-exit` no longer exists; see §10. Root cause was never found before decommission. If the router's own ProtonVPN tunnel ever drops silently, treat this as unexplained precedent, not a solved problem — the underlying "why" here was never answered, only removed |
 
 ---
 
@@ -509,3 +516,74 @@ re-litigated by the next reviewer.
   someone would type `docker restart gluetun-exit`. `CLAUDE.md` is skimmed at
   session start; a compose comment is read at the edit site at 2am. Redundancy
   across two different read-triggers is protective, not wasteful.
+
+---
+
+## 10. Decommission: the NAS-based exit node is gone (2026-09-05)
+
+**What happened.** §1's build (`gluetun-exit` + `tailscale-exit` on the NAS)
+was removed from `docker-compose.tailscale.yml`, along with
+`tailscale-exit-routing` and `gluetun-exit-rotator`. The exit-node role now
+runs natively on `arr-stack-router` (a GL-MT6000: its own Tailscale +
+WireGuard config, set up directly on the device, not tracked in this repo —
+see §5's pattern for why). Everything above this section stays as written; it
+is the accurate record of how the NAS-based build was designed, debugged, and
+hardened, not a description of what is currently running.
+
+**Why now, on this evidence.** Only one router-based throughput sample
+existed at decision time — 68.6 ↓ / 47.6 ↑ Mbps, logged in `2e7142c`, taken
+over a remote, high-latency (~245ms), lossy (3.7%) connection. That is one
+sample, not the n≥3 same-methodology set every other row in §6's table used,
+and it was taken under worse conditions than any prior sample rather than the
+same conditions. Asked explicitly whether to gather more validation (a proper
+n≥3 set, plus a router-side leak/kill-switch test mirroring §6 Gate check I)
+before cutover, the user chose to proceed immediately: an 8–10x margin under
+adverse conditions was judged convincing enough on its own. That is a
+reasonable call, but it is a judgment call, not a measurement — recorded here
+so a future reader doesn't mistake this decommission for having cleared the
+same bar as the NAS build did.
+
+**What this closes and what it does not.** #86 (the ~6–9 Mbps ceiling) is
+closed — not by fixing it, but by removing the path that had it. What is
+*not* closed, and must not be read as closed by proximity to this section: no
+kill-switch/leak test exists for the router path. §6 Gate check I proved the
+NAS build failed closed (killing `gluetun-exit` blocked egress rather than
+leaking via the host route); `tests/e2e/vpn-security.spec.ts`'s chaos test
+that proved it was deleted along with the container it exercised, and nothing
+replaced it. This is tracked as a new open item in §7, not silently dropped.
+
+**What was removed, concretely:**
+- `docker-compose.tailscale.yml`: the `gluetun-exit`, `tailscale-exit`,
+  `tailscale-exit-routing`, and `gluetun-exit-rotator` services, their
+  `tailscale-exit-state`/`gluetun-exit-config` volumes, and the `arr-core`
+  external-network declaration those services alone had needed.
+- `tailscale/gluetun-exit-post-rules.txt` (only `tailscale-exit-routing` read
+  it).
+- The exit-node env vars in `.env.example`
+  (`GLUETUN_EXIT_ROTATE_INTERVAL_SECONDS`, `GLUETUN_EXIT_MIN_MBPS`,
+  `GLUETUN_EXIT_MAX_ATTEMPTS`, `VPN_EXIT_WIREGUARD_PRIVATE_KEY`,
+  `VPN_EXIT_WIREGUARD_ADDRESSES`, `VPN_EXIT_COUNTRIES`, the commented
+  `TS_EXIT_HOSTNAME`/`TS_EXIT_AUTHKEY` lines).
+- `scripts/detect-vpn-zombies.sh`'s `EXIT_DEPENDENTS` array and its
+  `gluetun-exit`-presence conditional; `scripts/arr-backup.sh`'s
+  `tailscale-exit-state`/`gluetun-exit-config` backup entries.
+- The corresponding bats coverage (`tests/compose-validation.bats`,
+  `tests/vpn-zombies.bats`, `tests/backup-volume-resolution.bats`,
+  `tests/ensure-relay-port.bats`) and the e2e exit-node describe blocks in
+  `tests/e2e/vpn-security.spec.ts`.
+- Doc references in `CLAUDE.md`, `docs/TAILSCALE.md`, `docs/REFERENCE.md`,
+  `TODO-home.md`.
+
+**What is deliberately not touched by this repo change**, because it is
+live-only state per §5's pattern: the `tailscale-exit` node's entry in the
+Tailscale admin console (goes offline once its container stops existing;
+delete/expire it there), whether `arr-stack-router`'s Tailscale node needs
+adding to `tagOwners`/`autoApprovers.exitNode` in the ACL policy (§6's
+`docs/TAILSCALE.md` example ACL used `tag:nas-router`, which was written for
+`tailscale-exit` and is now vestigial — see the warning added there), and the
+NAS-side `tailscale-exit-state`/`gluetun-exit-config` Docker volumes (back up,
+then remove, on the NAS directly). None of these can be done from a session
+without live NAS/Tailscale-admin access — this section exists partly to make
+that limitation explicit rather than have it discovered later as a silent gap
+between "the repo says decommissioned" and "the live tailnet still lists the
+old node."

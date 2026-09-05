@@ -49,25 +49,9 @@ for c in "${DEPENDENTS[@]}"; do
     fi
 done
 
-# Second gateway: gluetun-exit (docker-compose.tailscale.yml), the dedicated
-# ProtonVPN tunnel behind the Tailscale exit node. Its dependents hit exactly
-# the same stale-netns failure mode, but they can't be folded into DEPENDENTS
-# above — they're bound to a DIFFERENT gateway container, so they'd be flagged
-# as zombies against gluetun's ID every single time.
-#
-# Unlike gluetun, a missing gluetun-exit is NOT an error: the exit-node stack
-# is opt-in, so most deployments won't have it running.
-EXIT_DEPENDENTS=(tailscale-exit tailscale-exit-routing gluetun-exit-rotator)
-
-if GLUETUN_EXIT_ID=$(docker inspect --format '{{.Id}}' gluetun-exit 2>/dev/null); then
-    for c in "${EXIT_DEPENDENTS[@]}"; do
-        mode=$(docker inspect --format '{{.HostConfig.NetworkMode}}' "$c" 2>/dev/null) || continue
-        [[ "$mode" == container:* ]] || continue
-        if [[ "$mode" != "container:$GLUETUN_EXIT_ID" ]]; then
-            zombies+=("$c")
-        fi
-    done
-fi
+# The gluetun-exit/tailscale-exit second gateway (docker-compose.tailscale.yml)
+# that used to need a mirror check here was decommissioned once the Tailscale
+# exit-node role moved to arr-stack-router — see docs/EXIT-NODE-PROJECT-LOG.md.
 
 # Which compose file DEFINES each dependent. Recovery is a compose recreate,
 # and this stack's standing rule is that a service may only ever be recreated
@@ -90,7 +74,6 @@ compose_file_for() {
     case "$1" in
         qbittorrent|sabnzbd|prowlarr|flaresolverr|vpn-socks5) echo "docker-compose.arr-stack.yml" ;;
         magnetio-addon)                                      echo "docker-compose.magnetio.yml" ;;
-        tailscale-exit|tailscale-exit-routing|gluetun-exit-rotator) echo "docker-compose.tailscale.yml" ;;
         *)                                                   echo "" ;;
     esac
 }
