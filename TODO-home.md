@@ -16,5 +16,6 @@ Shipped. Tailscale runs on the NAS as a subnet router advertising the LAN, so ev
 admin UI is reachable remotely with no port forwarding. See `docs/TAILSCALE.md` (setup,
 split-DNS, and the failure modes hit along the way) and `docs/REMOTE-ACCESS.md`.
 
-The follow-on exit-node work (ProtonVPN egress via `gluetun-exit` / `tailscale-exit`) is
-tracked separately in `docs/EXIT-NODE-PROJECT-LOG.md`.
+The follow-on exit-node work (ProtonVPN egress, now via `arr-stack-router` natively rather
+than the decommissioned NAS-based `gluetun-exit`/`tailscale-exit` pair) is tracked separately
+in `docs/EXIT-NODE-PROJECT-LOG.md`.

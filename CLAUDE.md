@@ -13,19 +13,22 @@ Docker media stack for Ugreen NAS. Edit NAS files (like `pihole/dnsmasq.d/02-loc
 
 ## Tailscale ProtonVPN Exit Node
 
-A second ProtonVPN tunnel (`gluetun-exit`) serves as internet egress for a
-second Tailscale node (`tailscale-exit`), so a phone gets Proton's IP *and*
-`.lan` access over one tunnel. **Merged to `main`** in `5fc6776` (PR #38),
-2026-08-23, from `feat/tailscale-protonvpn-exit-node`; deployed and working.
+The Tailscale exit-node role (ProtonVPN egress for remote clients) runs
+natively on **`arr-stack-router`** — its own Tailscale + WireGuard config,
+live on the device, not in this repo. A NAS-based version
+(`gluetun-exit`/`tailscale-exit`, merged `5fc6776`/PR #38, 2026-08-23) was
+built, proven, and **decommissioned** once the router path demonstrated an
+8-10x throughput improvement over the NAS's ~6-9 Mbps per-flow ceiling — see
+`docs/EXIT-NODE-PROJECT-LOG.md` for the full history and root-cause
+investigation. No kill-switch/leak test exists yet for the router path (the
+NAS path had one); that gap is tracked as an open item there, not silently
+dropped.
 
 **Read `docs/EXIT-NODE-PROJECT-LOG.md` before touching any of it.** That file is
 the audited record: what shipped, where the plan was wrong and why, the
 measurements that settle recurring arguments, live-only state that is NOT in
-this repo, and the open items. Three things there are expensive to rediscover:
+this repo, and the open items. Two things there are expensive to rediscover:
 
-- **`gluetun-exit` must never be restarted to rotate servers.** Its netns is
-  shared by `tailscale-exit`, and a restart strands Android clients until
-  Tailscale is manually toggled. Use gluetun's control-server API.
 - **Recreating Tailscale node 1 severs every path to the NAS at once** — SSH
   and the UGOS admin UI both ride its own subnet route. Do it detached, with a
   state-volume backup and an auto-rollback.

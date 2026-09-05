@@ -146,8 +146,9 @@ assert_not_recognised() {
 }
 
 @test "ensure-relay-port: it only ever asks for node 1, never the exit node" {
-    # gluetun-exit's netns is shared by tailscale-exit, and this script's
-    # re-apply is aimed at node 1 only. A stray container name here would be
+    # The relay-port re-apply is aimed at node 1 only, never the Tailscale
+    # exit-node role (now arr-stack-router, previously the decommissioned
+    # tailscale-exit container). A stray container name here would be
     # invisible in the exit status.
     printf '%s\n' '    "RelayServerPort": 41641,' > "$PREFS"
     run "$SCRIPT"

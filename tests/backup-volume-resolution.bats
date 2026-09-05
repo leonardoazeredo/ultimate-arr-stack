@@ -50,8 +50,6 @@ arr-utilities_duc-index
 arr-utilities_uptime-kuma-data
 magnetio_magnetio-redis-data
 tailscale-state
-tailscale_gluetun-exit-config
-tailscale_tailscale-exit-state
 tailscale_tailscale-state
 EOF
 )
@@ -80,8 +78,6 @@ arr-stack_sonarr-config
 arr-utilities_diun-data
 arr-utilities_duc-index
 arr-utilities_uptime-kuma-data
-tailscale_gluetun-exit-config
-tailscale_tailscale-exit-state
 tailscale_tailscale-state
 EOF
 )
@@ -105,8 +101,6 @@ arr-stack_sonarr-config
 arr-utilities_diun-data
 arr-utilities_duc-index
 arr-utilities_uptime-kuma-data
-tailscale_gluetun-exit-config
-tailscale_tailscale-exit-state
 tailscale_tailscale-state
 EOF
 )
@@ -368,23 +362,20 @@ curated_volumes() {
     }
 }
 
-@test "the Tailscale node state volumes are in the curated list" {
+@test "the Tailscale node state volume is in the curated list" {
     # docs/EXIT-NODE-PROJECT-LOG.md: recreating Tailscale node 1 severs every path
     # to the NAS at once -- SSH and the UGOS admin UI both ride its own subnet
-    # route -- and must only be done with a state-volume backup. Dropping these
-    # from the list re-arms that hazard silently, which is how they came to be
+    # route -- and must only be done with a state-volume backup. Dropping this
+    # from the list re-arms that hazard silently, which is how it came to be
     # missing in the first place.
     local list
     list=$(curated_volumes)
 
-    local v
-    for v in tailscale-state tailscale-exit-state; do
-        grep -qx "$v" <<<"$list" || {
-            echo "'$v' is not backed up. docs/EXIT-NODE-PROJECT-LOG.md requires a"
-            echo "state-volume backup before Tailscale node 1 is ever recreated."
-            return 1
-        }
-    done
+    grep -qx "tailscale-state" <<<"$list" || {
+        echo "'tailscale-state' is not backed up. docs/EXIT-NODE-PROJECT-LOG.md requires a"
+        echo "state-volume backup before Tailscale node 1 is ever recreated."
+        return 1
+    }
 }
 
 @test "an unresolvable curated volume is a failure, not a skip" {

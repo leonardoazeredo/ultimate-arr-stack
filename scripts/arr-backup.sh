@@ -644,8 +644,6 @@ VOLUME_SUFFIXES=(
   dnscrypt-config         # dnscrypt-proxy.toml - resolver and forwarding rules
   beszel-data             # data.db + id_ed25519, the agent's own private key
   tailscale-state         # node identity: see below, this one is load-bearing
-  tailscale-exit-state    # exit-node identity, same argument
-  gluetun-exit-config     # same, for the Tailscale exit-node tunnel
 )
 
 # tailscale-state is the most important entry in this list and was missing from it
