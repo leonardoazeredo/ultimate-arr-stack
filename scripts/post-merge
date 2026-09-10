@@ -66,8 +66,22 @@ if [[ "$LOCAL" != "$REMOTE" ]]; then
         exit 0
     fi
     echo "post-merge: pushing $BRANCH to origin so the NAS can pull it ..."
-    if ! git -C "$REPO_ROOT" push origin "$BRANCH"; then
+    push_out="$(git -C "$REPO_ROOT" push origin "$BRANCH" 2>&1)"
+    if [[ $? -ne 0 ]]; then
+        printf '%s\n' "$push_out" >&2
         echo "post-merge: push FAILED - NAS NOT synced" >&2
+        # main is protected (pull requests required, enforced for admins), so a
+        # local merge can no longer reach origin at all. The remote says
+        # "protected branch" / "must be made through a pull request"; anything
+        # else is an ordinary push failure and gets the ordinary advice.
+        if grep -qiE 'protected branch|GH006|pull request' <<<"$push_out"; then
+            echo "post-merge: $BRANCH is protected - a local merge cannot be pushed any more." >&2
+            echo "post-merge: do not force it. Recover with: git reset --hard origin/$BRANCH" >&2
+            echo "post-merge: then land the work through a PR:" >&2
+            echo "post-merge:   git push origin <your-branch> && gh pr create --fill && gh pr merge <n>" >&2
+            echo "post-merge:   git fetch origin $BRANCH && git merge --ff-only origin/$BRANCH && ./scripts/sync-nas.sh" >&2
+            exit 0
+        fi
         echo "post-merge: fix the push, then: ./scripts/sync-nas.sh" >&2
         exit 0
     fi
