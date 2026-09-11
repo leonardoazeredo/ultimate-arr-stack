@@ -1,15 +1,14 @@
 FROM node:21-slim
 
-# Defaults only, and the literal string "changeme" is the point: no credential
-# is baked into this image. The compose service always sets the real values
-# (`JELLYFIN_PASSWORD=${STREMIO_JELLYFIN_PASSWORD}`, from the host's .env), so
-# these lines describe a container that has not been configured rather than one
-# that has. Trivy's DS-0031 flags the ENV line for looking like a secret; the
-# scan reads the variable name, not the value, and the value here is inert.
-ENV JELLYFIN_USER "changeme"
-ENV JELLYFIN_PASSWORD "changeme"
+# Settings come from the compose service's `environment:` block and from
+# nowhere else. This file used to carry ENV defaults too, including
+# `JELLYFIN_PASSWORD "changeme"`; two sources for one setting is how they drift,
+# and the value on this side was never the one in use. Removing them is also
+# what a scanner needs to stop flagging the image: trivy's DS-0031 reads a
+# variable name that looks like a secret, and an ENV line of any value looks
+# like a credential baked into a layer. See docker-compose.arr-stack.yml's
+# stremio-jellyfin service for the values that apply.
 ENV SERVER_PORT 60421
-ENV JELLYFIN_SERVER "http://localhost"
 
 RUN mkdir -p /home/node/app/node_modules && chown -R node:node /home/node/app
 WORKDIR /home/node/app
