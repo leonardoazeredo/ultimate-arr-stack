@@ -277,20 +277,24 @@ doc() {
 # closes the gap where the coverage already lives.
 
 @test "doc-links: every link in this repository's own markdown resolves" {
-    command -v git >/dev/null 2>&1 \
-        || skip "no host git binary: check_doc_links enumerates files with git ls-files, so it would find none here and report a skip"
-
-    # setup() stubs both seams for the fixture tree. Undo them for this one test.
+    # ORDER MATTERS: setup() installs a `git()` FUNCTION as the fixture seam, and
+    # `command -v git` is happy to report a function. Checking before unsetting it
+    # made this test skip-proof and then fail on a host with no git at all -- the
+    # NAS -- because the probe passed and the real binary did not exist.
     unset -f git
     get_repo_root() { echo "$REPO_ROOT"; }
 
-    local count
-    count=$(cd "$REPO_ROOT" && git ls-files '*.md' | wc -l)
-    # Two ways of covering nothing -- no git, and git finding no markdown -- both
-    # come back as the checker's SKIP line and a green test. Only the first is a
-    # legitimate environment gap, and it is the one skipped above.
-    [[ "$count" -gt 0 ]] \
-        || { echo "git ls-files returned no markdown, so the checker would skip and this test would pass having checked nothing"; return 1; }
+    command -v git >/dev/null 2>&1 \
+        || skip "no host git binary: check_doc_links enumerates files with git ls-files, so it would find none here and report a skip"
+
+    local md_list
+    if ! md_list=$(cd "$REPO_ROOT" && git ls-files '*.md' 2>/dev/null); then
+        skip "git is present but cannot enumerate this repo here (safe.directory?), so check_doc_links would report a skip rather than a result"
+    fi
+    # git works and still found no markdown: that is a defect in the repo, not an
+    # environment gap, and it would otherwise pass this test while checking nothing.
+    [[ -n "$md_list" ]] \
+        || { echo "git enumerated no markdown in this repo, so the checker would skip and this test would pass having checked nothing"; return 1; }
 
     cd "$REPO_ROOT" || return 1
     run check_doc_links
