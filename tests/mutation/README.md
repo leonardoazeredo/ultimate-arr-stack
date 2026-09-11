@@ -450,6 +450,27 @@ mutation some-stable-id \
 Keep `--apply` **single-quoted** — corpus files are sourced, so a double-quoted
 value would expand `$F` to nothing at load time.
 
+`--apply` is a shell command in its own right, and two shells parse it before
+perl or sed ever sees it: the value is single-quoted for the shell that sources
+the corpus, and `run-mutations.sh` then hands the string to `bash -c`. So a `$`
+has to survive both, and `\$` only survives one. Measured: an entry written
+`--apply 'perl -pi -e "s@\"\$repo_root\"@\".\"@" "$F"'`, meant to rewrite
+`target="$repo_root"`, left the file byte-identical. perl received
+`s@"$repo_root"@"."@`, read `$repo_root` as one of its own variables, expanded
+it to nothing, and matched nothing. The runner's only report is `the mutation
+changed NOTHING`, which points at the pattern rather than at the quoting, so the
+search starts in the wrong file. A literal `$` in the program needs `\\\$`; a
+`$` perl is meant to read, a variable or the end anchor in `s@\s+$@@`, is
+written `\$` and arrives as `$`.
+
+An entry is a literal edit of a source line, so the line and the entry that
+mutates it move together: when a source edit touches a line an entry applies to,
+update that entry in the same commit. The failure is not a red test. The pattern
+stops matching, the file comes back byte-identical, and the runner reports the
+same `changed NOTHING` ERROR, failing the blocking corpus step while every test
+in the suite is green. The same holds for `--test`: rename a test and every
+entry naming it matches nothing, and `bats -f` exits 0 having run nothing.
+
 Write `--why` as the consequence, not the edit. It is what gets printed when
 the mutation survives, and by then the useful sentence is the one explaining
 what is now unguarded.
