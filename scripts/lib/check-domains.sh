@@ -48,6 +48,7 @@ check_domains() {
         "uptime.lan"
         "duc.lan"
         "beszel.lan"
+        "stremio.lan"
     )
 
     # Check .lan domains (parallel for speed)
@@ -56,7 +57,7 @@ check_domains() {
     local lan_fail=0
     local tmpdir
     # Checked. Unchecked, a failed mktemp leaves tmpdir empty, every touch
-    # below becomes a write to the filesystem ROOT, and all fourteen names get
+    # below becomes a write to the filesystem ROOT, and every name gets
     # reported as not resolving -- a DNS verdict manufactured entirely out of a
     # local filesystem error.
     if ! tmpdir=$(mktemp -d); then

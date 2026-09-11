@@ -83,8 +83,15 @@ test.describe('Admin-UI HTTPS tier', () => {
   // while the service went unauthenticated on the LAN. jellyfin.lan redirects
   // like the rest but is deliberately not auth-gated, so it appears only in
   // the redirect list and gets its own assertion below.
-  const ADMIN_TIER_HOSTS = ['sonarr.lan', 'jellyfin.lan', 'seerr.lan', 'homepage.lan', 'duc.lan', 'beszel.lan'] as const;
-  const AUTH_GATED_HOSTS = ADMIN_TIER_HOSTS.filter((h) => h !== 'jellyfin.lan');
+  const ADMIN_TIER_HOSTS = ['sonarr.lan', 'jellyfin.lan', 'seerr.lan', 'homepage.lan', 'duc.lan', 'beszel.lan', 'stremio.lan'] as const;
+  // Two of these are deliberately NOT behind admin-auth, for the same reason
+  // and with different clients. Jellyfin's web client fires concurrent requests
+  // that do not all carry a cached Basic Auth header (looping native prompts).
+  // Stremio is not a browser at all: it fetches this manifest and then every
+  // poster and stream URL the addon returns, and cannot answer a challenge, so
+  // a 401 there means an addon that cannot be installed and no way to type a
+  // credential. Both are covered by the assertions below instead.
+  const AUTH_GATED_HOSTS = ADMIN_TIER_HOSTS.filter((h) => h !== 'jellyfin.lan' && h !== 'stremio.lan');
 
   async function httpsProbe(domain: string, path = '/') {
     return new Promise<{ status: number; subjectaltname: string }>((resolve, reject) => {
@@ -148,6 +155,22 @@ test.describe('Admin-UI HTTPS tier', () => {
   // the very control it asserted. Rather than delete the coverage, it asserts
   // the security property that actually holds — Jellyfin's own app-level login
   // is the real gate — so removing *that* gate still fails a test.
+  test('https stremio.lan reaches the addon, with no admin-auth challenge', async () => {
+    test.skip(!TRAEFIK_LAN_IP, 'TRAEFIK_LAN_IP not set');
+
+    // Not 401: the addon must be reachable by a Stremio client, which cannot
+    // answer an HTTP Basic challenge. This is the assertion that a middleware
+    // added to the -secure router later would break, which is the point.
+    const root = await httpsProbe('stremio.lan');
+    expect(root.status, 'the addon must not challenge with 401').not.toBe(401);
+    expect(root.subjectaltname).toContain('DNS:stremio.lan');
+
+    // And the thing a client actually fetches. manifest.json is the addon's
+    // whole handshake: if this 200s with an id, Stremio can install it.
+    const manifest = await httpsProbe('stremio.lan', '/manifest.json');
+    expect(manifest.status).toBe(200);
+  });
+
   test('https jellyfin.lan is exempt from admin-auth but gated by Jellyfin itself', async () => {
     test.skip(!TRAEFIK_LAN_IP, 'TRAEFIK_LAN_IP not set');
 
