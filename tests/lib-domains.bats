@@ -85,7 +85,7 @@ fail_lan() { local n="$1"; dig() {
     [ ! -s "$DIG_LOG" ]
 }
 
-@test "domains: DEFECT - an unusable temp dir is a skip, not a failure per name" {
+@test "domains: DEFECT - an unusable temp dir is a skip, not fourteen failures" {
     # mktemp -d was unchecked. On failure tmpdir is empty, every touch becomes
     # a write to the filesystem ROOT, and every name is then reported
     # as not resolving -- a DNS verdict manufactured entirely out of a local
@@ -98,12 +98,21 @@ fail_lan() { local n="$1"; dig() {
     refute_output --partial "does not resolve"
 }
 
+
+# The .lan names check-domains.sh queries, read out of the script's own list.
+# Derived, not hardcoded: this file asserted "14" in three places, and adding
+# one hostname to the stack made all three wrong at once.
+lan_name_count() {
+    sed -n '/^    local lan_domains=(/,/^    )/p' "$REPO_ROOT/scripts/lib/check-domains.sh" \
+        | grep -oE '"[a-z0-9.-]+\.lan"' | wc -l | tr -d ' '
+}
+
 # -------------------------------------------------------------- the .lan half
 
 @test "domains: every .lan name resolving is one OK line" {
     run check_domains
     assert_success
-    assert_output --partial "OK: All 14 .lan domains resolve"
+    assert_output --partial "OK: All $(lan_name_count) .lan domains resolve"
     refute_output --partial "FAIL"
 }
 
@@ -116,14 +125,14 @@ fail_lan() { local n="$1"; dig() {
     grep -q '@192.168.8.2' "$DIG_LOG"
     grep -q '+time=2' "$DIG_LOG"
     grep -q '+tries=1' "$DIG_LOG"
-    [ "$(grep -c '^dig' "$DIG_LOG")" -eq 14 ]
+    [ "$(grep -c '^dig' "$DIG_LOG")" -eq "$(lan_name_count)" ]
 }
 
 @test "domains: it queries every name the stack publishes" {
     run check_domains
     assert_success
     for name in jellyfin seerr jellyseerr sonarr radarr prowlarr bazarr \
-                qbit sabnzbd traefik pihole uptime duc beszel; do
+                qbit sabnzbd traefik pihole uptime duc beszel stremio; do
         grep -q " $name.lan " "$DIG_LOG" || {
             echo "never queried: $name.lan"; cat "$DIG_LOG"; return 1
         }
@@ -147,7 +156,7 @@ fail_lan() { local n="$1"; dig() {
     dig() { printf 'dig\t%s\n' "$*" >> "$DIG_LOG"; return 0; }
     run check_domains
     assert_success
-    [ "$(printf '%s\n' "$output" | grep -c 'does not resolve')" -eq 14 ]
+    [ "$(printf '%s\n' "$output" | grep -c 'does not resolve')" -eq "$(lan_name_count)" ]
 }
 
 # --------------------------------------------------------- the external half

@@ -34,6 +34,7 @@ address=/uptime.lan/TRAEFIK_LAN_IP
 address=/duc.lan/TRAEFIK_LAN_IP
 address=/beszel.lan/TRAEFIK_LAN_IP
 address=/homepage.lan/TRAEFIK_LAN_IP
+address=/stremio.lan/TRAEFIK_LAN_IP
 
 # Proper IPv6 response for .lan domains (no real IPv6 addresses needed).
 # Returns :: (unspecified) instead of NXDOMAIN for AAAA queries. This is the
