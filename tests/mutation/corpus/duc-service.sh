@@ -97,6 +97,13 @@ mutation duc-cgi-missing-log-is-fatal \
   --why "removes the fallback for an absent log. Under set -e the script dies AFTER the headers have gone out, so a fresh container answers the status page with a truncated response and no explanation" \
   --apply 'sed -i "s@^    cat \"\$LOG_FILE\" 2>/dev/null || echo \"(no log yet)\"\$@    cat \"\$LOG_FILE\"@" "$F"'
 
+mutation duc-cgi-response-never-completed \
+  --file duc-service/app/manual_scan.cgi \
+  --bats tests/duc-service.bats \
+  --test "duc: the cgi does not report a queued scan when the marker cannot be created" \
+  --why "removes the trap that finishes a response whose branch never reached the end of the script. A failed mkdir then leaves the client the Content-type header and nothing else: the status is still non-zero and the success message is still absent, so only an assertion on the shape of the response can see it" \
+  --apply 'perl -pi -e '"'"'s{^trap _finish_response EXIT}{:}'"'"' "$F"'
+
 # The three below all drop errexit and nothing else. Each names the one place in
 # its file where that is load-bearing: an unguarded command whose failure the
 # script would otherwise continue past. Applying them with perl rather than
@@ -117,13 +124,6 @@ mutation duc-cgi-queued-scan-that-was-never-queued \
   --test "duc: the cgi does not report a queued scan when the marker cannot be created" \
   --why "drops errexit from the cgi, so a failed mkdir is followed by the success message anyway. The user is told a scan starts within one minute; no marker was created, the poller branches on that marker, and no scan ever runs" \
   --apply 'perl -pi -e "s/^set -euo pipefail\$/set -uo pipefail/" "$F"'
-
-mutation duc-cgi-response-never-completed \
-  --file duc-service/app/manual_scan.cgi \
-  --bats tests/duc-service.bats \
-  --test "duc: the cgi does not report a queued scan when the marker cannot be created" \
-  --why "removes the trap that finishes a response whose branch never reached the end of the script. A failed mkdir then leaves the client the Content-type header and nothing else: the status is still non-zero and the success message is still absent, so only an assertion on the shape of the response can see it" \
-  --apply 'perl -pi -e '"'"'s{^trap _finish_response EXIT}{:}'"'"' "$F"'
 
 mutation duc-scan-log-write-failure-reported-as-success \
   --file duc-service/app/scan.sh \
