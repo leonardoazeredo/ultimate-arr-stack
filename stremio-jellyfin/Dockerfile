@@ -1,5 +1,11 @@
 FROM node:21-slim
 
+# Defaults only, and the literal string "changeme" is the point: no credential
+# is baked into this image. The compose service always sets the real values
+# (`JELLYFIN_PASSWORD=${STREMIO_JELLYFIN_PASSWORD}`, from the host's .env), so
+# these lines describe a container that has not been configured rather than one
+# that has. Trivy's DS-0031 flags the ENV line for looking like a secret; the
+# scan reads the variable name, not the value, and the value here is inert.
 ENV JELLYFIN_USER "changeme"
 ENV JELLYFIN_PASSWORD "changeme"
 ENV SERVER_PORT 60421
