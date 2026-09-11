@@ -450,6 +450,17 @@ mutation some-stable-id \
 Keep `--apply` **single-quoted** — corpus files are sourced, so a double-quoted
 value would expand `$F` to nothing at load time.
 
+**GNU sed is a requirement of the corpus as it stands.** The example above uses
+`sed -i`, and most entries do: GNU sed treats `-i` as an in-place flag, BSD sed
+reads the next argument as a backup suffix, so on macOS those entries change
+nothing and the runner reports `the mutation changed NOTHING` for each of them.
+That is why `tests/mutation-corpus.bats` skips on BSD sed rather than reporting
+hundreds of inert entries, and why a corpus can only be trusted where it ran:
+Linux, which is where CI and pi1 run it. Write new entries with `perl -pi -e` or
+`python3 -c` when they should replay on either host; the older `sed -i` ones stay
+as they are, since rewriting them buys portability the corpus does not need and
+costs a re-verification of every one.
+
 `--apply` is a shell command in its own right, and two shells parse it before
 perl or sed ever sees it: the value is single-quoted for the shell that sources
 the corpus, and `run-mutations.sh` then hands the string to `bash -c`. So a `$`
