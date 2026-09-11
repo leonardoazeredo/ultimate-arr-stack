@@ -160,6 +160,26 @@ three are `continue-on-error`, which is intentional and worth stating once:
 each one's output is a queue of things to read, and the two that could gate
 (corpus, bats) already do.
 
+**One trivy rule is suppressed, for four images.** The per-push trivy scan
+failed on its first run with six HIGH or CRITICAL misconfigurations and none of
+them a defect in a deployed image. `.trivyignore` now suppresses DS-0002, the
+root-user rule, once, with the reason for each of the four Dockerfiles it
+applies to. Three are this repository's own test images, which write into a
+mounted checkout or read the Docker socket and would fail as a non-root user.
+The fourth is `duc-service`, which is deployed: nginx binds port 80 inside it
+and `startup.sh` drives dpkg-installed cron, so a real fix means `setcap` and a
+privilege drop, which changes how a live service starts.
+
+The other two findings were fixed rather than listed. `.devcontainer/Dockerfile`
+had the only apt-get without `--no-install-recommends`, and
+`stremio-jellyfin/Dockerfile` carried ENV defaults for three variables the
+compose service always sets; those lines are gone, which is both the honest fix
+and what stops the scanner flagging the image.
+
+Suppressing by rule id is deliberately blunt: DS-0002 is silenced everywhere,
+so a new Dockerfile that runs as root will not be reported. That is the trade
+this file makes, and it is why each entry carries what would remove it.
+
 **BSD userland: two guards were fixed, one constraint remains.** The suite is
 meant to give the same verdict on the Mac, on pi1 and on the NAS, but the Mac is
 the only one of the three with BSD userland, and two tests had picked up
