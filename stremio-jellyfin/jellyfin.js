@@ -69,7 +69,7 @@ export class JellyfinApi {
             {
                 headers: {
                     'Content-Type': 'application/json',
-                    'X-Emby-Authorization': this.authorisationHeader
+                    Authorization: this.authorisationHeader
                 }
             })
     }
@@ -90,7 +90,7 @@ export class JellyfinApi {
             {
                 headers: {
                     'Content-Type': 'application/json',
-                    'X-Emby-Authorization': this.authorisationHeader
+                    Authorization: this.authorisationHeader
                 }
             })
             .then(it => it.data.Items.map(it => this.getItemById(it.Id)))
@@ -108,7 +108,7 @@ export class JellyfinApi {
             {
                 headers: {
                     'Content-Type': 'application/json',
-                    'X-Emby-Authorization': this.authorisationHeader
+                    Authorization: this.authorisationHeader
                 }
             })
             .then(resp => resp.data.Items.filter(it => it.ProviderIds && it.ProviderIds.Imdb === imdbId))
@@ -120,7 +120,7 @@ export class JellyfinApi {
             {
                 headers: {
                     'Content-Type': 'application/json',
-                    'X-Emby-Authorization': this.authorisationHeader
+                    Authorization: this.authorisationHeader
                 }
             }).then(item => item.data)
     }
@@ -131,7 +131,7 @@ export class JellyfinApi {
             {
                 headers: {
                     'Content-Type': 'application/json',
-                    'X-Emby-Authorization': this.authorisationHeader                }
+                    Authorization: this.authorisationHeader                }
             }).then(item => item.data)
     }
 }
