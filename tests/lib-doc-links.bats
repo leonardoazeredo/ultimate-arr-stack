@@ -267,3 +267,35 @@ doc() {
     run check_doc_links
     [ ! -f "$BATS_TEST_TMPDIR/PWNED" ]
 }
+
+# --- this repository's own documentation ------------------------------------
+#
+# Every test above fixtures the file list, so the checker's own behaviour is
+# covered and this repo's actual markdown never was. Until now a broken link in
+# these docs was caught only by scripts/pre-commit, which runs on a developer's
+# commit -- and the deploy workflow runs the bats suite, not the hook. This
+# closes the gap where the coverage already lives.
+
+@test "doc-links: every link in this repository's own markdown resolves" {
+    command -v git >/dev/null 2>&1 \
+        || skip "no host git binary: check_doc_links enumerates files with git ls-files, so it would find none here and report a skip"
+
+    # setup() stubs both seams for the fixture tree. Undo them for this one test.
+    unset -f git
+    get_repo_root() { echo "$REPO_ROOT"; }
+
+    local count
+    count=$(cd "$REPO_ROOT" && git ls-files '*.md' | wc -l)
+    # Two ways of covering nothing -- no git, and git finding no markdown -- both
+    # come back as the checker's SKIP line and a green test. Only the first is a
+    # legitimate environment gap, and it is the one skipped above.
+    [[ "$count" -gt 0 ]] \
+        || { echo "git ls-files returned no markdown, so the checker would skip and this test would pass having checked nothing"; return 1; }
+
+    cd "$REPO_ROOT" || return 1
+    run check_doc_links
+    [ "$status" -eq 0 ] || { printf '%s\n' "$output" | tail -20; return 1; }
+    [[ "$output" == *"OK: All internal doc links valid"* ]] \
+        || { echo "the checker neither failed nor reported success: $output"; return 1; }
+}
+
