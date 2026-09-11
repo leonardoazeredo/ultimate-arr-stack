@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 # scripts/lib/check-domains.sh
 #
-# Check 9 of scripts/pre-commit. It resolves fourteen .lan names against
+# Check 9 of scripts/pre-commit. It resolves the .lan names in its own list against
 # Pi-hole and two external names against the internet, and it is documented as
 # warnings-only: it returns 0 on every path, including the ones that print
 # FAIL. That contract is what these tests pin first, because it is the one a
@@ -85,9 +85,9 @@ fail_lan() { local n="$1"; dig() {
     [ ! -s "$DIG_LOG" ]
 }
 
-@test "domains: DEFECT - an unusable temp dir is a skip, not fourteen failures" {
+@test "domains: DEFECT - an unusable temp dir is a skip, not a failure per name" {
     # mktemp -d was unchecked. On failure tmpdir is empty, every touch becomes
-    # a write to the filesystem ROOT, and all fourteen names are then reported
+    # a write to the filesystem ROOT, and every name is then reported
     # as not resolving -- a DNS verdict manufactured entirely out of a local
     # filesystem error, which is the exact shape of a green check that means
     # nothing (here, inverted: a red one that means nothing).
@@ -100,7 +100,7 @@ fail_lan() { local n="$1"; dig() {
 
 # -------------------------------------------------------------- the .lan half
 
-@test "domains: all fourteen .lan names resolving is one OK line" {
+@test "domains: every .lan name resolving is one OK line" {
     run check_domains
     assert_success
     assert_output --partial "OK: All 14 .lan domains resolve"

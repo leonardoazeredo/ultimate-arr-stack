@@ -55,6 +55,37 @@ http:
       middlewares: [admin-auth@docker, security-headers]
       service: seerr-lan
 
+    # The Stremio addon. No admin-auth on the -secure router, and for a
+    # stronger reason than Jellyfin's: Stremio is the client, not a browser.
+    # It fetches this manifest, then every poster and stream URL the addon
+    # hands back, and it has no way to answer an HTTP Basic challenge -- so a
+    # 401 here is not a prompt, it is an addon that will not install, with no
+    # way to enter the credential. The access control that matters is on the
+    # other side of the addon: its stream URLs carry a Jellyfin API token, and
+    # Jellyfin checks that token on every byte served.
+    #
+    # Why it exists at all: the addon's own port (60421) is not in the
+    # `vlan20-to-nas-svcs` allow-list, so a client on VLAN20 -- the Mac, a
+    # phone on the house wifi -- cannot reach NAS_IP:60421 directly. Traefik
+    # IS allowed from VLAN20 on 443, so routing it here is what makes the
+    # addon reachable at all. Verified: nc to 192.168.110.246:60421 from the
+    # Mac times out, while 8096 and 443 answer.
+    #
+    # Streams do not come through here: the addon embeds
+    # JELLYFIN_SERVER=${NAS_IP}:8096 into them, so only catalog and poster
+    # traffic crosses this router.
+    stremio-lan:
+      rule: "Host(`stremio.lan`)"
+      entryPoints: [web]
+      middlewares: [https-redirect]
+      service: stremio-lan
+    stremio-lan-secure:
+      rule: "Host(`stremio.lan`)"
+      entryPoints: [websecure]
+      tls: {}
+      middlewares: [security-headers]
+      service: stremio-lan
+
     # Legacy redirects (jellyseerr/jellyseer → seerr). Both entrypoints exist
     # so a direct https://jellyseerr.lan request (sniStrict requires a
     # matching cert SAN, see docs/HTTPS-LOCAL.md) still gets a clean redirect
@@ -250,6 +281,11 @@ http:
       loadBalancer:
         servers:
           - url: "http://172.20.0.8:5055"
+
+    stremio-lan:
+      loadBalancer:
+        servers:
+          - url: "http://172.20.0.17:60421"
 
     # === *arr Stack ===
     # Sonarr/Radarr now run on the arr-core bridge with their own IPs
