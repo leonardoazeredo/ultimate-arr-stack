@@ -24,7 +24,30 @@ export class JellyfinApi {
             {Username: user, Pw: password}, {
                 headers: {
                     'Content-Type': 'application/json',
-                    'X-Emby-Authorization': `MediaBrowser Client="Jellyfin Stremio Addon", Device="${device}", DeviceId="${device}", Version="1.0.0.0""`
+                    // Two things were wrong with this header, and Jellyfin 12
+                    // accepts neither:
+                    //
+                    //   1. The trailing `""`, which left the header unparseable.
+                    //      Jellyfin reads it into the session's `App`, and a
+                    //      null `App` makes `authenticatebyname` throw inside
+                    //      SessionManager.AuthenticateNewSessionInternal:
+                    //      "Value cannot be null. (Parameter 'request.App')".
+                    //      That is the 400 this service answered for every
+                    //      username, including ones that do not exist -- which
+                    //      is why it read as a server fault for so long.
+                    //   2. The header NAME. Measured against this server, three
+                    //      spellings behave three different ways:
+                    //        X-Emby-Authorization -> 400, App never parsed
+                    //        Authorization        -> 401 with a bad password,
+                    //                                i.e. parsed, then rejected
+                    //      so `Authorization` is the one that reaches the
+                    //      credential check at all. That is what the web client
+                    //      sends, captured from a live login.
+                    //
+                    // Note for whoever reads this next: a 401 from here now
+                    // means the credential is wrong, and the log line below
+                    // says exactly that. It is no longer the server's doing.
+                    Authorization: `MediaBrowser Client="Jellyfin Stremio Addon", Device="${device}", DeviceId="${device}", Version="1.0.0.0"`
                 }
             }).then(it => it.data)
             .catch(err => {
