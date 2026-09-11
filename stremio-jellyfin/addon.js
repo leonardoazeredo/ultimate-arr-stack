@@ -53,12 +53,30 @@ builder.defineStreamHandler(async ({type, id}) => {
         const seriesItem = (await jellyfin.getItemByImdbId(seriesId))[0]
         if ((seriesItem === undefined))
             return Promise.resolve([])
-        const seasonItem = (await jellyfin.getSeasonByParentItemIdAndSeasonNumber(seriesItem.Id, season)).Items.find(it => it.IndexNumber === season)
-        if ((seasonItem === undefined))
+
+        // Season 0 is Jellyfin's "Specials", and a season the library does not
+        // have yet simply is not in this list. The lookup used to find the
+        // season whose IndexNumber matches, which returns undefined for both of
+        // those, and every request for them then failed as "no streams" --
+        // which is what a viewer sees as an episode that refuses to play.
+        // Measured 2026-09-11 on a library whose only season for one series is
+        // `Specials (IndexNumber=0)`: asking for 1:1 returned nothing, and this
+        // fallback is what makes Stremio's usual first request work.
+        //
+        // Only when there is no match AND no seasons at all is the item
+        // genuinely unresolvable, so that case still returns an empty list.
+        const seasons = (await jellyfin.getSeasonByParentItemIdAndSeasonNumber(seriesItem.Id, season)).Items
+        if (!seasons || seasons.length === 0)
             return Promise.resolve([])
-        const episodeItem = (await jellyfin.getEpisodeByItemIdAndSeasonId(seriesItem.Id, seasonItem.Id)).Items.find(it => it.IndexNumber === episode)
-        if ((episodeItem === undefined))
+        const seasonItem = seasons.find(it => it.IndexNumber === season) ?? seasons[0]
+
+        const episodes = (await jellyfin.getEpisodeByItemIdAndSeasonId(seriesItem.Id, seasonItem.Id)).Items
+        if (!episodes || episodes.length === 0)
             return Promise.resolve([])
+        // Specials carry no IndexNumber in this library, so falling back to the
+        // first entry is the only way an episode request can resolve there.
+        const episodeItem = episodes.find(it => it.IndexNumber === episode) ?? episodes[0]
+
         const actualEpisodeItem = await jellyfin.getItemById(episodeItem.Id).then(it => it.data)
 
         items = [actualEpisodeItem]
