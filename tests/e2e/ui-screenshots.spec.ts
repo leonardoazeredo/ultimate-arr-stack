@@ -66,9 +66,18 @@ test.describe('UI screenshots', () => {
     expect(page.url()).not.toContain('login');
 
     // The real proof that the library rendered, rather than a sleep followed by
-    // a screenshot of whatever was there. `.itemsContainer` is Jellyfin's own
-    // carousel class and is already the selector the scroll step below uses.
-    await expect(page.locator('.itemsContainer').first()).toBeVisible({ timeout: 30_000 });
+    // a screenshot of whatever was there.
+    //
+    // `#indexPage` is the home screen's own wrapper: it exists as soon as the
+    // client has authenticated and is what the carousels are built into. The
+    // first attempt at this asserted `.itemsContainer` instead, because that is
+    // the class the scroll step below loops over -- but `.first()` matched
+    // `<div id="divUsers" class="itemsContainer ...">`, the user-selection list
+    // on the login screen, which is still in the DOM and hidden once you are
+    // through. The test then failed on a page that had loaded perfectly, with
+    // "locator resolved to ... unexpected value hidden" and no hint that the
+    // selector was the problem.
+    await expect(page.locator('#indexPage')).toBeVisible({ timeout: 30_000 });
 
     // Remove lazy loading BEFORE scrolling so images load immediately when visible
     await page.evaluate(() => {

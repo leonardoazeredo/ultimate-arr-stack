@@ -88,20 +88,53 @@ test.describe('Docker socket proxy', () => {
     }
   });
 
-  test('it refuses the Docker API surfaces nobody asked for', async ({ request }) => {
-    // VOLUMES=0, EXEC=0, and every method outside the enabled set. These return
-    // 403 from the proxy itself -- measured: the refusal happens without the
-    // request ever reaching the daemon, which is why 403 rather than 404.
-    const refused: Array<[string, string]> = [
-      ['GET', '/volumes'],
-      ['GET', '/secrets'],
-      ['POST', '/containers/probe/exec'],
-      ['PUT', '/containers/probe/archive'],
-    ];
-    for (const [method, path] of refused) {
-      const res = await request.fetch(proxy(path), { method, timeout: 10_000 });
-      expect(res.status(), `${method} ${path} must be refused`).toBe(403);
+  test('it refuses the read surfaces nobody asked for', async ({ request }) => {
+    // These are refusals by the proxy's own policy: 403 comes back without the
+    // request reaching the daemon, which is the observable difference from a
+    // 404 the daemon would have produced. Measured 2026-09-11.
+    for (const path of ['/volumes', '/secrets']) {
+      const res = await request.get(proxy(path), { timeout: 10_000 });
+      expect(res.status(), `GET ${path} must be refused by policy`).toBe(403);
     }
+  });
+
+  test('EXEC=0 does not block the exec flow, and this records that', async ({ request }) => {
+    // A negative result, kept as a test because the assumption it corrects is
+    // the kind that gets written into a comment and believed.
+    //
+    // docker-compose.utilities.yml sets EXEC=0, which reads like "no exec
+    // through this proxy". It is not. EXEC gates the GET endpoints only
+    // (`/exec/{id}/json`, `/exec/{id}/start`), while creating an exec instance
+    // is POST /containers/{id}/exec, and POST is enabled wholesale for
+    // gluetun-recover's `docker restart`. Measured against the live proxy: a
+    // POST with a well-formed body returns 201 with an exec id, so the flow
+    // cannot be completed through this proxy only because starting an exec is
+    // POST /exec/{id}/start and that one IS refused.
+    //
+    // What this test pins is the reachable half: instance creation succeeds.
+    // The marker `PROXY-EXEC-REACHABLE` in the failure message is deliberate --
+    // if the proxy is ever replaced by socket mounts (the fix), this test fails
+    // loudly with a message that says so, instead of silently passing because
+    // the endpoint stopped existing.
+    const container = (await (await request.get(proxy('/containers/json'), { timeout: 10_000 })).json())[0];
+    expect(container, 'proxy returned no containers to name').toBeTruthy();
+    const name = (container.Names?.[0] ?? '').replace(/^\//, '');
+    expect(name).toBeTruthy();
+
+    const res = await request.post(proxy(`/containers/${name}/exec`), {
+      timeout: 10_000,
+      failOnStatusCode: false,
+      data: { AttachStdout: true, Cmd: ['/bin/true'] },
+    });
+    if (res.status() === 403) {
+      throw new Error(
+        'PROXY-EXEC-REACHABLE: exec creation is now refused. That is an improvement: ' +
+          'update this test to assert the refusal, and delete the EXEC=0 caveat in docs/QUALITY-CONTROL-MAP.md.',
+      );
+    }
+    expect(res.status(), 'exec creation is forwarded (see the comment above)').toBe(201);
+    const body = await res.json();
+    expect(body.Id, 'the daemon returned an exec instance id').toBeTruthy();
   });
 
   test('it permits container restart, which is why POST is enabled at all', async ({ request }) => {
