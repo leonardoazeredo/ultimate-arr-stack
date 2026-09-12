@@ -303,7 +303,7 @@ mutation queue-api-ignores-curl-status \
   --file scripts/lib/queue_cleanup.py \
   --bats tests/python-suite.bats \
   --test "the extracted modules pass their pytest suite" \
-  --why "curl prints nothing on failure, so skipping the returncode check hands an empty string to json.loads and the whole run dies on a JSONDecodeError inside a systemd unit - instead of the one logged line the guard was written to produce (test_a_failed_curl_yields_none_rather_than_a_parse_error)" \
+  --why "curl prints nothing on failure, so skipping the returncode check hands an empty string to json.loads and the whole run dies on a JSONDecodeError inside a systemd unit - instead of the one logged line the guard was written to produce (test_a_failed_curl_yields_none_rather_than_a_parse_error). That test stopped being able to see this mutation once the JSON guard was added -- both mechanisms return None -- so the parseable-body test was added to keep the status check load bearing (test_a_failing_curl_with_a_parseable_body_still_yields_none)" \
   --apply 'sed -i "0,/^        if result.returncode != 0:\$/s@^        if result.returncode != 0:\$@        if False:@" "$F"'
 
 mutation queue-age-floored-to-whole-hours \
@@ -384,3 +384,60 @@ mutation sonarr-blank-line-separator-removed \
   --test "the extracted modules pass their pytest suite" \
   --why "drops the blank line run() prints between the configured-format header and the per-series list. Only the FIRST occurrence is mutated: run() prints a second blank line before the summary, so a membership-style assertion would still pass with this one gone - which is why this survived the 2026-09-02 sweep untriaged. It changes stdout, so it is not an equivalent mutant (test_the_dry_run_summary_says_it_is_a_dry_run asserts lines[1] == \"\")" \
   --apply 'sed -i "0,/^    out(\"\")/s/^    out(\"\")/    pass/" "$F"'
+
+# --- the debrid deadlock, 2026-09-12 --------------------------------------
+#
+# Decypharr failed to resolve a TorBox link, gave up without telling anyone,
+# and left 67 items at 0% "downloading" for a month while every other part of
+# the pipeline worked. Removing such an item is what breaks the loop; the two
+# entries below are about the replacement actually landing, and the last two
+# are about the timer that had never been installed.
+
+mutation debrid-stale-item-still-blocklisted \
+  --file scripts/lib/queue_cleanup.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "blocklisting a stale debrid item forbids the one release the provider is known to have cached, so the replacement is a different release that fails the same way -- the loop this exemption exists to end (test_a_stale_debrid_item_is_not_blocklisted)" \
+  --apply 'sed -i "s@^    if reason_type == \"stale\" and is_debrid_client(record):\$@    if False:@" "$F"'
+
+mutation debrid-search-ignores-the-removed-episodes \
+  --file scripts/lib/queue_cleanup.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "falling back to a series search replaces one stuck episode by searching every missing episode of the show -- dozens of indexer requests, and the indexer answers 429 long before the last of them (test_a_sonarr_target_searches_the_episodes_that_were_removed)" \
+  --apply 'sed -i "s@^    if episodes and svc\[\"search_key\"\] == \"seriesId\":\$@    if False:@" "$F"'
+
+mutation search-pacing-dropped \
+  --file scripts/lib/queue_cleanup.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "back-to-back searches get 429 from the indexer and Sonarr disables it outright, so every later search in the run reports zero active indexers and the items just removed find no replacement at all (test_a_burst_of_searches_is_paced)" \
+  --apply 'sed -i "s@^                if position < len(targets) - 1:\$@                if False:@" "$F"'
+
+mutation malformed-json-unguarded \
+  --file scripts/lib/queue_cleanup.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "curl -f passes a 200 whose body is an HTML error page straight through, and the uncaught json.loads then kills the run -- taking the other arr's cleanup with it (test_a_malformed_200_is_a_failed_fetch_not_a_traceback)" \
+  --apply 'sed -i "s@^        except json.JSONDecodeError:\$@        except UnicodeDecodeError:@" "$F"'
+
+mutation queue-unit-runs-the-dry-run \
+  --file scripts/queue-cleanup.service \
+  --bats tests/systemd-units.bats \
+  --test "queue-cleanup unit runs the script with --apply, not the dry run" \
+  --why "without --apply the timer runs the script's default mode forever: it prints what it would remove, removes nothing, and exits 0. A scheduled job that reports success and does nothing is the same class of failure as the missing timer itself. Anchored on the flag rather than end-of-line, because the ExecStart line ends with the log redirect" \
+  --apply 'sed -i "s@ --apply@@" "$F"'
+
+mutation queue-unit-log-dir-not-created \
+  --file scripts/queue-cleanup.service \
+  --bats tests/systemd-units.bats \
+  --test "queue-cleanup unit creates its log directory before redirecting into it" \
+  --why "logs/ is gitignored, so on a fresh deploy it does not exist and the append has nothing to open. Moving the mkdir out of the ExecStart shell is also the shape that fails at boot with status=209/STDOUT -- systemd applies the unit's StandardOutput to ExecStartPre too, so a separate mkdir dies setting up the redirect to the directory it was about to create" \
+  --apply 'sed -i "s@mkdir -p /volume1/docker/arr-stack/logs && @@" "$F"'
+
+mutation queue-timer-never-enabled \
+  --file scripts/queue-cleanup.timer \
+  --bats tests/systemd-units.bats \
+  --test "queue-cleanup timer is enabled by the install step and actually repeats" \
+  --why "no [Install] means systemctl --user enable silently creates no symlink and the timer never fires -- which is exactly how the cron line in the script's own header spent its whole life doing nothing" \
+  --apply 'sed -i "s@^WantedBy=timers.target\$@WantedBy=default.target@" "$F"'

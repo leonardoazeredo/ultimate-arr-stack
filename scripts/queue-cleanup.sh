@@ -5,16 +5,22 @@ set -euo pipefail
 #
 # Torrents frequently stall (dead seeders, stuck metadata, failed imports)
 # and sit in queues indefinitely. This script identifies stuck items,
-# removes them (with blocklist to prevent re-grabbing the same release),
-# and triggers fresh searches for better alternatives.
+# removes them (usually with blocklist, so the same broken release is not
+# grabbed again), and triggers fresh searches for better alternatives.
+#
+# A queue item that never downloads is worse than one that fails: Sonarr
+# treats it as "already downloading at the cutoff" and rejects every
+# candidate release for that episode, so the item can neither finish nor be
+# replaced. On 2026-09-12 that had held 67 items at 0% since mid-August.
 #
 # Usage:
 #   ./scripts/queue-cleanup.sh                # dry run (default)
 #   ./scripts/queue-cleanup.sh --apply        # actually remove stuck items
 #   ./scripts/queue-cleanup.sh --apply -v     # remove with verbose output
 #
-# Cron (Thursday 2am):
-#   0 2 * * 4 $NAS_STACK_DIR/scripts/queue-cleanup.sh --apply >> $NAS_STACK_DIR/logs/queue-cleanup.log 2>&1
+# Scheduled by queue-cleanup.timer (every 6 hours, installed as a --user
+# unit -- see docs/MAINTENANCE.md). Running it by hand is still the way to
+# check what it would do first.
 #
 # Prerequisites:
 #   - Sonarr and Radarr running and accessible on localhost
@@ -34,8 +40,15 @@ set -euo pipefail
 #   - Items with any download progress (even if slow)
 #   - Healthy downloads (trackedDownloadStatus == "ok" with progress)
 #
-# After removal, a fresh search is triggered for each affected
-# series (Sonarr) or movie (Radarr) to find better-seeded releases.
+# After removal, a fresh search is triggered for what was removed -- the
+# episodes themselves for Sonarr, the film for Radarr -- spaced out, because
+# a burst of searches gets 429 from the indexer and Sonarr then disables it.
+#
+# The one case that is NOT blocklisted is a stale item from a debrid client
+# (TorBox behind Decypharr, and the like). There the release is fine and the
+# provider failed to resolve a link, so the replacement search has to be free
+# to pick that same release again; blocklisting it forces a different one the
+# provider may not have cached, which fails the same way.
 #
 # ⚠️  This script was generated with LLM assistance and human-reviewed.
 #     Read and understand it before running. Do not execute scripts you

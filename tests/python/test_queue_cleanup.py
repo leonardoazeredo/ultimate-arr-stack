@@ -616,6 +616,18 @@ def test_a_failed_post_reports_false(monkeypatch):
     assert m.ArrApi().post_json(7878, "/api/v3/command", "KEY", {}) is False
 
 
+def test_a_failing_curl_with_a_parseable_body_still_yields_none(monkeypatch):
+    # Two independent mechanisms return None -- the returncode check and the
+    # JSON guard -- so a test that hands a failure nothing to parse cannot tell
+    # which one answered, and deleting the status check survives it. The
+    # generative sweep found exactly that after the JSON guard was added. curl
+    # -f can leave a body on stdout (a 500 carrying a JSON error object), and
+    # parsing it would hand the caller a service error as if it were the queue.
+    monkeypatch.setattr(m.subprocess, "run",
+                        FakeRun(returncode=22, stdout='{"detail": "boom"}'))
+    assert m.ArrApi().get(8989, "/api/v3/queue", "KEY") is None
+
+
 # --- run(): what it forwards to process_service ----------------------------
 #
 # run() passes out=, now=, sleep= and max_pages= straight through. Dropping any
@@ -714,3 +726,138 @@ def test_the_module_actually_runs_when_executed_as_a_script():
         capture_output=True, text=True)
     assert r.returncode != 0
     assert "IndexError" in r.stderr
+
+
+# --- the debrid deadlock --------------------------------------------------
+#
+# Found live on 2026-09-12: Decypharr failed to resolve a TorBox link, gave up,
+# and left 67 items at 0% "downloading" for a month. Removing such an item
+# breaks the loop, and these pin the two things that let the replacement
+# actually happen -- no blocklist (the release was never the problem) and
+# searches aimed at the removed episodes, spaced out (a burst answers 429).
+
+def debrid(**kw):
+    """A stale queue record from a debrid client: 0% for two days."""
+    kw.setdefault("downloadClient", "Decypharr (TorBox)")
+    kw.setdefault("sizeleft", 100)
+    kw.setdefault("added", ago(48))
+    return rec(**kw)
+
+
+def test_a_debrid_client_is_recognised_by_the_name_the_operator_gave_it():
+    assert m.is_debrid_client({"downloadClient": "Decypharr (TorBox)"})
+    assert m.is_debrid_client({"downloadClient": "TORBOX"})
+    assert m.is_debrid_client({"downloadClient": "Real-Debrid"})
+    assert not m.is_debrid_client({"downloadClient": "qBittorrent"})
+    assert not m.is_debrid_client({})
+
+
+def test_a_stale_debrid_item_is_not_blocklisted():
+    assert m.should_blocklist(debrid(), "stale") is False
+
+
+def test_a_stale_swarm_item_is_still_blocklisted():
+    assert m.should_blocklist({"downloadClient": "qBittorrent"}, "stale") is True
+
+
+def test_a_debrid_item_is_blocklisted_for_every_other_reason():
+    # A blocked or failing import is about the files, not about who fetched
+    # them, and the release is still the wrong one to grab again.
+    for reason in ("error", "import_stuck", "import_blocked",
+                   "import_warning", "metadata"):
+        assert m.should_blocklist(debrid(), reason) is True
+
+
+def test_episode_ids_merge_the_scalar_the_list_and_the_duplicates():
+    record = {"episodeId": 12,
+              "episodes": [{"id": 12}, {"id": 7}, {"id": 7}, {"nope": 1}, "junk"]}
+    assert m.episode_ids(record) == (7, 12)
+
+
+def test_episode_ids_is_empty_without_any_usable_id():
+    assert m.episode_ids({}) == ()
+    assert m.episode_ids({"episodeId": "12", "episodes": None}) == ()
+
+
+def test_a_sonarr_target_searches_the_episodes_that_were_removed():
+    payload, label = m.target_search(svc(), 7, {437})
+    assert payload == {"name": "EpisodeSearch", "episodeIds": [437]}
+    assert label == "episodeIds=437"
+
+
+def test_a_sonarr_target_without_episode_ids_falls_back_to_the_series():
+    payload, label = m.target_search(svc(), 7, set())
+    assert payload == {"name": "SeriesSearch", "seriesId": 7}
+    assert label == "seriesId=7"
+
+
+def test_a_radarr_target_keeps_the_per_film_search():
+    radarr = {"name": "Radarr", "port": 7878, "key": "K",
+              "id_field": "movieId", "search_cmd": "MoviesSearch",
+              "search_key": "movieIds"}
+    payload, label = m.target_search(radarr, 9, {12, 13})
+    assert payload == {"name": "MoviesSearch", "movieIds": [9]}
+    assert label == "movieId=9"
+
+
+def test_applying_a_stale_debrid_item_deletes_without_blocklisting():
+    api = FakeApi([debrid()])
+    lines = []
+    m.process_service(svc(), api, True, False, out=lines.append, now=NOW,
+                      sleep=lambda _: None)
+    assert api.deletes == ["/api/v3/queue/1?removeFromClient=true&blocklist=false"]
+    assert any("Not blocklisted" in line for line in lines)
+
+
+def test_applying_a_stale_swarm_item_still_blocklists():
+    api = FakeApi([debrid(downloadClient="qBittorrent")])
+    m.process_service(svc(), api, True, False, out=lambda *_: None, now=NOW,
+                      sleep=lambda _: None)
+    assert api.deletes == ["/api/v3/queue/1?removeFromClient=true&blocklist=true"]
+
+
+def test_the_removed_episodes_are_searched_in_one_command():
+    api = FakeApi([debrid(id=1, seriesId=7, episodeId=437),
+                   debrid(id=2, seriesId=7, episodeId=438)])
+    m.process_service(svc(), api, True, False, out=lambda *_: None, now=NOW,
+                      sleep=lambda _: None)
+    assert api.posts == [{"name": "EpisodeSearch", "episodeIds": [437, 438]}]
+
+
+def test_a_burst_of_searches_is_paced():
+    # Back-to-back searches get 429 from the indexer, and Sonarr then disables
+    # that indexer -- every later search in the run returns "0 active indexers"
+    # and the items it just removed find no replacement at all.
+    api = FakeApi([debrid(id=1, seriesId=7, episodeId=1),
+                   debrid(id=2, seriesId=9, episodeId=2)])
+    slept = []
+    m.process_service(svc(), api, True, False, out=lambda *_: None, now=NOW,
+                      sleep=slept.append)
+    assert m.SEARCH_INTERVAL_SECONDS in slept
+
+
+def test_the_last_search_is_not_followed_by_a_wait():
+    api = FakeApi([debrid(seriesId=7, episodeId=1)])
+    slept = []
+    m.process_service(svc(), api, True, False, out=lambda *_: None, now=NOW,
+                      sleep=slept.append)
+    assert m.SEARCH_INTERVAL_SECONDS not in slept
+
+
+def test_a_dry_run_does_not_wait_between_searches():
+    api = FakeApi([debrid(id=1, seriesId=7, episodeId=1),
+                   debrid(id=2, seriesId=9, episodeId=2)])
+    slept = []
+    m.process_service(svc(), api, False, False, out=lambda *_: None, now=NOW,
+                      sleep=slept.append)
+    assert m.SEARCH_INTERVAL_SECONDS not in slept
+
+
+def test_a_malformed_200_is_a_failed_fetch_not_a_traceback(monkeypatch):
+    # curl -f passes a 200 whose body is an HTML error page straight through,
+    # and json.loads then raises out of the middle of a run -- taking the other
+    # service's cleanup with it. fetch_queue already reads None as a failed
+    # fetch and says so.
+    monkeypatch.setattr(m.subprocess, "run",
+                        FakeRun(returncode=0, stdout="<html>nope</html>"))
+    assert m.ArrApi().get(8989, "/api/v3/queue", "KEY") is None

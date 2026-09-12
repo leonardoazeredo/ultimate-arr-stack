@@ -134,14 +134,31 @@ Torrents frequently stall (dead seeders, stuck metadata, failed imports). The cl
 ./scripts/queue-cleanup.sh --apply -v
 ```
 
-### Automated (cron)
+### Automated (systemd timer, every 6 hours)
 
-Add to NAS crontab (`crontab -e`):
+Install once, as the deploy user — no root:
 
 ```bash
-# Thursday 2am — clean stuck downloads weekly
-0 2 * * 4 $NAS_STACK_DIR/scripts/queue-cleanup.sh --apply >> $NAS_STACK_DIR/logs/queue-cleanup.log 2>&1
+mkdir -p ~/.config/systemd/user
+cp scripts/queue-cleanup.service scripts/queue-cleanup.timer ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now queue-cleanup.timer
+systemctl --user list-timers queue-cleanup.timer     # confirm it is armed
 ```
+
+Output goes to `logs/queue-cleanup.log` (created by the unit, trimmed at 1,000 lines) and to the user journal:
+
+```bash
+journalctl --user -u queue-cleanup.service -n 50
+```
+
+**This timer did not exist until 2026-09-12.** The script had shipped with a
+"suggested cron: Thu 2am" line in its header and nothing ever installed it, on
+any host. In the meantime 67 items sat at 0% in Sonarr's queue since
+mid-August: Decypharr had failed to resolve their TorBox links, given up
+silently, and Sonarr — reading each stuck item as "already downloading at the
+cutoff" — rejected every replacement release for those episodes. The script
+that would have cleared them was in the repo the whole time, working, unused.
 
 ### What gets removed
 
@@ -154,7 +171,13 @@ Add to NAS crontab (`crontab -e`):
 
 Items with **any** download progress are never removed, even if slow.
 
-Removed releases are blocklisted so the same broken release won't be grabbed again. A fresh search is triggered for each affected series/movie to find better-seeded alternatives.
+Removed releases are blocklisted so the same broken release won't be grabbed
+again. The exception is a stale item from a debrid client (TorBox behind
+Decypharr, and the like): there the release is fine and the provider failed, so
+blocklisting it would forbid the one release the provider is known to have
+cached. A fresh search is then triggered for the episodes that were removed —
+or the film, for Radarr — spaced 30 seconds apart, because a burst of searches
+answers `429` and Sonarr disables that indexer for the rest of the run.
 
 ---
 

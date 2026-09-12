@@ -1,0 +1,13 @@
+[Unit]
+Description=Run the arr-stack stuck-queue cleanup every 6 hours
+
+[Timer]
+# 15min rather than 5: this one deletes from the download clients, and a boot
+# is exactly when the clients are still coming up behind gluetun. The other
+# two timers only read.
+OnBootSec=15min
+OnUnitActiveSec=6h
+Unit=queue-cleanup.service
+
+[Install]
+WantedBy=timers.target
