@@ -425,8 +425,8 @@ mutation queue-unit-runs-the-dry-run \
   --file scripts/queue-cleanup.service \
   --bats tests/systemd-units.bats \
   --test "queue-cleanup unit runs the script with --apply, not the dry run" \
-  --why "without --apply the timer runs the script's default mode forever: it prints what it would remove, removes nothing, and exits 0. A scheduled job that reports success and does nothing is the same class of failure as the missing timer itself" \
-  --apply 'sed -i "s@ --apply\$@@" "$F"'
+  --why "without --apply the timer runs the script's default mode forever: it prints what it would remove, removes nothing, and exits 0. A scheduled job that reports success and does nothing is the same class of failure as the missing timer itself. Anchored on the flag rather than end-of-line, because the ExecStart line ends with the log redirect" \
+  --apply 'sed -i "s@ --apply@@" "$F"'
 
 mutation queue-unit-log-dir-not-created \
   --file scripts/queue-cleanup.service \
