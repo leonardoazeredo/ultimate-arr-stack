@@ -364,6 +364,28 @@ sudo reboot
 
 **Keep the DHCP reservation too:** After switching to a static IP, keep the reservation on your router. The static IP means the NAS claims it instantly at boot; the reservation means the router won't hand out that same IP to another device via DHCP. Both together prevent IP conflicts.
 
+## Pi-hole: Restarted but Answering Nobody
+
+**Symptom:** You restart Pi-hole to load a `dnsmasq.d` change (an `address=` line, say). The container comes back `Up (unhealthy)`, `docker ps` shows `${NAS_IP}:53` published, and `ss` on the NAS shows the socket bound — but every `dig` against it times out and the whole house loses DNS. Nothing is refused; queries just never come back.
+
+**Cause:** `docker restart` allows the container 10 seconds to stop, and `docker restart pihole` is what people reach for. FTL flushes its in-memory query history to `pihole-FTL.db` on shutdown, and on a busy Pi-hole that takes longer than 10s, so Docker SIGKILLs it mid-write. The next start then comes up in a broken half-state: FTL binds port 53, logs `Importing queries`, and never finishes — the dnsmasq worker thread is missing from the process, FTL sits near 0% CPU, and inbound queries pile up in the socket's receive queue until they are dropped. Observed 2026-09-12 after restarting Pi-hole to drop `qbit.lan`: 214 KB queued, 373 dropped, LAN DNS down for 6 minutes, and the FTL log's last line stuck at `Parsing queries in database`. The same restart also logs `ERROR: SQLite3: recovered 410 frames from WAL file`, which is the earlier SIGKILL being cleaned up.
+
+**Diagnose:**
+```bash
+docker ps --filter name=pihole --format "{{.Status}}"     # Up (unhealthy)
+dig +short jellyfin.lan @192.168.110.246                  # times out
+docker exec pihole sh -c "tail -6 /var/log/pihole/FTL.log"   # stuck at "Parsing queries in database"
+docker exec pihole sh -c 'for t in /proc/52/task/*; do cat $t/comm; done'   # no dnsmasq worker
+```
+
+**Fix:** stop it with a grace period long enough for FTL to flush, then start it — do not `docker restart`:
+```bash
+docker stop -t 60 pihole && docker start pihole
+```
+Recovery is immediate (verified: `.lan` resolving again 5s after start, health back to `healthy`).
+
+**Prevention:** when the change is a Pi-hole `dnsmasq.d` edit that needs a restart, use `docker stop -t 60 pihole && docker start pihole` from the start. Container *recreates* through the compose file (`up -d --force-recreate pihole`) go through the same 10s default and carry the same risk — if you must recreate, `docker stop -t 60 pihole` first so the recreate starts from a cleanly-closed database. Either way, confirm with `dig +short jellyfin.lan @192.168.110.246` before walking away; `docker ps` showing `Up` is not evidence that DNS works.
+
 ## Docker: Ports Not Published After Reboot (Containers "Running", Nothing Listening)
 
 **Symptom:** After any reboot — or a UGOS update — the whole network loses DNS, yet everything *looks* fine. `docker ps` shows Pi-hole `Up` and **healthy**. The giveaway is the `PORTS` column: it's **empty** for pihole, and nothing is listening on `${NAS_IP}:53`.
