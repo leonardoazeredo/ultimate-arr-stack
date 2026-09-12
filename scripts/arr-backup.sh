@@ -83,7 +83,7 @@ ensure_services_running() {
   COMPOSE_FILE="$NAS_STACK_DIR/docker-compose.arr-stack.yml"
   [ -f "$COMPOSE_FILE" ] || return 0
 
-  CRITICAL="gluetun pihole sonarr radarr prowlarr qbittorrent jellyfin sabnzbd"
+  CRITICAL="gluetun pihole sonarr radarr prowlarr jellyfin sabnzbd"
   STOPPED=""
 
   # Capture docker ps's output once before grepping it, rather than piping
@@ -631,7 +631,6 @@ CURRENT_GID=$(id -g)
 VOLUME_SUFFIXES=(
   gluetun-config          # servers.json only - the VPN CREDENTIALS are in .env,
                           # which is backed up separately below
-  qbittorrent-config      # Client settings, categories, watched folders
   sabnzbd-config          # Usenet provider credentials and settings
   prowlarr-config         # Indexer configs and API keys
   bazarr-config           # Subtitle provider credentials
@@ -861,7 +860,8 @@ if [ "$CREATE_TAR" = true ]; then
   # Remove stale tarball from previous run (sticky-bit on /tmp blocks overwrites by different users)
   rm -f "$TARBALL"
 
-  # Exclude socket files (qbittorrent ipc-socket) - they can't be archived
+  # Exclude socket files - the '*/ipc-socket' glob below predates this stack's
+  # download clients and is kept because SABnzbd can leave one behind too
   tar -czf "$TARBALL" \
     --exclude='*/ipc-socket' \
     -C "$(dirname "$STAGING_DIR")" \

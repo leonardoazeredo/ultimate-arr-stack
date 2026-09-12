@@ -173,6 +173,15 @@ sourced_repo_files() {
 }
 
 @test "no test file sources a unit that shadows a function bats-assert reports through" {
+    # The file list below comes from `git ls-files`. Without a host git binary
+    # that list is empty, the loop never runs, and this test reports ok while
+    # scanning nothing -- the exact shape it exists to catch. Found by running
+    # the mutation corpus on the NAS: `shadowed-assertion-goes-unnoticed`
+    # applied cleanly there and then SURVIVED, because the oracle had no files
+    # to look at. Same reason string as the other git-enumerating checks.
+    command -v git >/dev/null 2>&1 \
+        || skip "no host git binary: this guard enumerates files with git ls-files, so it would scan none here"
+
     # WHY THIS EXISTS
     #
     # bats-assert reports every failure by calling bats-support's `fail`, which

@@ -120,35 +120,6 @@ wait_for_service() {
 }
 
 # ============================================
-# qBittorrent auth
-# ============================================
-
-# Authenticate to qBittorrent and write session cookie to file.
-# Returns 0 on success, 1 on failure.
-#
-# Usage:
-#   qbit_auth "$QBIT_URL" "$QBIT_USERNAME" "$QBIT_PASSWORD" "$COOKIE_FILE"
-#
-# Note: pause-resume.sh (runs inside Alpine container via /bin/sh) cannot
-# source this helper. See that script for its own inline auth implementation.
-qbit_auth() {
-    local url="$1" username="$2" password="$3" cookie_file="$4"
-    local response http_code body
-    response=$(curl -s -w '\n%{http_code}' \
-        -c "$cookie_file" \
-        --data-urlencode "username=${username}" \
-        --data-urlencode "password=${password}" \
-        "${url}/api/v2/auth/login")
-    http_code=$(echo "$response" | tail -1)
-    body=$(echo "$response" | head -1)
-
-    if [[ "$http_code" != "200" ]] || [[ "$body" != "Ok." ]]; then
-        return 1
-    fi
-    return 0
-}
-
-# ============================================
 # Shared Sonarr/Radarr configuration
 # ============================================
 
@@ -159,13 +130,12 @@ qbit_auth() {
 #   $2 = port              — 8989 or 7878
 #   $3 = api_key           — API key for the service
 #   $4 = root_path         — /data/media/tv or /data/media/movies
-#   $5 = category          — qBit category: "tv" or "movies"
+#   $5 = category          — download category: "tv" or "movies"
 #   $6 = naming_check      — field to check: "renameEpisodes" or "renameMovies"
 #   $7 = metadata_fields   — JSON array of metadata field objects
 #   $8 = naming_payload    — full JSON payload for naming config
 #
-# Requires globals: NAS_IP, DRY_RUN, QBIT_USERNAME, QBIT_PASSWORD,
-#                   SABNZBD_RUNNING, SABNZBD_API_KEY
+# Requires globals: NAS_IP, DRY_RUN, SABNZBD_RUNNING, SABNZBD_API_KEY
 # The `$flag` booleans below are compared as STRINGS, never run as commands.
 # `if $DRY_RUN; then` executes the variable's value - unquoted, so it word-splits
 # too - which is a command-execution path bought in exchange for nothing over a
@@ -206,7 +176,6 @@ configure_arr_service() {
 
     if [[ "$DRY_RUN" == true ]]; then
         dry "Add root folder ${root_path}"
-        dry "Add qBittorrent download client (category: ${category})"
         if [[ "$SABNZBD_RUNNING" == true ]]; then dry "Add SABnzbd download client (category: ${category})"; fi
         dry "Enable NFO metadata (Kodi/Emby)"
         dry "Set TRaSH naming scheme"
@@ -229,45 +198,16 @@ configure_arr_service() {
         fi
     fi
 
-    # --- Download client: qBittorrent ---
-    local clients
-    clients=$(api_get "${BASE}/api/v3/downloadclient" "$AUTH") || true
-    if json_extract "$clients" "sys.exit(0 if any(c.get('name','').lower() == 'qbittorrent' for c in data) else 1)"; then
-        skip "${name}: qBittorrent download client"
-    else
-        local qbit_payload
-        qbit_payload=$(cat <<QBIT_JSON
-{
-    "enable": true,
-    "protocol": "torrent",
-    "priority": 1,
-    "name": "qBittorrent",
-    "implementation": "QBittorrent",
-    "configContract": "QBittorrentSettings",
-    "fields": [
-        {"name": "host", "value": "localhost"},
-        {"name": "port", "value": 8085},
-        {"name": "username", "value": "${QBIT_USERNAME}"},
-        {"name": "password", "value": "${QBIT_PASSWORD}"},
-        {"name": "${cat_field}", "value": "${category}"},
-        {"name": "${priority_recent}", "value": 0},
-        {"name": "${priority_older}", "value": 0},
-        {"name": "initialState", "value": 0},
-        {"name": "sequentialOrder", "value": false},
-        {"name": "firstAndLast", "value": false}
-    ]
-}
-QBIT_JSON
-)
-        if api_post "${BASE}/api/v3/downloadclient" "application/json" "$qbit_payload" "$AUTH" >/dev/null 2>&1; then
-            ok "${name}: added qBittorrent download client"
-        else
-            fail "${name}: add qBittorrent download client"
-        fi
-    fi
-
     # --- Download client: SABnzbd (if running) ---
+    # The client list is fetched here, inside the branch that reads it. It used
+    # to be fetched once above by the qBittorrent block that owned the first
+    # reader -- and when that block was deleted on 2026-09-12 this one kept
+    # referencing a variable nothing assigned any more. Under `set -u` the
+    # expansion failed, the branch took its else arm, and the "already
+    # configured" skip below became unreachable: every run re-POSTed the client.
     if [[ "$SABNZBD_RUNNING" == true && -n "$SABNZBD_API_KEY" ]]; then
+        local clients
+        clients=$(api_get "${BASE}/api/v3/downloadclient" "$AUTH") || true
         if json_extract "$clients" "sys.exit(0 if any(c.get('name','').lower() == 'sabnzbd' for c in data) else 1)"; then
             skip "${name}: SABnzbd download client"
         else

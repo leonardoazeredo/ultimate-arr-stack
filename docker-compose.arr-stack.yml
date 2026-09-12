@@ -28,8 +28,10 @@ name: arr-core
 volumes:
   gluetun-config:
     name: arr-stack_gluetun-config
-  qbittorrent-config:
-    name: arr-stack_qbittorrent-config
+  # arr-stack_qbittorrent-config is deliberately absent: no service mounts it
+  # since qBittorrent was removed. The volume itself still exists on the NAS,
+  # holding the old WebUI credentials and preferences, until someone deletes
+  # it on purpose - this file no longer creates or references it.
   sabnzbd-config:
     name: arr-stack_sabnzbd-config
   sonarr-config:
@@ -158,7 +160,6 @@ services:
       # NOTE: Sonarr (8989) & Radarr (7878) now run on the arr-core bridge
       # (their own static IPs) and publish their own ports — see those services.
       - "9696:9696"   # Prowlarr
-      - "8085:8085"   # qBittorrent
       - "8082:8080"   # SABnzbd
       # FlareSolverr (8191) is deliberately NOT published. It is an
       # unauthenticated headless-browser proxy — anything that can reach it can
@@ -201,38 +202,19 @@ services:
       start_period: 30s  # Give VPN time to establish connection
 
   # ═══════════════════════════════════════════════════════════════════════════
-  # QBITTORRENT - Torrent download client. Downloads files through VPN.
-  # Access: qbit.lan | qbit.yourdomain.com | NAS_IP:8085
+  # NO LOCAL TORRENT CLIENT. qBittorrent used to sit here and pulled 307 GB
+  # from peers on this NAS (and seeded 9.22 GB back) before it was removed on
+  # 2026-09-12. Torrenting now happens on TorBox: Decypharr hands it the
+  # release and pulls the finished file back over HTTPS, so no peer traffic
+  # originates here at all. SABnzbd below is the usenet path and still shares
+  # gluetun's tunnel.
+  #
+  # Reinstating it means more than restoring this block: the *arr download
+  # clients are configured in scripts/lib/configure-helpers.sh, the VPN checks
+  # name the containers they expect to tunnel in scripts/check-vpn.sh and
+  # scripts/detect-vpn-zombies.sh, and the uptime monitor list lives in
+  # scripts/lib/check-uptime-monitors.sh.
   # ═══════════════════════════════════════════════════════════════════════════
-  qbittorrent:
-    image: lscr.io/linuxserver/qbittorrent:5.1.4
-    container_name: qbittorrent
-    <<: *lsio-security
-    network_mode: "service:gluetun"
-    depends_on:
-      gluetun:
-        condition: service_healthy
-        restart: true
-    environment:
-      - PUID=${PUID}
-      - PGID=${PGID}
-      - TZ=${TZ}
-      - WEBUI_PORT=8085
-      - DOCKER_MODS=ghcr.io/vuetorrent/vuetorrent-lsio-mod:latest
-    volumes:
-      - qbittorrent-config:/config
-      - ${MEDIA_ROOT}:/data
-    labels:
-      - deunhealth.restart.on.unhealthy=true
-      - gluetun.dependent=true  # gluetun-recover restarts this if SIGKILLed by a gluetun restart
-    restart: always
-    logging: *default-logging
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8085/ && wget -q --spider --timeout=5 http://www.google.com"]
-      interval: 2m
-      timeout: 15s
-      retries: 4
-      start_period: 60s
 
   # ═══════════════════════════════════════════════════════════════════════════
   # SABNZBD - Usenet download client. Downloads via VPN for extra security.
@@ -570,10 +552,10 @@ services:
 
   # ═══════════════════════════════════════════════════════════════════════════
   # DECYPHARR - TorBox debrid download client. Presents a qBittorrent-compatible
-  # API so Sonarr/Radarr can add it as a second download client alongside the
-  # real qBittorrent. Downloads finished files straight to /data/torbox from
-  # TorBox's servers over HTTPS - no torrent swarm traffic from this NAS, so
-  # unlike qBittorrent/SABnzbd/Prowlarr it does NOT need the VPN (same reasoning
+  # API so Sonarr/Radarr can hand it a torrent release the way they used to
+  # hand one to qBittorrent. Downloads finished files straight to /data/torbox
+  # from TorBox's servers over HTTPS - no torrent swarm traffic from this NAS,
+  # so unlike SABnzbd/Prowlarr it does NOT need the VPN (same reasoning
   # as the Sonarr/Radarr off-VPN migration, see docs/MIGRATION-arr-off-vpn.md).
   # ═══════════════════════════════════════════════════════════════════════════
   decypharr:
@@ -645,8 +627,8 @@ services:
 
   # ═══════════════════════════════════════════════════════════════════════════
   # VPN-SOCKS5 - SOCKS5 proxy tunneled through Gluetun's ProtonVPN connection
-  # (network_mode: service:gluetun, same pattern as qBittorrent/SABnzbd/
-  # Prowlarr/FlareSolverr above). Lets other containers on the arr-core
+  # (network_mode: service:gluetun, same pattern as SABnzbd/Prowlarr/
+  # FlareSolverr above). Lets other containers on the arr-core
   # network route traffic through the VPN without joining Gluetun's network
   # namespace directly — used by Magnetio's P2P Privacy Proxy setting so
   # uncached torrent connections exit via ProtonVPN instead of the NAS's own

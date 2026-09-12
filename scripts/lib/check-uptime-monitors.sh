@@ -16,7 +16,6 @@ check_uptime_monitors() {
         "Seerr"
         "Pi-hole"
         "Prowlarr"
-        "qBittorrent"
         "Radarr"
         "Sonarr"
         "Traefik"

@@ -38,7 +38,6 @@ arr-stack_jellyfin-config
 arr-stack_magnetio-redis-data
 arr-stack_pihole-etc-pihole
 arr-stack_prowlarr-config
-arr-stack_qbittorrent-config
 arr-stack_radarr-config
 arr-stack_sabnzbd-config
 arr-stack_seerr-config
@@ -70,7 +69,6 @@ arr-stack_jellyfin-config
 arr-stack_magnetio-redis-data
 arr-stack_pihole-etc-pihole
 arr-stack_prowlarr-config
-arr-stack_qbittorrent-config
 arr-stack_radarr-config
 arr-stack_sabnzbd-config
 arr-stack_seerr-config
@@ -93,7 +91,6 @@ arr-stack_jellyfin-config
 arr-stack_magnetio-redis-data
 arr-stack_pihole-etc-pihole
 arr-stack_prowlarr-config
-arr-stack_qbittorrent-config
 arr-stack_radarr-config
 arr-stack_sabnzbd-config
 arr-stack_seerr-config

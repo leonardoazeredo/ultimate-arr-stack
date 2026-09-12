@@ -122,7 +122,7 @@ services:
 
   # ═══════════════════════════════════════════════════════════════════════════
   # DEUNHEALTH - Auto-recovery for VPN failures. Watches gluetun health and
-  # restarts dependent services (qBittorrent, Sonarr, etc.) when VPN recovers.
+  # restarts dependent services (SABnzbd, Prowlarr, etc.) when VPN recovers.
   # No web UI. Runs silently in background.
   # ═══════════════════════════════════════════════════════════════════════════
   deunhealth:
@@ -317,8 +317,6 @@ services:
       - HOMEPAGE_VAR_PROWLARR_API_KEY=${PROWLARR_API_KEY}
       - HOMEPAGE_VAR_BAZARR_API_KEY=${BAZARR_API_KEY}
       - HOMEPAGE_VAR_SABNZBD_API_KEY=${SABNZBD_API_KEY}
-      - HOMEPAGE_VAR_QBITTORRENT_USER=${QBITTORRENT_USER}
-      - HOMEPAGE_VAR_QBITTORRENT_PASS=${QBITTORRENT_PASS}
       - HOMEPAGE_VAR_JELLYFIN_API_KEY=${JELLYFIN_API_KEY}
       - HOMEPAGE_VAR_SEERR_API_KEY=${SEERR_API_KEY}
       - HOMEPAGE_VAR_PIHOLE_API_TOKEN=${PIHOLE_API_TOKEN}

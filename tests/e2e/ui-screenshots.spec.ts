@@ -207,40 +207,6 @@ test.describe('UI screenshots', () => {
     await page.screenshot({ path: screenshotPath('prowlarr'), fullPage: true });
   });
 
-  test('qBittorrent — login and screenshot', async ({ page }) => {
-    const username = process.env.QBIT_USERNAME;
-    const password = process.env.QBIT_PASSWORD;
-    test.skip(!username || !password, 'QBIT_USERNAME / QBIT_PASSWORD not set');
-
-    // Authenticate via API — cookie is set automatically
-    const loginRes = await page.request.post(url('qbittorrent', '/api/v2/auth/login'), {
-      form: { username, password },
-    });
-    expect(loginRes.ok()).toBeTruthy();
-
-    // Transfer cookies from API context to browser context
-    const cookies = (await loginRes.headersArray())
-      .filter((h) => h.name.toLowerCase() === 'set-cookie')
-      .map((h) => {
-        const [nameVal] = h.value.split(';');
-        const [name, ...rest] = nameVal.split('=');
-        return {
-          name: name.trim(),
-          value: rest.join('=').trim(),
-          domain: HOST,
-          path: '/',
-        };
-      });
-    await page.context().addCookies(cookies);
-
-    await page.goto(url('qbittorrent'));
-    await page.waitForLoadState('networkidle');
-
-    // Verify we see VueTorrent (not a login page)
-    await expect(page.getByText('TORRENTS').or(page.getByText('VueTorrent')).first()).toBeVisible({ timeout: 10_000 });
-    await page.screenshot({ path: screenshotPath('qbittorrent'), fullPage: true });
-  });
-
   test('SABnzbd — screenshot dashboard', async ({ page }) => {
     const apiKey = process.env.SABNZBD_API_KEY;
     test.skip(!apiKey, 'SABNZBD_API_KEY not set');

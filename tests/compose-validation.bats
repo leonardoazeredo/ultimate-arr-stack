@@ -254,7 +254,7 @@ import glob, os, re, sys
 
 root = sys.argv[1]
 BOUND = ("service:gluetun", "container:gluetun")
-NAMED = {"qbittorrent", "sabnzbd", "magnetio-addon"}
+NAMED = {"sabnzbd", "magnetio-addon"}
 CLIENT_IMAGE = re.compile(r"(qbittorrent|sabnzbd|transmission|deluge|rtorrent|nzbget)", re.I)
 EXEMPT = {"decypharr"}
 

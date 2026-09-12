@@ -2,7 +2,7 @@
 # scripts/configure-apps.sh — the API-driven app configurator.
 #
 # This is the most destructive script in the repo that a test is allowed near:
-# it POSTs configuration into six live services and restarts two containers.
+# it POSTs configuration into five live services and restarts two containers.
 # Everything here runs behind tests/helpers/stubs.bash, and the headline test is
 # the one that drives the WHOLE script with --dry-run and asserts that forbid()
 # was never tripped — i.e. that the dry-run gate really does sit in front of
@@ -23,7 +23,7 @@ setup() {
     # changes the world by writing a file rather than by rewriting the stub.
     FIX="$BATS_TEST_TMPDIR/fixtures"
     mkdir -p "$FIX"
-    printf '%s\n' gluetun qbittorrent sonarr radarr prowlarr bazarr > "$FIX/running"
+    printf '%s\n' gluetun sonarr radarr prowlarr bazarr > "$FIX/running"
     echo healthy > "$FIX/gluetun-health"
     printf '<Config>\n  <ApiKey>sonarrkey1234</ApiKey>\n</Config>\n' > "$FIX/sonarr.xml"
     printf '<Config>\n  <ApiKey>radarrkey1234</ApiKey>\n</Config>\n' > "$FIX/radarr.xml"
@@ -32,7 +32,6 @@ setup() {
     # whole file: the stub stands in for the grep, not for the config.
     printf '  apikey: bazarrkey1234\n' > "$FIX/bazarr.yaml"
     printf 'api_key = sabkey12345\n' > "$FIX/sabnzbd.ini"
-    : > "$FIX/qbit-logs"
     echo '192.168.8.100 10.0.0.5' > "$FIX/hostname"
     echo 200 > "$FIX/curl-out"
     export FIX
@@ -49,7 +48,6 @@ setup() {
                 [ "$*" = "inspect -f {{.State.Health.Status}} gluetun" ] \
                     || { echo "unexpected docker inspect argv: $*" >&2; exit 125; }
                 cat "$FIX/gluetun-health" ;;
-            logs)    cat "$FIX/qbit-logs" ;;
             exec)
                 case "$*" in
                     *config.xml*)  cat "$FIX/$2.xml"    2>/dev/null || exit 1 ;;
@@ -60,34 +58,11 @@ setup() {
             *) echo "unexpected docker argv: $*" >&2; exit 125 ;;
         esac
     '
-    # qBittorrent's real (non-dry) path talks to four endpoints with four
-    # different response shapes, so the curl stub dispatches on the URL. Anything
-    # else — every wait_for_service health poll — gets the default.
-    printf 'Ok.\n200\n' > "$FIX/qbit-auth"
-    echo 200 > "$FIX/qbit-category-code"
-    echo 200 > "$FIX/qbit-setprefs-code"
-    # The preference set the script considers already-correct. Identical to the
-    # payload it would POST, which is the property the check exists to have.
-    printf '%s\n' '{"auto_tmm_enabled":true,"upnp":false,"limit_utp_rate":true,"limit_lan_peers":true,"encryption":1,"max_inactive_seeding_time_enabled":true,"max_inactive_seeding_time":30,"max_ratio_act":0,"max_active_downloads":5,"max_active_torrents":10,"max_active_uploads":5}' > "$FIX/qbit-prefs.json"
-    stub_curl '
-        for a in "$@"; do
-            case "$a" in
-                */api/v2/auth/login)              cat "$FIX/qbit-auth";          exit 0 ;;
-                */api/v2/torrents/createCategory) cat "$FIX/qbit-category-code"; exit 0 ;;
-                */api/v2/app/preferences)         cat "$FIX/qbit-prefs.json";    exit 0 ;;
-                */api/v2/app/setPreferences)      cat "$FIX/qbit-setprefs-code"; exit 0 ;;
-            esac
-        done
-        cat "$FIX/curl-out"
-    '
+    # One canned answer for every curl call. Every curl this script makes
+    # outside a dry run is a wait_for_service poll, and all that reads is the
+    # HTTP code on the last line.
+    stub_curl 'cat "$FIX/curl-out"'
     stub_tool hostname 'cat "$FIX/hostname"'
-
-    # mktemp -t honours TMPDIR, so pointing it at a per-test directory makes
-    # "the cookie was cleaned up" an assertion about an empty directory rather
-    # than a hunt through the real /tmp.
-    TMPDIR="$BATS_TEST_TMPDIR/tmp"
-    mkdir -p "$TMPDIR"
-    export TMPDIR
 
     ENV_FILE="$BATS_TEST_TMPDIR/env"
     : > "$ENV_FILE"
@@ -104,7 +79,7 @@ setup() {
     # /usr/bin/env bash, not /bin/bash. The driver sources configure-apps.sh,
     # which uses bash 4 parameter expansion (`${svc^^}` in two places), and
     # macOS ships 3.2 at /bin/bash. Measured on this host: with /bin/bash the
-    # driver died on "bad substitution" and 16 of this file's 54 tests were red;
+    # driver died on "bad substitution" and 8 of this file's 37 tests were red;
     # `bash` on PATH is 5.x and runs them. The suite itself is already
     # `#!/usr/bin/env bats`, so env bash lands the driver on the interpreter the
     # harness picked rather than an older one nobody chose.
@@ -197,43 +172,42 @@ EOF
 # ------------------------------------------------------------------ env_value
 
 @test "configure-apps: env_value keeps everything after the first =" {
-    printf 'QBIT_PASSWORD=a=b=c\n' > "$ENV_FILE"
-    run "$DRIVER" env_value QBIT_PASSWORD "$ENV_FILE"
+    printf 'SABNZBD_API_KEY=a=b=c\n' > "$ENV_FILE"
+    run "$DRIVER" env_value SABNZBD_API_KEY "$ENV_FILE"
     assert_success
     assert_output "a=b=c"
 }
 
 @test "configure-apps: env_value strips one layer of double quotes" {
-    printf 'QBIT_PASSWORD="s3cret"\n' > "$ENV_FILE"
-    run "$DRIVER" env_value QBIT_PASSWORD "$ENV_FILE"
+    printf 'SABNZBD_API_KEY="s3cret"\n' > "$ENV_FILE"
+    run "$DRIVER" env_value SABNZBD_API_KEY "$ENV_FILE"
     assert_output "s3cret"
 }
 
 @test "configure-apps: env_value strips one layer of single quotes" {
-    printf "QBIT_PASSWORD='s3cret'\n" > "$ENV_FILE"
-    run "$DRIVER" env_value QBIT_PASSWORD "$ENV_FILE"
+    printf "SABNZBD_API_KEY='s3cret'\n" > "$ENV_FILE"
+    run "$DRIVER" env_value SABNZBD_API_KEY "$ENV_FILE"
     assert_output "s3cret"
 }
 
-# Every fake password below spells "example" on purpose, and the pre-commit
-# hook is why. check-secrets.sh Pattern 9 flags `_PASSWORD=<15+ non-space
-# chars>` in any tracked file, and it exempts only `tests/fixtures/*`, not
-# `tests/*.bats` -- so a plausible-looking fixture value here blocks every
-# later commit in the repo, not just this file's. The pattern's own escape
-# hatch is the placeholder allowlist `(your|here|example|placeholder|xxx)`,
-# so naming the values as examples keeps the guard armed at full strength
-# everywhere instead of widening the exemption to all of tests/.
+# The two fake keys below spell "example" on purpose, and the pre-commit hook is
+# why. check-secrets.sh Pattern 6 flags `(PASSWORD|SECRET|API_KEY)=<30+ chars>`
+# in any tracked file, and it exempts only `tests/fixtures/*`, not
+# `tests/*.bats` -- so a realistic-looking key here would block every later
+# commit in the repo, not just this file's. Placeholder-shaped values keep the
+# guard armed at full strength everywhere instead of widening the exemption to
+# all of tests/.
 @test "configure-apps: env_value matches the key at the start of the line only" {
-    printf 'OLD_QBIT_PASSWORD=example-wrong\nQBIT_PASSWORD=example-right\n' > "$ENV_FILE"
-    run "$DRIVER" env_value QBIT_PASSWORD "$ENV_FILE"
+    printf 'OLD_SABNZBD_API_KEY=example-wrong\nSABNZBD_API_KEY=example-right\n' > "$ENV_FILE"
+    run "$DRIVER" env_value SABNZBD_API_KEY "$ENV_FILE"
     assert_output "example-right"
 }
 
 @test "configure-apps: env_value fails on a missing key and a missing file" {
     printf 'OTHER=1\n' > "$ENV_FILE"
-    run "$DRIVER" env_value QBIT_PASSWORD "$ENV_FILE"
+    run "$DRIVER" env_value SABNZBD_API_KEY "$ENV_FILE"
     assert_failure
-    run "$DRIVER" env_value QBIT_PASSWORD "$BATS_TEST_TMPDIR/nope"
+    run "$DRIVER" env_value SABNZBD_API_KEY "$BATS_TEST_TMPDIR/nope"
     assert_failure
 }
 
@@ -261,7 +235,7 @@ EOF
     run "$DRIVER" check_prerequisites
     assert_failure
     local c
-    for c in gluetun qbittorrent sonarr radarr prowlarr bazarr; do
+    for c in gluetun sonarr radarr prowlarr bazarr; do
         assert_output --partial " $c"
     done
     assert_output --partial "Required containers not running:"
@@ -275,7 +249,7 @@ EOF
 }
 
 @test "configure-apps: a container whose name merely contains a required one does not count" {
-    printf '%s\n' gluetun-exit qbittorrent sonarr radarr prowlarr bazarr > "$FIX/running"
+    printf '%s\n' gluetun-exit sonarr radarr prowlarr bazarr > "$FIX/running"
     run "$DRIVER" check_prerequisites
     assert_failure
     assert_output --partial "Required containers not running: gluetun"
@@ -356,52 +330,6 @@ EOF
     assert_output --partial "SABnzbd API key: sabkey12..."
 }
 
-@test "configure-apps: a QBIT_PASSWORD in the environment wins over everything else" {
-    printf 'QBIT_PASSWORD=example-env-file\n' > "$ENV_FILE"
-    QBIT_PASSWORD=example-environment \
-        run "$DRIVER" eval 'discover_api_keys >/dev/null 2>&1; echo "PW=[$QBIT_PASSWORD]"'
-    assert_output --partial "PW=[example-environment]"
-    assert_stub_not_called docker "logs"
-}
-
-@test "configure-apps: the .env password is unquoted before use" {
-    printf 'QBIT_PASSWORD="example-quoted"\n' > "$ENV_FILE"
-    run "$DRIVER" eval 'discover_api_keys >/dev/null 2>&1; echo "PW=[$QBIT_PASSWORD]"'
-    assert_output --partial "PW=[example-quoted]"
-    assert_stub_not_called docker "logs"
-}
-
-@test "configure-apps: .env is resolved from the script, not the working directory" {
-    # The old code read the bare relative path `.env`, so running from anywhere
-    # but the repo root silently skipped this lookup and fell through to the
-    # log scrape. Running from / is the cheapest way to prove it no longer does.
-    printf 'QBIT_PASSWORD=example-anyway\n' > "$ENV_FILE"
-    cd /
-    run "$DRIVER" eval 'discover_api_keys >/dev/null 2>&1; echo "PW=[$QBIT_PASSWORD]"'
-    assert_output --partial "PW=[example-anyway]"
-}
-
-@test "configure-apps: with no env and no .env the temp password is scraped from the logs" {
-    echo 'A temporary password is provided for this session: abCD1234' > "$FIX/qbit-logs"
-    run "$DRIVER" eval 'discover_api_keys >/dev/null 2>&1; echo "PW=[$QBIT_PASSWORD]"'
-    assert_output --partial "PW=[abCD1234]"
-    assert_stub_called docker "logs qbittorrent"
-}
-
-@test "configure-apps: the most recent temp password in the logs is the one used" {
-    printf '%s\n%s\n' \
-        'A temporary password is provided for this session: OLDpass1' \
-        'A temporary password is provided for this session: NEWpass2' > "$FIX/qbit-logs"
-    run "$DRIVER" eval 'discover_api_keys >/dev/null 2>&1; echo "PW=[$QBIT_PASSWORD]"'
-    assert_output --partial "PW=[NEWpass2]"
-}
-
-@test "configure-apps: no password anywhere warns loudly instead of failing silently" {
-    run "$DRIVER" discover_api_keys
-    assert_output --partial "WARNING: Could not find qBittorrent password."
-    assert_output --partial "Set QBIT_PASSWORD env var"
-}
-
 # -------------------------------------------------------------- print_summary
 
 @test "configure-apps: the summary reports all three counters" {
@@ -425,66 +353,19 @@ EOF
 
 @test "configure-apps: the SABnzbd manual step appears only when SABnzbd is running" {
     run "$DRIVER" print_summary
-    refute_output --partial "5. SABnzbd"
+    refute_output --partial "4. SABnzbd"
     DRIVER_PRE='SABNZBD_RUNNING=true' run "$DRIVER" print_summary
-    assert_output --partial "5. SABnzbd: usenet provider credentials"
-}
-
-# ----------------------------------------------------------- the cookie file
-
-@test "configure-apps: the session cookie is a private temp file, removed on exit" {
-    # Observed from inside the run, after mktemp and before run_all: proving the
-    # cleanup means proving the file existed first.
-    #
-    # The cookie's own path, not a listing of $TMPDIR. BSD `mktemp -t` puts the
-    # file under the per-user confstr temp dir and ignores TMPDIR, so a listing
-    # of $TMPDIR is empty on macOS whatever the script does, and the assertions
-    # this test used to make about the name (`qbit_configure_cookie.` plus
-    # exactly six characters) are GNU mktemp's shape. The properties that matter
-    # hold on both: the path is under a temp directory, it carried a random
-    # component rather than the old fixed /tmp/qbit_configure_cookie.txt, and
-    # the trap removed it.
-    export OBSERVED="$BATS_TEST_TMPDIR/observed"
-    cat > "$BATS_TEST_TMPDIR/observe" <<'EOF'
-discover_api_keys() {
-    local cookie="${QBIT_COOKIE:?the script did not create one}"
-    { [ -e "$cookie" ] && echo present || echo missing
-      printf '%s\n' "$cookie"
-    } > "$OBSERVED"
-}
-run_all() { :; }
-EOF
-    DRIVER_PRE="source $BATS_TEST_TMPDIR/observe" run "$DRIVER" main --dry-run
-    assert_success
-    local state cookie
-    state=$(head -1 "$OBSERVED")
-    cookie=$(tail -1 "$OBSERVED")
-    [ "$state" = "present" ] || { echo "the cookie was not on disk during the run"; return 1; }
-    case "$cookie" in
-        */tmp/*|*/T/*) ;;
-        *) echo "the cookie is not under a temp directory: $cookie"; return 1 ;;
-    esac
-    # Not the fixed name two concurrent runs used to share, and not a name this
-    # test can predict: a second run must land somewhere else.
-    [ "$cookie" != "/tmp/qbit_configure_cookie.txt" ]
-    DRIVER_PRE="source $BATS_TEST_TMPDIR/observe" run "$DRIVER" main --dry-run
-    assert_success
-    [ "$(tail -1 "$OBSERVED")" != "$cookie" ] || {
-        echo "two runs used the same cookie path: $cookie"; return 1
-    }
-    # ...and the trap removed it.
-    [ ! -e "$cookie" ] || { echo "the cookie was left behind: $cookie"; return 1; }
+    assert_output --partial "4. SABnzbd: usenet provider credentials"
 }
 
 # --------------------------------------------------------- the dry-run boundary
 
 @test "configure-apps: a full --dry-run run reaches no mutating operation at all" {
     # THE test in this file. Every configure_* function has its own dry-run
-    # early return; this drives all six through main and asserts the harness
+    # early return; this drives all five through main and asserts the harness
     # never had to stop anything. A per-function assertion would pass even if
     # one function's gate were in the wrong place.
     echo sabnzbd >> "$FIX/running"
-    printf 'QBIT_PASSWORD=whatever\n' > "$ENV_FILE"
     run "$DRIVER" main --dry-run
     assert_success
     assert_nothing_forbidden
@@ -492,13 +373,10 @@ EOF
     assert_output --partial "[dry-run] Would:"
 }
 
-@test "configure-apps: --dry-run touches nothing in qBittorrent, the arrs, Bazarr or Pi-hole" {
-    printf 'QBIT_PASSWORD=whatever\n' > "$ENV_FILE"
+@test "configure-apps: --dry-run touches nothing in the arrs, Bazarr or Pi-hole" {
     run "$DRIVER" main --dry-run
     assert_success
     # The named mutations, one per service, asserted on the argv actually used.
-    assert_stub_not_called curl "createCategory"
-    assert_stub_not_called curl "setPreferences"
     assert_stub_not_called curl "rootfolder"
     assert_stub_not_called curl "downloadclient"
     assert_stub_not_called docker "restart"
@@ -507,21 +385,10 @@ EOF
 }
 
 @test "configure-apps: --dry-run still names every step it would have taken" {
-    printf 'QBIT_PASSWORD=whatever\n' > "$ENV_FILE"
     run "$DRIVER" main --dry-run
-    assert_output --partial "Would: Create category 'tv'"
     assert_output --partial "Would: Add root folder /data/media/tv"
     assert_output --partial "Would: Add root folder /data/media/movies"
     assert_output --partial "Would: Set Pi-hole upstream DNS"
-}
-
-@test "configure-apps: main reports failure when a dry run could not do its job" {
-    # No password anywhere: qBittorrent counts a failure even in a dry run, and
-    # that has to survive all the way out to main's exit status.
-    run "$DRIVER" main --dry-run
-    assert_failure
-    assert_output --partial "no password available"
-    assert_nothing_forbidden
 }
 
 @test "configure-apps: main stops at prerequisites and configures nothing" {
@@ -531,125 +398,4 @@ EOF
     assert_output --partial "Gluetun is 'unhealthy'"
     refute_output --partial "Discovering API keys"
     assert_nothing_forbidden
-}
-
-# ------------------------------------------------ configure_qbittorrent, for real
-#
-# The only place in this file that drives a configure_* function with DRY_RUN
-# off. These endpoints are not on the denylist (they carry no -X POST), which is
-# deliberate: the harness stops the operations a test must never perform, and
-# qBittorrent's own API against a stub is not one of them.
-
-# Set up the globals configure_qbittorrent reads and run it. The cookie file is
-# created first so its removal at the end is observable.
-run_qbit() {
-    COOKIE="$BATS_TEST_TMPDIR/cookie"
-    export COOKIE
-    : > "$COOKIE"
-    DRIVER_PRE='NAS_IP=10.0.0.1; QBIT_PASSWORD=pw; QBIT_COOKIE="$COOKIE"' \
-        run "$DRIVER" configure_qbittorrent
-}
-
-@test "configure-apps: a successful qBittorrent login proceeds to configure it" {
-    run_qbit
-    assert_output --partial "created category 'tv'"
-    assert_output --partial "created category 'movies'"
-    refute_output --partial "authentication failed"
-}
-
-@test "configure-apps: a rejected qBittorrent login is reported and stops the service" {
-    printf 'Fails.\n200\n' > "$FIX/qbit-auth"
-    run_qbit
-    assert_output --partial "authentication failed (check QBIT_USERNAME/QBIT_PASSWORD)"
-    assert_stub_not_called curl "createCategory"
-    assert_stub_not_called curl "setPreferences"
-}
-
-@test "configure-apps: each category is created at its own save path" {
-    run_qbit
-    assert_stub_called curl "category=tv"
-    assert_stub_called curl "savePath=/data/torrents/tv"
-    assert_stub_called curl "category=movies"
-    assert_stub_called curl "savePath=/data/torrents/movies"
-}
-
-@test "configure-apps: a category that already exists is a skip, not a failure" {
-    echo 409 > "$FIX/qbit-category-code"
-    run_qbit
-    assert_output --partial "category 'tv' (already configured)"
-    refute_output --partial "✗ qBittorrent: create category"
-}
-
-@test "configure-apps: any other category status is a counted failure naming the code" {
-    echo 403 > "$FIX/qbit-category-code"
-    DRIVER_PRE='NAS_IP=10.0.0.1; QBIT_PASSWORD=pw; QBIT_COOKIE=$(mktemp)' \
-        run "$DRIVER" eval 'configure_qbittorrent; echo "FAILED=$FAILED"'
-    assert_output --partial "create category 'tv' (HTTP 403)"
-    assert_output --partial "FAILED=2"
-}
-
-@test "configure-apps: preferences already at the target values are left alone" {
-    # Kills the whole block of !=-comparisons at once: flip any one of them and
-    # an already-correct client gets its preferences rewritten on every run.
-    run_qbit
-    assert_output --partial "qBittorrent: preferences (already configured)"
-    assert_stub_not_called curl "setPreferences"
-}
-
-@test "configure-apps: one wrong preference is enough to rewrite the whole set" {
-    # Every field in the block is load bearing, so wrecking any single one must
-    # trigger the write. Looping over all eleven is what makes flipping one
-    # comparison from != to == a failing test rather than a survivor.
-    #
-    # The wrong value is named per field rather than shared: the flags are
-    # checked for truthiness and the numbers for equality, so one sentinel
-    # cannot break both — a truthy string sails straight through `if not
-    # p.get(...)` and the test would silently cover only half the block.
-    cp "$FIX/qbit-prefs.json" "$FIX/prefs-correct.json"
-    local pair field wrong
-    for pair in auto_tmm_enabled=false upnp=true limit_utp_rate=false \
-                limit_lan_peers=false encryption=0 \
-                max_inactive_seeding_time_enabled=false \
-                max_inactive_seeding_time=31 max_ratio_act=1 \
-                max_active_downloads=6 max_active_torrents=11 \
-                max_active_uploads=6; do
-        field="${pair%%=*}"
-        wrong="${pair#*=}"
-        python3 -c "
-import json, sys
-p = json.load(open(sys.argv[1]))
-p[sys.argv[3]] = json.loads(sys.argv[4])
-json.dump(p, open(sys.argv[2], 'w'))
-" "$FIX/prefs-correct.json" "$FIX/qbit-prefs.json" "$field" "$wrong"
-        : > "$STUB_LOG"
-        run_qbit
-        # Named in the failure message, or eleven identical failures tell you
-        # nothing about which field stopped being checked.
-        [[ "$output" == *"set preferences"* ]] || {
-            echo "a wrong $field did not trigger a preferences write"
-            echo "$output"
-            return 1
-        }
-        assert_stub_called curl "setPreferences"
-    done
-}
-
-@test "configure-apps: a rejected preferences write is a counted failure" {
-    python3 -c "
-import json
-p = json.load(open('$FIX/qbit-prefs.json'))
-p['encryption'] = 0
-json.dump(p, open('$FIX/qbit-prefs.json', 'w'))
-"
-    echo 500 > "$FIX/qbit-setprefs-code"
-    DRIVER_PRE='NAS_IP=10.0.0.1; QBIT_PASSWORD=pw; QBIT_COOKIE=$(mktemp)' \
-        run "$DRIVER" eval 'configure_qbittorrent; echo "FAILED=$FAILED"'
-    assert_output --partial "set preferences (HTTP 500)"
-    assert_output --partial "FAILED=1"
-}
-
-@test "configure-apps: the session cookie is removed once qBittorrent is configured" {
-    run_qbit
-    assert_success
-    [ ! -e "$COOKIE" ]
 }

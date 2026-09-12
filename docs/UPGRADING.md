@@ -292,8 +292,8 @@ Seerr stores its own copy of the root folder paths. If not updated, new requests
 #### 10. Configure TRaSH naming schemes (recommended)
 
 Follow the naming configuration steps in the [App Configuration Guide](APP-CONFIG.md):
-- [Sonarr naming](APP-CONFIG.md#44-sonarr-tv-shows) (step 5)
-- [Radarr naming](APP-CONFIG.md#45-radarr-movies) (step 5)
+- [Sonarr naming](APP-CONFIG.md#43-sonarr-tv-shows) (step 5)
+- [Radarr naming](APP-CONFIG.md#44-radarr-movies) (step 5)
 
 After configuring naming, rename existing files and folders:
 
@@ -457,7 +457,7 @@ echo "Migration complete"
 - Startup order fixes — Gluetun now waits for Pi-hole to be healthy before connecting
 - Improved healthchecks — FlareSolverr actually tests Chrome, catches crashes
 - Backup script improvements — smart space checking, 7-day rotation
-- SABnzbd added — Usenet downloads via VPN (remove from compose if not wanted); configure in [App Configuration Guide](APP-CONFIG.md#43-sabnzbd-usenet-downloads)
+- SABnzbd added — Usenet downloads via VPN (remove from compose if not wanted); configure in [App Configuration Guide](APP-CONFIG.md#42-sabnzbd-usenet-downloads)
 
 **New features (optional, requires setup):**
 

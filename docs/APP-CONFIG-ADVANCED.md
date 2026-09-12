@@ -155,40 +155,17 @@ Add a root crontab `@reboot` job to persist across reboots (do **not** use `/etc
 
 ---
 
-## qBittorrent Tuning (TRaSH Recommended)
+## Torrents Are Handled by TorBox
 
-Tools → Options → Connection:
-- **Enable UPnP / NAT-PMP:** ❌ (unnecessary behind VPN, potential security risk)
+There is no local torrent client to tune any more. Sonarr/Radarr hand a torrent release to
+Decypharr, which asks TorBox to fetch it and then pulls the finished file back over HTTPS — no
+torrent peer traffic leaves this host, so the connection, encryption, µTP, seeding-limit and
+peer-whitelist settings a local BitTorrent client needed do not apply here. The queue, its
+progress and any per-release retry live in Decypharr's own WebUI on `http://NAS_IP:8282`.
 
-Tools → Options → Speed:
-- **Apply rate limit to µTP protocol:** ✅
-- **Apply rate limit to peers on LAN:** ✅
-
-Tools → Options → BitTorrent:
-- **Encryption mode:** Allow encryption
-- **Seeding Limits → When inactive for:** `30` minutes → **Pause torrent**
-
-Tools → Options → Speed → Queue:
-- **Maximum active downloads:** `5`
-- **Maximum active uploads:** `5`
-- **Maximum active torrents:** `10`
-
-> These follow [TRaSH Guides qBittorrent recommendations](https://trash-guides.info/Downloaders/qBittorrent/Basic-Setup/). Speed limits are left at unlimited since the VPN is the bottleneck. The inactivity timeout pauses stalled torrents so Sonarr/Radarr can detect them and automatically search for alternatives. Concurrent limits prevent overloading the NAS when many torrents are queued — the rest wait in line.
-
-> **Mobile access?** The default UI is poor on mobile. This stack includes [VueTorrent](https://github.com/VueTorrent/VueTorrent)—enable it at Tools → Options → Web UI → Use alternative WebUI → `/vuetorrent`.
-
-### Auth bypass for local networks
-
-qBittorrent bans IPs after repeated failed login attempts (e.g., from scripts or Sonarr/Radarr reconnections). To prevent this, whitelist your Docker and LAN subnets:
-
-Tools → Options → Web UI → Authentication:
-- **Bypass authentication for clients on localhost:** ✅
-- **Bypass authentication for clients in whitelisted IP subnets:** ✅
-- **Whitelisted subnets:** `172.20.0.0/24, 192.168.1.0/24, 127.0.0.0/8`
-
-> Adjust the `192.168.1.0/24` to match your LAN subnet. The `172.20.0.0/24` is the arr-stack Docker network — this ensures Sonarr, Radarr, and API scripts can always reach qBittorrent without auth failures.
->
-> **Is this safe?** Yes — qBittorrent sits behind Gluetun's VPN tunnel with no ports exposed to the internet. Only devices on your LAN or Docker containers can reach it. The whitelisted subnets are all internal, so auth bypass doesn't widen the attack surface.
+What still needs tuning on the torrent path is on the *arr* side: the download client entry
+(`decypharr:8282`, category `tv`/`movies`) and, if you want Usenet tried first, the delay profile —
+see [Prefer Usenet over Torrents](APP-CONFIG.md#prefer-usenet-over-torrents-optional).
 
 ---
 

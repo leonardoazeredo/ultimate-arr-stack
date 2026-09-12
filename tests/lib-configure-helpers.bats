@@ -326,36 +326,6 @@ status_is() {
     [[ "$output" == *"--connect-timeout"* ]]
 }
 
-# --- qbit_auth --------------------------------------------------------------
-
-@test "configure-helpers: qbit_auth succeeds only on 200 AND the literal Ok." {
-    CURL_BODY='Ok.' CURL_CODE=200
-    run qbit_auth "http://q" u p "$BATS_TEST_TMPDIR/c"
-    [ "$status" -eq 0 ]
-}
-
-@test "configure-helpers: qbit_auth rejects a 200 whose body is a refusal" {
-    # qBittorrent answers a bad password with HTTP 200 and the body "Fails.".
-    # Reading the status alone would call that a successful login.
-    CURL_BODY='Fails.' CURL_CODE=200
-    run qbit_auth "http://q" u wrong "$BATS_TEST_TMPDIR/c"
-    [ "$status" -eq 1 ]
-}
-
-@test "configure-helpers: qbit_auth rejects a non-200 even with an Ok. body" {
-    CURL_BODY='Ok.' CURL_CODE=403
-    run qbit_auth "http://q" u p "$BATS_TEST_TMPDIR/c"
-    [ "$status" -eq 1 ]
-}
-
-@test "configure-helpers: qbit_auth passes the credentials url-encoded" {
-    CURL_BODY='Ok.' CURL_CODE=200
-    qbit_auth "http://q" "us er" "p&ss" "$BATS_TEST_TMPDIR/c"
-    run cat "$CURL_LOG"
-    [[ "$output" == *"--data-urlencode username=us er"* ]]
-    [[ "$output" == *"--data-urlencode password=p&ss"* ]]
-}
-
 # --- json_extract -----------------------------------------------------------
 
 @test "configure-helpers: json_extract prints an extracted value" {
@@ -378,7 +348,7 @@ status_is() {
 
 # --- configure_arr_service --------------------------------------------------
 #
-# 250 lines, eight sections, fifteen endpoints, and until now not one test. It
+# 200 lines, seven sections, fifteen endpoints, and until now not one test. It
 # is also the only function here that WRITES: every section is a read, a
 # comparison, and a conditional POST or PUT. So the property worth pinning
 # hardest is the negative one — given an *arr that is already configured, it
@@ -396,15 +366,13 @@ arr_setup() {
     NAS_IP=10.0.0.1
     DRY_RUN=false
     VERBOSE=false
-    QBIT_USERNAME=admin
-    QBIT_PASSWORD=hunter2
     SABNZBD_RUNNING=false
     SABNZBD_API_KEY=""
     CONFIGURED=0; SKIPPED=0; FAILED=0
 
     route "GET /api/v3/health" "" 200
     route "GET /api/v3/rootfolder"       '[{"path":"/data/media/tv"}]'
-    route "GET /api/v3/downloadclient"   '[{"name":"qBittorrent"},{"name":"SABnzbd"}]'
+    route "GET /api/v3/downloadclient"   '[{"name":"SABnzbd"}]'
     route "GET /api/v3/metadata"         '[{"id":3,"implementation":"XbmcMetadata","enable":true}]'
     route "GET /api/v3/config/naming"    '{"renameEpisodes":true}'
     route "GET /api/v3/customformat"     '[{"id":9,"name":"Reject ISO"}]'
@@ -439,7 +407,7 @@ radarr() {
     status_is 0
     refute_curl "-X POST"
     refute_curl "-X PUT"
-    out_has "COUNTS 0 5 0"
+    out_has "COUNTS 0 4 0"
 }
 
 @test "configure-helpers: no API key stops before any HTTP call" {
@@ -473,42 +441,31 @@ radarr() {
     route "POST /api/v3/rootfolder" '{"message":"nope"}' 400
     run sonarr
     out_has "✗ Sonarr: add root folder"
-    out_has "COUNTS 0 4 1"
+    out_has "COUNTS 0 3 1"
 }
 
-@test "configure-helpers: the qBittorrent client carries tv's field names for Sonarr" {
+@test "configure-helpers: the SABnzbd client carries tv's field names for Sonarr" {
     arr_setup
     route "GET /api/v3/downloadclient" '[]'
-    run sonarr
+    SABNZBD_RUNNING=true SABNZBD_API_KEY=sabkey run sonarr
     assert_curl '"name": "tvCategory", "value": "tv"'
     assert_curl '"name": "recentTvPriority"'
     assert_curl '"name": "olderTvPriority"'
-    assert_curl '"value": "hunter2"'
+    assert_curl '"name": "apiKey", "value": "sabkey"'
 }
 
 @test "configure-helpers: the same call for Radarr derives movie field names instead" {
     arr_setup
     route "GET /api/v3/downloadclient" '[]'
-    run radarr
+    SABNZBD_RUNNING=true SABNZBD_API_KEY=sabkey run radarr
     assert_curl '"name": "movieCategory", "value": "movies"'
     assert_curl '"name": "recentMoviePriority"'
     refute_curl "tvCategory"
 }
 
-@test "configure-helpers: the download-client match is case-insensitive on the name" {
-    # The *arr UI title-cases what the user typed, so an existing client can
-    # come back as "QBittorrent". Matching case-sensitively would add a second
-    # copy of the same client on every run.
-    arr_setup
-    route "GET /api/v3/downloadclient" '[{"name":"QBITTORRENT"}]'
-    run sonarr
-    refute_curl "QBittorrentSettings"
-    out_has "qBittorrent download client (already configured)"
-}
-
 @test "configure-helpers: SABnzbd is added only when it is running and has a key" {
     arr_setup
-    route "GET /api/v3/downloadclient" '[{"name":"qBittorrent"}]'
+    route "GET /api/v3/downloadclient" '[]'
     run sonarr
     refute_curl "SabnzbdSettings"
 
@@ -648,7 +605,6 @@ radarr() {
     arr_setup
     DRY_RUN=true SABNZBD_RUNNING=true SABNZBD_API_KEY=sabkey run sonarr
     out_has "Would: Add root folder /data/media/tv"
-    out_has "Would: Add qBittorrent download client (category: tv)"
     out_has "Would: Add SABnzbd download client (category: tv)"
     out_has "Would: Add delay profile (Usenet 0, Torrent 30)"
     refute_curl "-X POST"

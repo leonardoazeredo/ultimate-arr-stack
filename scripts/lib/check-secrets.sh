@@ -18,10 +18,11 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 # `SSH_PASSWORD=hunter2-Tr0ub4dor-real` made check_secrets return 0 and print
 # nothing at all. Filtering hit-by-hit is the entire fix -- one match's
 # placeholder can no longer vouch for another's. Simulated across every
-# tracked file before the change: two files rely on the allowlist today
-# (.env.e2e.example and tests/configure-apps.bats) and in both every hit is
-# itself a placeholder, so nothing newly fires. This closes a hole rather
-# than tightening a threshold.
+# tracked file before the change: .env.e2e.example relies on the allowlist
+# today, and every hit in it is itself a placeholder, so nothing newly fires.
+# (tests/configure-apps.bats was the second such file until 2026-09-12, when
+# the removal of qBittorrent took its fake `QBIT_PASSWORD=` values with it.)
+# This closes a hole rather than tightening a threshold.
 #
 # Args: 1 severity  2 file  3 message  4 content  5 pattern
 #       6 extra allowlist alternatives, '' for none

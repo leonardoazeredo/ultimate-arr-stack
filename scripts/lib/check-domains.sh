@@ -41,7 +41,6 @@ check_domains() {
         "radarr.lan"
         "prowlarr.lan"
         "bazarr.lan"
-        "qbit.lan"
         "sabnzbd.lan"
         "traefik.lan"
         "pihole.lan"

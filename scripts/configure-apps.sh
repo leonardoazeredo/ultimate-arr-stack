@@ -2,7 +2,7 @@
 #
 # Automated app configuration for arr-stack
 #
-# Configures qBittorrent, Sonarr, Radarr, Prowlarr, Bazarr, and Pi-hole via their APIs.
+# Configures Sonarr, Radarr, Prowlarr, Bazarr, and Pi-hole via their APIs.
 # Replaces ~30 manual web UI steps with a single command.
 #
 # Usage:
@@ -23,7 +23,6 @@
 #
 # What stays manual after this script:
 #   - Jellyfin: initial wizard, libraries, hardware transcoding
-#   - qBittorrent: change default password
 #   - Prowlarr: add indexers (user-specific credentials)
 #   - Seerr: initial Jellyfin login + service connections
 #   - SABnzbd: usenet provider credentials + folder config
@@ -52,7 +51,6 @@ source "${SCRIPT_DIR}/lib/configure-helpers.sh"
 DRY_RUN=false
 VERBOSE=false
 NAS_IP=""
-QBIT_COOKIE=""
 
 # Overridable only so tests/configure-apps.bats can point at a fixture. Nothing
 # in production sets it; the default is the repo's own .env, resolved from this
@@ -74,8 +72,6 @@ PROWLARR_API_KEY=""
 BAZARR_API_KEY=""
 SABNZBD_API_KEY=""
 SABNZBD_RUNNING=false
-QBIT_USERNAME="${QBIT_USERNAME:-admin}"
-QBIT_PASSWORD="${QBIT_PASSWORD:-}"
 
 # ============================================
 # Usage
@@ -100,7 +96,7 @@ print_usage() {
 #
 # Keeps everything after the FIRST `=`, so a value containing one survives, and
 # strips a single layer of surrounding quotes - which `cut -d= -f2-` does not,
-# so a quoted password used to be handed to qBittorrent with the quotes still
+# so a quoted password used to be handed to an app with the quotes still
 # attached and simply failed to authenticate.
 env_value() {
     local key="$1" file="$2" line
@@ -147,7 +143,7 @@ parse_args() {
 # Prerequisites
 # ============================================
 
-REQUIRED_CONTAINERS="gluetun qbittorrent sonarr radarr prowlarr bazarr"
+REQUIRED_CONTAINERS="gluetun sonarr radarr prowlarr bazarr"
 
 check_prerequisites() {
     if ! command -v docker &>/dev/null; then
@@ -189,14 +185,14 @@ check_prerequisites() {
         return 1
     fi
 
-    # Gluetun must be healthy - qBittorrent and the *arr services share its
+    # Gluetun must be healthy - Prowlarr, FlareSolverr and SABnzbd share its
     # network namespace, so if the VPN isn't up they won't respond on any port.
     # Checking here turns a 4-minute mysterious hang into a clear error.
     local health
     health=$(docker inspect -f '{{.State.Health.Status}}' gluetun 2>/dev/null || echo unknown)
     if [[ "$health" != "healthy" ]]; then
         echo "ERROR: Gluetun is '$health' (need 'healthy')."
-        echo "       qBit and the *arr services share Gluetun's network - they can't respond until the VPN is up."
+        echo "       Prowlarr/SABnzbd share Gluetun's network - they can't respond until the VPN is up."
         echo "       Wait for it to connect, then re-run. Diagnose: docker logs gluetun --tail 50"
         return 1
     fi
@@ -257,113 +253,7 @@ discover_api_keys() {
             info "SABnzbd API key: ${SABNZBD_API_KEY:0:8}..."
         fi
     fi
-
-    # qBittorrent password: env var -> .env file -> docker logs temp password
-    if [[ -z "$QBIT_PASSWORD" ]]; then
-        QBIT_PASSWORD=$(env_value QBIT_PASSWORD "$CONFIGURE_ENV_FILE") || QBIT_PASSWORD=""
-    fi
-    if [[ -z "$QBIT_PASSWORD" ]]; then
-        # Same portability reason as arr_api_key above: `grep -oP ... \K` is
-        # GNU-only, so on a BSD grep host this scrape found nothing and the
-        # script told the operator to set a password that was sitting in the
-        # logs. `[^ ]*` after the last colon-space is what `\K\S+` selected.
-        QBIT_PASSWORD=$(docker logs qbittorrent 2>&1 \
-            | sed -n 's|.*temporary password is provided.*: \([^ ]*\).*|\1|p' | tail -1 || true)
-    fi
-    if [[ -z "$QBIT_PASSWORD" ]]; then
-        echo ""
-        echo "WARNING: Could not find qBittorrent password."
-        echo "         Set QBIT_PASSWORD env var if you've changed the default, e.g.:"
-        echo "         QBIT_PASSWORD=mypassword ./scripts/configure-apps.sh"
-        echo ""
-    fi
-
     echo ""
-}
-
-# ============================================
-# 1. qBittorrent
-# ============================================
-
-configure_qbittorrent() {
-    log "Configuring qBittorrent..."
-
-    local QBIT_URL="http://${NAS_IP}:8085"
-
-    if ! wait_for_service "qBittorrent" "$QBIT_URL"; then return; fi
-
-    if [[ -z "$QBIT_PASSWORD" ]]; then
-        fail "qBittorrent: no password available, skipping"
-        return
-    fi
-
-    if [[ "$DRY_RUN" == true ]]; then
-        dry "Authenticate to qBittorrent"
-        dry "Create category 'tv' → /data/torrents/tv"
-        dry "Create category 'movies' → /data/torrents/movies"
-        dry "Set preferences: auto TMM, disable UPnP, encryption, stall timeout, concurrent limits"
-        return
-    fi
-
-    # Authenticate using shared helper (see lib/configure-helpers.sh)
-    local http_code
-    if ! qbit_auth "$QBIT_URL" "$QBIT_USERNAME" "$QBIT_PASSWORD" "$QBIT_COOKIE"; then
-        fail "qBittorrent: authentication failed (check QBIT_USERNAME/QBIT_PASSWORD)"
-        return
-    fi
-
-    # Create categories (409 = already exists, that's fine)
-    for cat_name in tv movies; do
-        local save_path="/data/torrents/${cat_name}"
-        http_code=$(curl -s -o /dev/null -w '%{http_code}' \
-            -b "$QBIT_COOKIE" \
-            --data-urlencode "category=${cat_name}" \
-            --data-urlencode "savePath=${save_path}" \
-            "${QBIT_URL}/api/v2/torrents/createCategory")
-
-        if [[ "$http_code" == "200" ]]; then
-            ok "qBittorrent: created category '${cat_name}' → ${save_path}"
-        elif [[ "$http_code" == "409" ]]; then
-            skip "qBittorrent: category '${cat_name}'"
-        else
-            fail "qBittorrent: create category '${cat_name}' (HTTP $http_code)"
-        fi
-    done
-
-    # Set preferences (skip if already correct)
-    local current_prefs
-    current_prefs=$(curl -s -b "$QBIT_COOKIE" "${QBIT_URL}/api/v2/app/preferences" 2>/dev/null)
-
-    if json_extract "$current_prefs" "
-p = data
-if not p.get('auto_tmm_enabled', False): sys.exit(1)
-if p.get('upnp', True): sys.exit(1)
-if not p.get('limit_utp_rate', False): sys.exit(1)
-if not p.get('limit_lan_peers', False): sys.exit(1)
-if p.get('encryption', 0) != 1: sys.exit(1)
-if not p.get('max_inactive_seeding_time_enabled', False): sys.exit(1)
-if p.get('max_inactive_seeding_time', -1) != 30: sys.exit(1)
-if p.get('max_ratio_act', -1) != 0: sys.exit(1)
-if p.get('max_active_downloads', -1) != 5: sys.exit(1)
-if p.get('max_active_torrents', -1) != 10: sys.exit(1)
-if p.get('max_active_uploads', -1) != 5: sys.exit(1)
-"; then
-        skip "qBittorrent: preferences"
-    else
-        local prefs='{"auto_tmm_enabled":true,"upnp":false,"limit_utp_rate":true,"limit_lan_peers":true,"encryption":1,"max_inactive_seeding_time_enabled":true,"max_inactive_seeding_time":30,"max_ratio_act":0,"max_active_downloads":5,"max_active_torrents":10,"max_active_uploads":5}'
-        http_code=$(curl -s -o /dev/null -w '%{http_code}' \
-            -b "$QBIT_COOKIE" \
-            --data-urlencode "json=${prefs}" \
-            "${QBIT_URL}/api/v2/app/setPreferences")
-
-        if [[ "$http_code" == "200" ]]; then
-            ok "qBittorrent: set preferences (auto TMM, UPnP off, encryption, stall timeout, concurrent limits)"
-        else
-            fail "qBittorrent: set preferences (HTTP $http_code)"
-        fi
-    fi
-
-    rm -f "$QBIT_COOKIE"
 }
 
 # ============================================
@@ -604,8 +494,6 @@ configure_pihole() {
 # ============================================
 
 run_all() {
-    configure_qbittorrent
-    echo ""
     configure_arr_service "Sonarr" 8989 "$SONARR_API_KEY" "/data/media/tv" "tv" \
         "renameEpisodes" "$SONARR_METADATA_FIELDS" "$SONARR_NAMING_PAYLOAD"
     echo ""
@@ -641,11 +529,10 @@ print_summary() {
     echo ""
     echo "Remaining manual steps:"
     echo "  1. Jellyfin: initial wizard, libraries, hardware transcoding"
-    echo "  2. qBittorrent: change default password (Tools -> Options -> Web UI)"
-    echo "  3. Prowlarr: add indexers (torrent/Usenet)"
-    echo "  4. Seerr: initial setup + Jellyfin login"
+    echo "  2. Prowlarr: add indexers (torrent/Usenet)"
+    echo "  3. Seerr: initial setup + Jellyfin login"
     if [[ "$SABNZBD_RUNNING" == true ]]; then
-        echo "  5. SABnzbd: usenet provider credentials"
+        echo "  4. SABnzbd: usenet provider credentials"
     fi
 
     (( FAILED == 0 ))
@@ -658,13 +545,6 @@ main() {
     echo ""
 
     check_prerequisites || return 1
-
-    # A private, unpredictable path. This was the fixed /tmp/qbit_configure_cookie.txt:
-    # a world-writable directory, one session cookie, no trap - so two concurrent
-    # runs clobbered each other's session and any early return left the cookie on
-    # disk. The trap is what makes "we always clean up" true rather than intended.
-    QBIT_COOKIE=$(mktemp -t qbit_configure_cookie.XXXXXX)
-    trap '[[ -n "$QBIT_COOKIE" ]] && rm -f "$QBIT_COOKIE"' EXIT
 
     discover_api_keys
     run_all

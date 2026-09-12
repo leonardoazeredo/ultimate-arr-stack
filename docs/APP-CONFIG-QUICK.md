@@ -2,7 +2,7 @@
 
 > Return to [Setup Guide](SETUP.md) · [Manual setup instead?](APP-CONFIG.md)
 
-The [configure-apps.sh](../scripts/configure-apps.sh) script automates ~22 configuration steps across qBittorrent, Sonarr, Radarr, Prowlarr, and Bazarr — root folders, download clients, naming schemes, NFO metadata, custom formats, delay profiles, subtitle sync, and more.
+The [configure-apps.sh](../scripts/configure-apps.sh) script automates the fiddly configuration work across Sonarr, Radarr, Prowlarr, Bazarr and Pi-hole — root folders, download clients, naming schemes, NFO metadata, custom formats, delay profiles, subtitle sync, and more.
 
 > **Note:** This script is LLM-generated and human-reviewed. Best not to blindly run scripts from the internet — review [configure-apps.sh](../scripts/configure-apps.sh) for security before running it.
 
@@ -12,13 +12,6 @@ Work through these in order. Each app needs you to create an account or complete
 
 **Jellyfin** — `http://NAS_IP:8096`
 Complete the setup wizard (language, admin user, etc.). Skip adding libraries for now — you'll do that in Step 3.
-
-**qBittorrent** — `http://NAS_IP:8085`
-Get the temporary password:
-```bash
-docker logs qbittorrent 2>&1 | grep "temporary password"
-```
-Login as `admin` with the temp password, then change it immediately: Tools → Options → Web UI → Authentication.
 
 **SABnzbd** *(skip if not using Usenet)* — `http://NAS_IP:8082`
 Complete the Quick-Start Wizard with your Usenet provider details (host, username, password, SSL on, port `563`).
@@ -40,11 +33,6 @@ Create admin account when prompted.
 ```bash
 # SSH to your NAS:
 cd $NAS_STACK_DIR
-
-# If you've changed qBittorrent's default password:
-QBIT_PASSWORD='yourpassword' ./scripts/configure-apps.sh
-
-# If still using the temp password (first run):
 ./scripts/configure-apps.sh
 ```
 
@@ -60,15 +48,17 @@ Preview what it will do without making changes:
 
 | Service | Settings |
 |---------|----------|
-| qBittorrent | Categories (`tv`/`movies`), auto torrent management, encryption, UPnP off, stall timeout, concurrent limits |
-| Sonarr | Root folder, qBittorrent + SABnzbd download clients, TRaSH naming, NFO metadata, Reject ISO custom format, Usenet delay profile |
-| Radarr | Root folder, qBittorrent + SABnzbd download clients, TRaSH naming, NFO metadata, Reject ISO custom format, Usenet delay profile |
+| Sonarr | Root folder, SABnzbd download client, TRaSH naming, NFO metadata, Reject ISO custom format, Usenet delay profile |
+| Radarr | Root folder, SABnzbd download client, TRaSH naming, NFO metadata, Reject ISO custom format, Usenet delay profile |
 | Prowlarr | FlareSolverr proxy, Sonarr + Radarr app sync |
 | Bazarr | Sonarr + Radarr connections, subtitle sync (ffsubsync), Sub-Zero content mods, default English language |
+| Pi-hole | Upstream DNS pointed at the in-stack `dnscrypt-proxy` resolver |
+
+> **The torrent client is not scripted.** Decypharr needs a TorBox key and its own config first, and its download client entry is added by hand — see [TorBox (Decypharr)](SETUP.md#adding-more-services-core).
 
 ## Step 3: Configure the remaining services
 
-The script handles qBittorrent, Sonarr, Radarr, Prowlarr, and Bazarr. Complete these remaining services in order:
+The script handles Sonarr, Radarr, Prowlarr, Bazarr and Pi-hole. Complete these remaining services in order:
 
 ### 1. Jellyfin — Add libraries
 
@@ -110,11 +100,12 @@ Settings → Providers → add a provider (e.g., OpenSubtitles).
 
 > The script already configured Sonarr/Radarr connections and subtitle sync.
 
-### 6. Pi-hole — Set upstream DNS
+### 6. Pi-hole — Verify upstream DNS
 
+The script already pointed Pi-hole at the in-stack `dnscrypt-proxy` resolver. To check or change it:
 1. Open `http://NAS_IP:8081/admin`
 2. Login with the password from `PIHOLE_UI_PASS` in your `.env` (password only, no username)
-3. Settings → DNS → pick upstream servers (e.g., `1.1.1.1`, `8.8.8.8`)
+3. Settings → DNS → confirm the upstream server, or pick different ones (e.g., `1.1.1.1`, `8.8.8.8`)
 
 ---
 

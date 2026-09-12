@@ -1,7 +1,7 @@
 # Four resources only - the cross-app credential copies that
 # scripts/configure-apps.sh creates once but never updates after a key
 # rotation. Everything else (root folders, naming, custom formats,
-# qBittorrent, Pi-hole) stays owned by configure-apps.sh; this config is
+# Pi-hole) stays owned by configure-apps.sh; this config is
 # purely the "keep credentials in sync" layer on top of it.
 #
 # Sonarr/Radarr/Prowlarr's *own* keys are managed declaratively via the

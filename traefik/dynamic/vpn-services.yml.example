@@ -4,7 +4,7 @@
 # - Jellyfin, Seerr - user-facing services
 #
 # LOCAL-ONLY (access via NAS_IP:PORT or .lan domains):
-# - Sonarr, Radarr, Prowlarr, qBittorrent, Bazarr, Pi-hole
+# - Sonarr, Radarr, Prowlarr, Bazarr, Pi-hole
 # - These have weak default auth ("Disabled for Local" / "Bypass localhost")
 # - Use Seerr for remote media requests instead
 

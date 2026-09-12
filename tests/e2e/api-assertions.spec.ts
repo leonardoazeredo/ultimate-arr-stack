@@ -58,7 +58,7 @@ test.describe('API assertions', () => {
     expect(series.length).toBeGreaterThan(0);
   });
 
-  test('Sonarr — qBittorrent download client is configured and reachable', async ({ request }) => {
+  test('Sonarr — Decypharr download client is configured and reachable', async ({ request }) => {
     const apiKey = process.env.SONARR_API_KEY;
     test.skip(!apiKey, 'SONARR_API_KEY not set');
 
@@ -68,7 +68,7 @@ test.describe('API assertions', () => {
     expect(clients.ok()).toBeTruthy();
     const clientList = await clients.json();
     expect(clientList).toEqual(
-      expect.arrayContaining([expect.objectContaining({ name: 'qBittorrent', enable: true })]),
+      expect.arrayContaining([expect.objectContaining({ name: 'Decypharr (TorBox)', enable: true })]),
     );
 
     const test_ = await request.post(url('sonarr', '/api/v3/downloadclient/testall'), {
@@ -79,7 +79,7 @@ test.describe('API assertions', () => {
     expect(results).toEqual(expect.arrayContaining([expect.objectContaining({ isValid: true })]));
   });
 
-  test('Radarr — qBittorrent download client is configured and reachable', async ({ request }) => {
+  test('Radarr — Decypharr download client is configured and reachable', async ({ request }) => {
     const apiKey = process.env.RADARR_API_KEY;
     test.skip(!apiKey, 'RADARR_API_KEY not set');
 
@@ -89,7 +89,7 @@ test.describe('API assertions', () => {
     expect(clients.ok()).toBeTruthy();
     const clientList = await clients.json();
     expect(clientList).toEqual(
-      expect.arrayContaining([expect.objectContaining({ name: 'qBittorrent', enable: true })]),
+      expect.arrayContaining([expect.objectContaining({ name: 'Decypharr (TorBox)', enable: true })]),
     );
 
     const test_ = await request.post(url('radarr', '/api/v3/downloadclient/testall'), {

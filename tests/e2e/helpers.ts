@@ -15,7 +15,6 @@ export const PORTS = {
   sonarr: 8989,
   radarr: 7878,
   prowlarr: 9696,
-  qbittorrent: 8085,
   sabnzbd: 8082,
   seerr: 5055,
   bazarr: 6767,

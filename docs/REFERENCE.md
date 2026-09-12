@@ -21,8 +21,8 @@
 | Radarr | `NAS_IP:7878` | `https://radarr.lan`* | — |
 | Prowlarr | `NAS_IP:9696` | `https://prowlarr.lan`* | — |
 | Bazarr | `NAS_IP:6767` | `https://bazarr.lan`* | — |
-| qBittorrent | `NAS_IP:8085` | `https://qbit.lan`* | — |
 | SABnzbd | `NAS_IP:8082` | `https://sabnzbd.lan`* | — |
+| Decypharr | `NAS_IP:8282` | — | — |
 | Pi-hole | `NAS_IP:8081/admin` | `https://pihole.lan`* | — |
 | Traefik | — | `https://traefik.lan`* | — |
 | Uptime Kuma | `NAS_IP:3001` | `https://uptime.lan`* | — |
@@ -43,7 +43,6 @@
 | Service | IP | Port | Notes |
 |---------|-----|------|-------|
 | **Gluetun** | **172.20.0.3** | — | VPN gateway |
-| ↳ qBittorrent | (via Gluetun) | 8085 | Torrent downloads |
 | ↳ SABnzbd | (via Gluetun) | 8082 | Usenet downloads |
 | ↳ Prowlarr | (via Gluetun) | 9696 | Indexer manager |
 | Sonarr | 172.20.0.10 | 8989 | TV shows (own IP — not via VPN) |
@@ -52,7 +51,8 @@
 | Pi-hole | 172.20.0.5 | 8081 | DNS ad-blocking (`/admin`) |
 | Seerr | 172.20.0.8 | 5055 | Request management |
 | Bazarr | 172.20.0.9 | 6767 | Subtitles |
-| ↳ FlareSolverr | (via Gluetun) | 8191 (not published on the host) | Cloudflare bypass (inactive until added as an Indexer Proxy in Prowlarr — see [APP-CONFIG.md](APP-CONFIG.md#46-prowlarr-indexer-manager)) |
+| Decypharr | 172.20.0.7 | 8282 | TorBox debrid client (own IP — not via VPN; it only calls TorBox over HTTPS) |
+| ↳ FlareSolverr | (via Gluetun) | 8191 (not published on the host) | Cloudflare bypass (inactive until added as an Indexer Proxy in Prowlarr — see [APP-CONFIG.md](APP-CONFIG.md#45-prowlarr-indexer-manager)) |
 
 **+ local DNS** (traefik.yml):
 
@@ -90,14 +90,12 @@ natively on `arr-stack-router`, not on the NAS — see
 
 ### Service Connection Guide
 
-**VPN-protected services** (qBittorrent, SABnzbd, Prowlarr, FlareSolverr) share Gluetun's network via `network_mode: service:gluetun` — these carry the traffic that must stay hidden (peers + indexer scraping).
+**VPN-protected services** (SABnzbd, Prowlarr, FlareSolverr, vpn-socks5) share Gluetun's network via `network_mode: service:gluetun` — these carry the traffic that must stay hidden (indexer scraping + Usenet).
 
-**Bridge services** (Sonarr, Radarr, Jellyfin, Seerr, Bazarr, …) run on the `arr-stack` bridge with their own IPs. Sonarr (172.20.0.10) and Radarr (172.20.0.11) are *not* behind the VPN: they only contact metadata providers (TVDB/TMDB) and internal services, so they need no VPN — and staying on the bridge keeps them reachable when a gluetun/VPN reconnect happens.
+**Bridge services** (Sonarr, Radarr, Jellyfin, Seerr, Bazarr, Decypharr, …) run on the `arr-core` bridge with their own IPs. Sonarr (172.20.0.10) and Radarr (172.20.0.11) are *not* behind the VPN: they only contact metadata providers (TVDB/TMDB) and internal services, so they need no VPN — and staying on the bridge keeps them reachable when a gluetun/VPN reconnect happens. Decypharr is on the bridge for the same reason: the torrent runs on TorBox's servers, and only the finished file comes back over HTTPS.
 
 | From | To | Use | Why |
 |------|-----|-----|-----|
-| Sonarr | qBittorrent | `gluetun:8085` | Download client is behind the VPN |
-| Radarr | qBittorrent | `gluetun:8085` | Download client is behind the VPN |
 | Sonarr | SABnzbd | `gluetun:8080` | Download client is behind the VPN |
 | Radarr | SABnzbd | `gluetun:8080` | Download client is behind the VPN |
 | Prowlarr | Sonarr | `sonarr:8989` | Sonarr is on the bridge (own IP) |
@@ -111,7 +109,7 @@ natively on `arr-stack-router`, not on the NAS — see
 | Sonarr | Decypharr | `decypharr:8282` | Both on the bridge (Decypharr only calls TorBox's HTTPS API, no VPN needed) |
 | Radarr | Decypharr | `decypharr:8282` | Both on the bridge (Decypharr only calls TorBox's HTTPS API, no VPN needed) |
 
-> **Reaching VPN-side services from the bridge:** use the `gluetun` hostname (or `172.20.0.3`) — qBittorrent/SABnzbd/Prowlarr listen inside gluetun's namespace, so they have no Docker DNS name of their own. Gluetun's `FIREWALL_OUTBOUND_SUBNETS` includes `172.20.0.0/24`, so Prowlarr (in the VPN namespace) can reach Sonarr/Radarr on the bridge.
+> **Reaching VPN-side services from the bridge:** use the `gluetun` hostname (or `172.20.0.3`) — SABnzbd/Prowlarr listen inside gluetun's namespace, so they have no Docker DNS name of their own. Gluetun's `FIREWALL_OUTBOUND_SUBNETS` includes `172.20.0.0/24`, so Prowlarr (in the VPN namespace) can reach Sonarr/Radarr on the bridge.
 
 ## Common Commands
 
@@ -159,8 +157,8 @@ Services start in dependency order (handled automatically by `depends_on`):
 
 1. **Pi-hole** → DNS ready (for containers; optionally your LAN)
 2. **Gluetun** → VPN connected (uses Pi-hole for internal DNS)
-3. **Prowlarr, qBittorrent, SABnzbd** → VPN-protected services (behind Gluetun)
-4. **Sonarr, Radarr** → bridge services (own IPs, not via VPN); reach the download clients via `gluetun`
+3. **Prowlarr, SABnzbd** → VPN-protected services (behind Gluetun)
+4. **Sonarr, Radarr, Decypharr** → bridge services (own IPs, not via VPN); Sonarr and Radarr reach SABnzbd via `gluetun`
 5. **Seerr, Bazarr** → connect to Sonarr/Radarr by bridge hostname (`sonarr`/`radarr`)
 6. **FlareSolverr** → Cloudflare bypass (via Gluetun, shares VPN with Prowlarr)
 6. **Jellyfin, WireGuard** → Independent, start anytime
@@ -176,7 +174,7 @@ Services start in dependency order (handled automatically by `depends_on`):
 | Sonarr | TV management |
 | Radarr | Movie management |
 | Prowlarr | Indexer manager |
-| qBittorrent | Torrent client |
+| Decypharr | TorBox debrid client (torrents) |
 | SABnzbd | Usenet client |
 | Bazarr | Subtitles |
 | Gluetun | VPN gateway |

@@ -33,7 +33,7 @@ port — Traefik's basic auth is its only access control, so there is no
 
 **Add the widget credentials to `.env`** (see `.env.example`'s Homepage
 section) — Sonarr/Radarr/Prowlarr reuse the keys already used elsewhere in
-the stack; Bazarr/SABnzbd/qBittorrent/Jellyfin/Seerr/Pi-hole need their own
+the stack; Bazarr/SABnzbd/Jellyfin/Seerr/Pi-hole need their own
 values populated from Bitwarden or each app's own settings UI.
 
 **Widget URLs** (inside the container — same reachability rules as every
@@ -46,7 +46,6 @@ other cross-container call in this stack):
 | Prowlarr | `http://gluetun:9696` | VPN-tunneled, use gluetun + internal port |
 | Bazarr | `http://bazarr:6767` | bridge network |
 | SABnzbd | `http://gluetun:8080` | VPN-tunneled, use gluetun + internal port |
-| qBittorrent | `http://gluetun:8085` | VPN-tunneled, use gluetun + internal port |
 | Jellyfin | `http://jellyfin:8096` | bridge network |
 | Seerr | `http://seerr:5055` | bridge network |
 | Pi-hole | `http://pihole:80` | bridge network |
@@ -94,13 +93,12 @@ docker restart uptime-kuma
 | Jellyfin | HTTP | `http://jellyfin:8096/health` | Has own IP |
 | Pi-hole | HTTP | `http://pihole:80/admin` | Has own IP |
 | Prowlarr | HTTP | `http://gluetun:9696/ping` | Via Gluetun |
-| qBittorrent | HTTP | `http://gluetun:8085` | Via Gluetun |
 | Radarr | HTTP | `http://radarr:7878/ping` | Has own IP |
 | Seerr | HTTP | `http://seerr:5055/api/v1/status` | Has own IP |
 | Sonarr | HTTP | `http://sonarr:8989/ping` | Has own IP |
 | Traefik | HTTP | `http://traefik:80/ping` | Has own IP |
 
-> **Why `gluetun` for qBittorrent/SABnzbd/Prowlarr?** Those share Gluetun's network (`network_mode: service:gluetun`) and don't get their own Docker DNS entries — use the `gluetun` hostname or its static IP `172.20.0.3`. Sonarr/Radarr run on the bridge with their own names/IPs, so monitor them directly.
+> **Why `gluetun` for SABnzbd/Prowlarr?** Those share Gluetun's network (`network_mode: service:gluetun`) and don't get their own Docker DNS entries — use the `gluetun` hostname or its static IP `172.20.0.3`. Sonarr/Radarr run on the bridge with their own names/IPs, so monitor them directly.
 
 > **Optional extras**: You can also add monitors for external URLs (e.g., `https://jellyfin.yourdomain.com`), Home Assistant, or other devices — these won't trigger pre-commit warnings.
 

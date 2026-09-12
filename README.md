@@ -16,7 +16,7 @@ A Docker Compose media stack for a NAS: request a film or a series, it downloads
 | Library | **Sonarr**, **Radarr** | Series and film management, quality profiles, imports |
 | Indexers | **Prowlarr** | Indexer manager; keeps Sonarr/Radarr in sync |
 | Subtitles | **Bazarr** | Subtitle search and sync |
-| Downloads | **qBittorrent** (torrents), **SABnzbd** (Usenet), **Decypharr** (debrid) | All egress through the VPN except where deliberately not |
+| Downloads | **Decypharr** (torrents via TorBox debrid), **SABnzbd** (Usenet) | All egress through the VPN except where deliberately not |
 | Playback | **Jellyfin** | Media server and apps |
 | VPN | **Gluetun**, **vpn-socks5** | WireGuard tunnel for the download clients; SOCKS proxy |
 | DNS | **Pi-hole**, **dnscrypt-proxy** | Network-wide DNS + ad blocking, upstream encrypted |
@@ -31,7 +31,8 @@ A Docker Compose media stack for a NAS: request a film or a series, it downloads
               (arr-core bridge,      │
                172.20.0.0/24)        │
                                      ▼
-   Seerr ──▶ Sonarr / Radarr ──▶ qBittorrent / SABnzbd ──▶ Gluetun ──▶ VPN provider
+   Seerr ──▶ Sonarr / Radarr ──┬─▶ Decypharr ──▶ TorBox (debrid, HTTPS)
+                               └─▶ SABnzbd ──▶ Gluetun ──▶ VPN provider
                     │                                          ▲
                     ▼                                          │
                 Jellyfin ◀── media volume (hardlinked, no copies)
@@ -52,7 +53,7 @@ Three invariants hold the design together:
 | Host | Any Docker host — Ugreen, Synology, QNAP, a Linux box, or a Raspberry Pi 4+. The reference deployment is a Ugreen NAS (aarch64). |
 | Docker | Engine + Compose v2, with the ability to run `network_mode: service:*` and macvlan networks |
 | Static IP | **Required.** Pi-hole binds `${NAS_IP}:53`; if the address arrives by DHCP after Docker starts, Pi-hole never binds and the network loses DNS |
-| Storage | One volume holding `media/` plus `torrents/` and/or `usenet/` as siblings, for hardlinks |
+| Storage | One volume holding `media/` plus `torbox/` and/or `usenet/` as siblings, for hardlinks |
 | Secrets | A `.env` (gitignored) built from [.env.example](.env.example) — VPN credentials, app API keys, LAN addresses |
 | Optional | Intel/AMD iGPU for hardware transcoding; a Cloudflare account for the tunnel; a Tailscale account; a domain for remote access |
 
@@ -97,7 +98,8 @@ The full walkthrough — directories on the host, app configuration, DNS, HTTPS,
 | Jellyfin | `NAS_IP:8096` | `https://jellyfin.lan` | yes, if exposed |
 | Seerr | `NAS_IP:5055` | `https://seerr.lan` | yes, if exposed |
 | Sonarr / Radarr / Prowlarr / Bazarr | `NAS_IP:8989` / `:7878` / `:9696` / `:6767` | `https://sonarr.lan`, `https://radarr.lan`, `https://prowlarr.lan`, `https://bazarr.lan` | LAN only |
-| qBittorrent / SABnzbd | `NAS_IP:8085` / `:8082` | `https://qbit.lan`, `https://sabnzbd.lan` | LAN only |
+| SABnzbd | `NAS_IP:8082` | `https://sabnzbd.lan` | LAN only |
+| Decypharr | `NAS_IP:8282` | — (no `.lan` name) | LAN only |
 | Pi-hole admin | `NAS_IP:8081/admin` | `https://pihole.lan` | LAN only |
 | Uptime Kuma | `NAS_IP:3001` | `https://uptime.lan` | LAN only |
 | Traefik dashboard | — (reached through Traefik) | `https://traefik.lan` | LAN only |
