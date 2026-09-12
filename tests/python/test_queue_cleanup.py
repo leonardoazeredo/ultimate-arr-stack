@@ -791,6 +791,17 @@ def test_a_sonarr_target_without_episode_ids_falls_back_to_the_series():
     assert label == "seriesId=7"
 
 
+def test_the_usenet_client_is_not_mistaken_for_a_debrid_one():
+    # "SABnzbd (TorBox Usenet)" carries the provider's name, so the debrid
+    # patterns match it -- and the stale exemption would then cover every dead
+    # NZB as well. A usenet download that never finishes is a release with
+    # missing articles, which belongs on the blocklist like a dead torrent.
+    assert not m.is_debrid_client({"downloadClient": "SABnzbd (TorBox Usenet)"})
+    assert not m.is_debrid_client({"downloadClient": "NZBGet"})
+    assert m.should_blocklist({"downloadClient": "SABnzbd (TorBox Usenet)"},
+                              "stale") is True
+
+
 def test_a_radarr_target_keeps_the_per_film_search():
     radarr = {"name": "Radarr", "port": 7878, "key": "K",
               "id_field": "movieId", "search_cmd": "MoviesSearch",

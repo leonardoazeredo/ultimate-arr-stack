@@ -52,6 +52,11 @@ SEARCH_INTERVAL_SECONDS = 30
 # signal a queue record carries about who is downloading it.
 DEBRID_CLIENT_PATTERNS = ("decypharr", "torbox", "debrid")
 
+# Usenet clients are named after their provider here too ("SABnzbd (TorBox
+# Usenet)"), so the debrid patterns match them and the exemption below would
+# cover a class of failure it was never meant to cover.
+USENET_CLIENT_PATTERNS = ("sabnzbd", "nzbget", "nzb")
+
 
 def build_url(port, path, key):
     """Append the apikey with the right separator.
@@ -159,8 +164,16 @@ def is_debrid_client(record):
 
     Matched against the client name the operator configured, because that name
     is the only thing a queue record says about where the bytes come from.
+
+    Usenet clients are excluded first, and that is not a technicality: this
+    stack's usenet client is named "SABnzbd (TorBox Usenet)", so the provider
+    pattern matches it and the exemption below would swallow every dead NZB
+    too. A usenet download that never completes is a release with missing
+    articles -- the release is the problem, and it belongs on the blocklist.
     """
     client = (record.get("downloadClient") or "").lower()
+    if any(pattern in client for pattern in USENET_CLIENT_PATTERNS):
+        return False
     return any(pattern in client for pattern in DEBRID_CLIENT_PATTERNS)
 
 
