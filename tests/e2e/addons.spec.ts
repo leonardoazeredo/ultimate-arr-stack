@@ -37,11 +37,106 @@ test.describe('Magnetio', () => {
 });
 
 test.describe('stremio-jellyfin', () => {
+  // The whole chain a Stremio client walks, not just "the port answers".
+  //
+  // manifest -> catalog -> stream -> the media itself. Every step here failed
+  // at least once on 2026-09-11 and nothing in either suite noticed, because the
+  // only assertion was that manifest.json responds:
+  //
+  //   - the login header was malformed, so the addon exited on boot and
+  //     restarted in a loop: the manifest test failed, but only because the port
+  //     was dead, and the cause took an evening to find;
+  //   - with the login fixed, every authenticated call 401'd, so the catalog
+  //     came back with zero items -- which no test asserted;
+  //   - with that fixed, episodes resolved to nothing, because the season
+  //     lookup asked for IndexNumber === 1 while the library had only Specials.
+  //
+  // Each of those is a different failure of the same chain, and each is caught
+  // by one assertion below. The addon is local build with a published port, so
+  // none of this needs Docker access and it runs everywhere the suite runs.
+
+  const addon = (path: string) => url('stremioJellyfin', path);
+
   test('stremio-jellyfin manifest is reachable', async ({ request }) => {
-    const res = await request.get(url('stremioJellyfin', '/manifest.json'));
+    const res = await request.get(addon('/manifest.json'));
     expect(res.ok()).toBeTruthy();
     const manifest = await res.json();
     expect(manifest.id ?? manifest.name).toBeTruthy();
+  });
+
+  test('the manifest advertises the catalogs and resources the addon serves', async ({ request }) => {
+    const manifest = await (await request.get(addon('/manifest.json'))).json();
+    // A manifest whose catalogs disappear is an addon that installs and then
+    // shows an empty Discover page -- the failure that reads as success.
+    expect(manifest.resources).toEqual(expect.arrayContaining(['catalog', 'stream']));
+    const catalogs = (manifest.catalogs ?? []).map((c: { type: string }) => c.type);
+    expect(catalogs).toEqual(expect.arrayContaining(['movie', 'series']));
+  });
+
+  test('the catalog returns items carrying IMDb ids', async ({ request }) => {
+    const res = await request.get(addon('/catalog/movie/all/skip=0.json'), { timeout: 30_000 });
+    expect(res.ok()).toBeTruthy();
+    const metas = (await res.json()).metas ?? [];
+    // Not `toBeGreaterThan(0)` alone: an item with no IMDb id cannot be turned
+    // into a stream URL, so it is present-but-unplayable. The addon's own
+    // itemToMeta drops anything without one.
+    expect(metas.length).toBeGreaterThan(0);
+    const withImdb = metas.filter((m: { id?: string }) => /^tt\d+$/.test(m.id ?? ''));
+    expect(withImdb.length, 'no catalog item carried an IMDb id').toBeGreaterThan(0);
+    expect(withImdb[0].name).toBeTruthy();
+  });
+
+  test('a catalog item resolves to a stream URL, and that URL serves media', async ({ request }) => {
+    // The end of the chain: this is the URL Stremio hands to its player, so
+    // fetching it is what proves the addon produced something playable rather
+    // than merely a well-formed JSON body.
+    const catalog = await (await request.get(addon('/catalog/movie/all/skip=0.json'), { timeout: 30_000 })).json();
+    const item = (catalog.metas ?? []).find((m: { id?: string }) => /^tt\d+$/.test(m.id ?? ''));
+    expect(item, 'no catalog item with an IMDb id to resolve').toBeTruthy();
+
+    const streamRes = await request.get(addon(`/stream/movie/${item.id}.json`), { timeout: 30_000 });
+    expect(streamRes.ok()).toBeTruthy();
+    const streams = (await streamRes.json()).streams ?? [];
+    expect(streams.length, `no stream resolved for ${item.id} (${item.name})`).toBeGreaterThan(0);
+    expect(streams[0].url).toContain('/videos/');
+
+    // Range request, like a player starting playback.
+    //
+    // What this proves, measured by mutating the addon and watching: it catches
+    // a malformed URL -- a wrong id, a missing mediaSourceId, a path that is not
+    // /videos/ -- because those return 404 or a JSON error rather than bytes.
+    //
+    // What it does NOT prove, and the mutation showed this plainly: the
+    // `api_key` in that URL is not what authorises it. Replacing the token with
+    // a fixed wrong value still returned 206 with real media, as did removing
+    // the parameter entirely. Jellyfin 12 serves `/videos/` to anything that can
+    // reach it, so on this network the token is decoration rather than a gate.
+    // The real gate is network reach, which is why the addon's port not being in
+    // the VLAN20 allow-list mattered, and why routing it through Traefik (which
+    // is allowed) is what made it usable. Do not read this assertion as an
+    // access-control check.
+    const media = await request.get(streams[0].url, { headers: { Range: 'bytes=0-1023' }, timeout: 30_000 });
+    expect([200, 206]).toContain(media.status());
+    const body = await media.body();
+    expect(body.length, 'the stream URL returned no media bytes').toBeGreaterThan(0);
+  });
+
+  test('an episode resolves to a stream URL too', async ({ request }) => {
+    // The season lookup is the part that broke: a library whose only season for
+    // a series is `Specials` (IndexNumber 0) resolved to nothing when asked for
+    // season 1. This walks the same path for whichever series the catalog
+    // returns first, so it fails if that regression returns.
+    const catalog = await (await request.get(addon('/catalog/series/all/skip=0.json'), { timeout: 30_000 })).json();
+    const series = (catalog.metas ?? []).find((m: { id?: string }) => /^tt\d+$/.test(m.id ?? ''));
+    test.skip(!series, 'the series catalog returned nothing with an IMDb id');
+
+    const streamRes = await request.get(addon(`/stream/series/${series.id}:1:1.json`), { timeout: 30_000 });
+    expect(streamRes.ok()).toBeTruthy();
+    const streams = (await streamRes.json()).streams ?? [];
+    // An empty list here is exactly the old bug. It is asserted rather than
+    // skipped because the library does have series with episodes.
+    expect(streams.length, `no stream resolved for ${series.id}:1:1 (${series.name})`).toBeGreaterThan(0);
+    expect(streams[0].url).toContain('/videos/');
   });
 });
 
