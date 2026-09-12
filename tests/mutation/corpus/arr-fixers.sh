@@ -87,8 +87,8 @@ mutation stale-threshold-inverted \
   --file scripts/lib/queue_cleanup.py \
   --bats tests/python-suite.bats \
   --test "the extracted modules pass their pytest suite" \
-  --why "the 24-hour floor is what stops a download that started ten minutes ago being deleted from the client and blocklisted; comparing the wrong way round deletes exactly the healthy ones (test_zero_progress_becomes_stale_only_after_twenty_four_hours)" \
-  --apply 'sed -i "0,/^        if age_hours is not None and age_hours > 24:\$/s@^        if age_hours is not None and age_hours > 24:\$@        if age_hours is not None and age_hours < 24:@" "$F"'
+  --why "the age floor is what stops a download that started ten minutes ago being deleted from the client and blocklisted; comparing the wrong way round deletes exactly the healthy ones (test_zero_progress_becomes_stale_only_after_twenty_four_hours). Anchored on the shared variable, not a literal hour count, so retuning the threshold for debrid clients cannot make this entry inert -- which is exactly what happened while it read '> 24'" \
+  --apply 'sed -i "0,/^        if age_hours is not None and age_hours > stale_hours:\$/s@^        if age_hours is not None and age_hours > stale_hours:\$@        if age_hours is not None and age_hours < stale_hours:@" "$F"'
 
 mutation error-removal-ignores-warning-status \
   --file scripts/lib/queue_cleanup.py \
