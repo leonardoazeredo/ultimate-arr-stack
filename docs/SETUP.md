@@ -675,7 +675,7 @@ off-VPN migration — see `docs/MIGRATION-arr-off-vpn.md`).
    ```json
    {
      "debrids": [
-       { "provider": "torbox", "name": "TorBox", "api_key": "your_torbox_key", "download_uncached": false }
+       { "provider": "torbox", "name": "TorBox", "api_key": "your_torbox_key", "download_uncached": true }
      ],
      "mount": { "type": "none" },
      "default_download_action": "download",
@@ -687,6 +687,14 @@ off-VPN migration — see `docs/MIGRATION-arr-off-vpn.md`).
      ]
    }
    ```
+   `download_uncached: true` lets Decypharr hand TorBox a release it has not cached instead of
+   rejecting the grab. TorBox fetches it on its own servers and Decypharr collects the finished
+   file over HTTPS — which is the only way a request for an uncached title ever completes, and it
+   keeps every bit of torrenting off the NAS. The trade is time: an uncached grab waits for
+   TorBox to fetch it, where a cached one starts immediately. With `false`, Sonarr is handed a
+   queue item that never starts and cannot be replaced either, because an item at the cutoff
+   makes Sonarr reject every other release for that episode.
+
    `mount.type: "none"` + `download_action: "download"` is what gives direct-download-to-disk (no
    FUSE/rclone) — the auto-generated default is `"symlink"`, which needs a mount and won't work
    without one. Restart Decypharr after editing (`docker compose -f docker-compose.arr-stack.yml
