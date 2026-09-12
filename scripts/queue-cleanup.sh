@@ -18,7 +18,7 @@ set -euo pipefail
 #   ./scripts/queue-cleanup.sh --apply        # actually remove stuck items
 #   ./scripts/queue-cleanup.sh --apply -v     # remove with verbose output
 #
-# Scheduled by queue-cleanup.timer (every 6 hours, installed as a --user
+# Scheduled by queue-cleanup.timer (hourly, installed as a --user
 # unit -- see docs/MAINTENANCE.md). Running it by hand is still the way to
 # check what it would do first.
 #
@@ -34,7 +34,8 @@ set -euo pipefail
 #   - Torrents stuck downloading metadata
 #   - Failed imports (completed but can't import)
 #   - Downloads with errors (missing files, not available, etc.)
-#   - Items at 0% progress for more than 24 hours
+#   - Items at 0% progress for more than 24 hours (3 hours when the client is
+#     a debrid provider -- see the note below)
 #
 # What is NEVER removed:
 #   - Items with any download progress (even if slow)
