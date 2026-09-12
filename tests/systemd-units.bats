@@ -76,14 +76,22 @@ setup() {
 }
 
 @test "queue-cleanup unit creates its log directory before redirecting into it" {
-    # systemd's append: creates the file, never the directory. Without this the
-    # unit fails to start on a fresh host, where logs/ does not exist yet
-    # because .gitignore line 55 keeps it out of the repo.
-    run grep '^ExecStartPre=' "$UNITS_DIR/queue-cleanup.service"
+    # The redirect and the mkdir have to live in the same shell. Splitting them
+    # -- ExecStartPre=mkdir plus StandardOutput=append: into that directory --
+    # fails at boot with status=209/STDOUT, because systemd applies the unit's
+    # StandardOutput to ExecStartPre too, so mkdir dies setting up the redirect
+    # to a directory that does not exist yet. The first version of this unit
+    # did exactly that and never started.
+    run grep '^ExecStart=' "$UNITS_DIR/queue-cleanup.service"
     assert_output --partial "mkdir -p /volume1/docker/arr-stack/logs"
+    assert_output --partial ">> /volume1/docker/arr-stack/logs/queue-cleanup.log 2>&1"
 
-    run grep '^StandardOutput=' "$UNITS_DIR/queue-cleanup.service"
-    assert_output --partial "/volume1/docker/arr-stack/logs/queue-cleanup.log"
+    # And nothing tries the split version again.
+    run grep -c '^ExecStartPre=' "$UNITS_DIR/queue-cleanup.service"
+    assert_output "0"
+
+    run grep -c '^StandardOutput=' "$UNITS_DIR/queue-cleanup.service"
+    assert_output "0"
 }
 
 @test "queue-cleanup timer is enabled by the install step and actually repeats" {

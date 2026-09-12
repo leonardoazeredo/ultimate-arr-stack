@@ -2,10 +2,11 @@
 Description=Remove stuck Sonarr/Radarr queue items and re-search what was removed
 Documentation=file:/volume1/docker/arr-stack/scripts/queue-cleanup.sh
 
-# The detector this replaces was written in this repo and never scheduled, on
-# any host, from the day it was added -- which is the only reason 67 items sat
-# at 0% for a month while every individual piece of the pipeline worked. A
-# cleanup that only runs when someone remembers to run it is not a guard.
+# The cleanup script was written for exactly the failure this timer closes and
+# had never been scheduled on any host, from the day it was added -- which is
+# the only reason 67 items sat at 0% for a month while every individual piece
+# of the pipeline worked. A cleanup that only runs when someone remembers to
+# run it is not a guard.
 
 [Service]
 Type=oneshot
@@ -16,13 +17,14 @@ Type=oneshot
 # profile, no cron PATH.
 EnvironmentFile=/volume1/docker/arr-stack/.env
 
-# The script appends its own run header and trims the file at 1,000 lines; the
-# directory is not in git, so it has to exist before the redirect opens.
-ExecStartPre=/bin/mkdir -p /volume1/docker/arr-stack/logs
-
-# append: rather than the journal, so the record of what was removed survives
-# alongside the log the script already trims. journalctl also has it.
-StandardOutput=append:/volume1/docker/arr-stack/logs/queue-cleanup.log
-StandardError=append:/volume1/docker/arr-stack/logs/queue-cleanup.log
-
-ExecStart=/bin/bash /volume1/docker/arr-stack/scripts/queue-cleanup.sh --apply
+# The log directory is created *inside* ExecStart, in the same shell that opens
+# the redirect. The tidier-looking version of this -- an `ExecStartPre=/bin/mkdir`
+# plus `StandardOutput=append:<dir>/queue-cleanup.log` -- cannot work and fails
+# at boot: systemd applies the unit's StandardOutput to every process it spawns,
+# ExecStartPre included, so mkdir dies with "Failed to set up standard output:
+# No such file or directory" before it can create the directory the redirect
+# points into. Observed as status=209/STDOUT on 2026-09-12.
+#
+# `exec` so the script is the process systemd tracks, and so its exit status is
+# the unit's. `>>` rather than systemd's append: for the same reason.
+ExecStart=/bin/bash -c 'mkdir -p /volume1/docker/arr-stack/logs && exec /bin/bash /volume1/docker/arr-stack/scripts/queue-cleanup.sh --apply >> /volume1/docker/arr-stack/logs/queue-cleanup.log 2>&1'

@@ -432,8 +432,8 @@ mutation queue-unit-log-dir-not-created \
   --file scripts/queue-cleanup.service \
   --bats tests/systemd-units.bats \
   --test "queue-cleanup unit creates its log directory before redirecting into it" \
-  --why "systemd's append: creates the file but never the directory, and logs/ is gitignored, so on a fresh deploy the unit fails to start for a reason that reads as a file-permission problem rather than a missing mkdir" \
-  --apply 'sed -i "s@^ExecStartPre=/bin/mkdir -p /volume1/docker/arr-stack/logs\$@ExecStartPre=/bin/true@" "$F"'
+  --why "logs/ is gitignored, so on a fresh deploy it does not exist and the append has nothing to open. Moving the mkdir out of the ExecStart shell is also the shape that fails at boot with status=209/STDOUT -- systemd applies the unit's StandardOutput to ExecStartPre too, so a separate mkdir dies setting up the redirect to the directory it was about to create" \
+  --apply 'sed -i "s@mkdir -p /volume1/docker/arr-stack/logs && @@" "$F"'
 
 mutation queue-timer-never-enabled \
   --file scripts/queue-cleanup.timer \
