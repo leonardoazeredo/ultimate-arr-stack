@@ -303,7 +303,7 @@ mutation queue-api-ignores-curl-status \
   --file scripts/lib/queue_cleanup.py \
   --bats tests/python-suite.bats \
   --test "the extracted modules pass their pytest suite" \
-  --why "curl prints nothing on failure, so skipping the returncode check hands an empty string to json.loads and the whole run dies on a JSONDecodeError inside a systemd unit - instead of the one logged line the guard was written to produce (test_a_failed_curl_yields_none_rather_than_a_parse_error)" \
+  --why "curl prints nothing on failure, so skipping the returncode check hands an empty string to json.loads and the whole run dies on a JSONDecodeError inside a systemd unit - instead of the one logged line the guard was written to produce (test_a_failed_curl_yields_none_rather_than_a_parse_error). That test stopped being able to see this mutation once the JSON guard was added -- both mechanisms return None -- so the parseable-body test was added to keep the status check load bearing (test_a_failing_curl_with_a_parseable_body_still_yields_none)" \
   --apply 'sed -i "0,/^        if result.returncode != 0:\$/s@^        if result.returncode != 0:\$@        if False:@" "$F"'
 
 mutation queue-age-floored-to-whole-hours \

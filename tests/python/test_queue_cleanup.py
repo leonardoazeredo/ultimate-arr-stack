@@ -616,6 +616,18 @@ def test_a_failed_post_reports_false(monkeypatch):
     assert m.ArrApi().post_json(7878, "/api/v3/command", "KEY", {}) is False
 
 
+def test_a_failing_curl_with_a_parseable_body_still_yields_none(monkeypatch):
+    # Two independent mechanisms return None -- the returncode check and the
+    # JSON guard -- so a test that hands a failure nothing to parse cannot tell
+    # which one answered, and deleting the status check survives it. The
+    # generative sweep found exactly that after the JSON guard was added. curl
+    # -f can leave a body on stdout (a 500 carrying a JSON error object), and
+    # parsing it would hand the caller a service error as if it were the queue.
+    monkeypatch.setattr(m.subprocess, "run",
+                        FakeRun(returncode=22, stdout='{"detail": "boom"}'))
+    assert m.ArrApi().get(8989, "/api/v3/queue", "KEY") is None
+
+
 # --- run(): what it forwards to process_service ----------------------------
 #
 # run() passes out=, now=, sleep= and max_pages= straight through. Dropping any
