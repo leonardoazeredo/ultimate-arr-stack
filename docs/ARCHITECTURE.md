@@ -8,29 +8,29 @@ When someone requests a movie or TV show, here's what happens:
 
 ```
 ┌─────────────┐     ┌──────────────┐     ┌───────────┐     ┌─────────────┐     ┌──────────┐
-│   Seerr     │────▶│ Sonarr/Radarr│────▶│ Prowlarr  │────▶│ qBittorrent │────▶│ Jellyfin │
-│ (request)   │     │ (manage)     │     │ (indexers)│     │   SABnzbd   │     │ (watch)  │
+│   Seerr     │────▶│ Sonarr/Radarr│────▶│ Prowlarr  │────▶│  SABnzbd    │────▶│ Jellyfin │
+│ (request)   │     │ (manage)     │     │ (indexers)│     │  Decypharr  │     │ (watch)  │
 │             │     │              │     │           │     │ (download)  │     │          │
 └─────────────┘     └──────────────┘     └───────────┘     └─────────────┘     └──────────┘
                                               │                   │                  │
                                               └───────────────────┘                  │
-                                          Through VPN (Gluetun)               Not through VPN
+                            Prowlarr + SABnzbd: VPN (Gluetun)     Decypharr + Jellyfin: direct
 ```
 
-> Only **Prowlarr** and the **download clients** (qBittorrent/SABnzbd) run through the VPN. Seerr, Sonarr, Radarr and Jellyfin run on the bridge — Sonarr/Radarr only contact metadata providers and internal services, so they need no VPN.
+> **Prowlarr and SABnzbd** run through the VPN. **Decypharr** does not: it hands the release to TorBox, which fetches the torrent on its own servers and serves the finished file back over HTTPS, so no peer traffic leaves this host. Seerr, Sonarr, Radarr, Jellyfin and Decypharr run on the bridge — Sonarr/Radarr only contact metadata providers and internal services, so they need no VPN.
 
 1. **Seerr** - User requests a show or movie
 2. **Sonarr/Radarr** - Searches for releases, sends to download client
 3. **Prowlarr** - Provides indexers (torrent + Usenet) to Sonarr/Radarr
-4. **qBittorrent** - Downloads torrents (through VPN)
+4. **Decypharr** - Hands torrent releases to TorBox and pulls the finished file back over HTTPS (not through the VPN)
 5. **SABnzbd** - Downloads from Usenet (through VPN)
 6. **Jellyfin** - Streams the completed files
 
-> **Why both qBittorrent and SABnzbd?** Torrents are free but can be slow/unreliable. Usenet costs ~$5/month but is faster, more reliable, and has no ratio requirements. Most users configure both - Sonarr/Radarr will try Usenet first, fall back to torrents.
+> **Why two download clients?** The torrent path runs through TorBox: Decypharr gives it the release and downloads the result over HTTPS, so nothing joins a swarm from this host. Usenet costs ~$5/month but is faster, more reliable, and has no ratio requirements, and it stays on SABnzbd behind the VPN. Most users configure both - Sonarr/Radarr take whichever release scores better, and each client covers what the other cannot find.
 
 ## VPN Protection
 
-**Why VPN?** Your ISP can see BitTorrent traffic. The VPN encrypts this so they only see "encrypted traffic to VPN server".
+**Why VPN?** Your ISP can see which indexers you query and which Usenet provider you pull from. The VPN encrypts this so they only see "encrypted traffic to VPN server". There is no local torrent client left to tunnel: TorBox handles the torrent, and only the finished file crosses the wire, over HTTPS.
 
 **Why not everything through VPN?** Streaming from Jellyfin doesn't need protection (you're watching your own files) and VPN would slow it down.
 
@@ -38,10 +38,10 @@ When someone requests a movie or TV show, here's what happens:
                               ┌─────────────────────────────────────────┐
                               │            GLUETUN (VPN)                │
                               │                                         │
-Internet ◄───VPN Tunnel───────│  qBit   SABnzbd   Prowlarr   Flare      │
-                              │    ▲        ▲         ▲        ▲        │
-                              │    │        │         │        │        │
-                              │    └────────┴─────────┴────────┘        │
+Internet ◄───VPN Tunnel───────│  SABnzbd   Prowlarr   Flare             │
+                              │     ▲         ▲         ▲               │
+                              │     │         │         │               │
+                              │     └─────────┴─────────┘               │
                               │         All share localhost             │
                               └─────────────────────────────────────────┘
                                                  │
@@ -56,17 +56,17 @@ LAN only ◄────────────────────│  Pi-
                               └─────────────────────────────────────────┘
 ```
 
-> **Note:** Download services go through VPN to hide torrent traffic from your ISP. Streaming services don't need VPN protection. Remote access uses Cloudflare Tunnel (not VPN) - see [Access Levels](#access-levels).
+> **Note:** Indexer scraping and Usenet downloads go through the VPN to hide them from your ISP. Decypharr stays on the bridge because TorBox, not this host, handles the torrent - only the finished file comes back, over HTTPS. Streaming services don't need VPN protection. Remote access uses Cloudflare Tunnel (not VPN) - see [Access Levels](#access-levels).
 
 ## Service Connections
 
-Services behind Gluetun (qBittorrent, SABnzbd, Prowlarr, FlareSolverr) use `localhost` to talk to each other. Crossing the bridge↔VPN boundary needs care — the VPN namespace's DNS is Pi-hole, which can't resolve Docker container names, so VPN-side services must reach bridge services by **IP**.
+Services behind Gluetun (SABnzbd, Prowlarr, FlareSolverr) use `localhost` to talk to each other. Crossing the bridge↔VPN boundary needs care — the VPN namespace's DNS is Pi-hole, which can't resolve Docker container names, so VPN-side services must reach bridge services by **IP**.
 
 ```
 Bridge → VPN-side (use gluetun):     VPN-side → bridge (use IP):
 ─────────────────────────────        ──────────────────────────
-Sonarr → qBittorrent                 Prowlarr → Sonarr
-  └── gluetun:8085                      └── 172.20.0.10:8989
+Sonarr → SABnzbd                     Prowlarr → Sonarr
+  └── gluetun:8080                      └── 172.20.0.10:8989
 Radarr → SABnzbd                     Prowlarr → Radarr
   └── gluetun:8080                      └── 172.20.0.11:7878
 
@@ -93,7 +93,7 @@ arr-core network (172.20.0.0/24)
 ───────────────────────────────────────────────────────────────────────────────────
 │ IP           │ Service      │ Notes                          │ Required for     │
 ├──────────────┼──────────────┼────────────────────────────────┼──────────────────│
-│ 172.20.0.3   │ Gluetun      │ VPN gateway (qBit/SAB/Prowlarr)│ Core             │
+│ 172.20.0.3   │ Gluetun      │ VPN gateway (SAB/Prowlarr)     │ Core             │
 │ 172.20.0.4   │ Jellyfin     │ Media server                   │ Core             │
 │ 172.20.0.8   │ Seerr        │ Request portal                 │ Core             │
 │ 172.20.0.9   │ Bazarr       │ Subtitles                      │ Core             │
@@ -187,7 +187,7 @@ Two YAML anchors define security profiles in each compose file:
 | Anchor | Used by | Capabilities |
 |--------|---------|-------------|
 | `x-security` | All non-LSIO services | None by default (services add back only what they need) |
-| `x-security-lsio` | Sonarr, Radarr, Prowlarr, qBittorrent, SABnzbd, Bazarr | `CHOWN`, `SETUID`, `SETGID`, `DAC_OVERRIDE` (s6-overlay needs these to switch users during init) |
+| `x-security-lsio` | Sonarr, Radarr, Prowlarr, SABnzbd, Bazarr | `CHOWN`, `SETUID`, `SETGID`, `DAC_OVERRIDE` (s6-overlay needs these to switch users during init) |
 
 Decypharr uses its own inline security block (not the shared anchor): same four caps plus `FOWNER` — its entrypoint's `chmod /app` during root-init-then-drop-privileges needs it, unlike the LSIO images.
 
@@ -210,4 +210,4 @@ Additional requirements:
 
 **Named volumes:** Data persists across container updates. Easy to backup with the included script.
 
-**No fail2ban:** External access goes through Cloudflare Tunnel, which handles rate limiting and bot protection at the edge. LAN services aren't exposed to the internet. Services with auth (qBittorrent, Pi-hole, Traefik dashboard) have their own brute-force protections. fail2ban would add complexity with no practical benefit.
+**No fail2ban:** External access goes through Cloudflare Tunnel, which handles rate limiting and bot protection at the edge. LAN services aren't exposed to the internet. Services with auth (Pi-hole, SABnzbd, the Traefik dashboard) have their own brute-force protections. fail2ban would add complexity with no practical benefit.

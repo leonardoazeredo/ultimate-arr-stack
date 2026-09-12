@@ -38,7 +38,7 @@ gpg --decrypt /tmp/backup.tar.gz.gpg > /tmp/backup.tar.gz
 cd /tmp
 tar -xzf backup.tar.gz
 ls arr-stack-backup-*/
-# Should show: gluetun-config/ qbittorrent-config/ prowlarr-config/ etc.
+# Should show: gluetun-config/ decypharr-config/ prowlarr-config/ etc.
 ```
 
 ### 4. Deploy Fresh Stack
@@ -126,7 +126,7 @@ Some services may need post-restore steps:
 | Sonarr/Radarr | Verify download clients are connected (Settings > Download Clients > Test) |
 | Prowlarr | Sync indexers (Settings > Apps > Sync App Indexers) |
 | Pi-hole | Verify upstream DNS (Settings > DNS) |
-| qBittorrent | Check categories exist (right-click sidebar) |
+| Decypharr | Check the categories and any stuck torrents in its WebUI (`http://NAS_IP:8282`) |
 
 If `configure-apps.sh` was used for initial setup, re-running it will fix any missing configuration — it's safe to re-run (idempotent).
 

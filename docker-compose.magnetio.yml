@@ -136,7 +136,7 @@ services:
     # option only sets opts.tracker.proxy, peer sockets connect directly).
     # Sharing Gluetun's network namespace instead forces ALL traffic —
     # trackers, peer connections, DHT, its own HTTP server — through the
-    # VPN tunnel at the OS level, same as qBittorrent/SABnzbd/Prowlarr/
+    # VPN tunnel at the OS level, same as SABnzbd/Prowlarr/
     # FlareSolverr in docker-compose.arr-stack.yml. "container:gluetun"
     # (not "service:gluetun") because gluetun lives in a different compose
     # file/project — Compose only resolves "service:" within its own file,

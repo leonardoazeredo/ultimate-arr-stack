@@ -9,7 +9,7 @@ import { DOCKER_AVAILABLE, egressIp } from './helpers';
 // health. These productionize scripts/check-vpn.sh's IP comparison,
 // per-service, as an automated check instead of a manual one.
 
-const TUNNELED_SERVICES = ['qbittorrent', 'prowlarr', 'sabnzbd', 'flaresolverr'] as const;
+const TUNNELED_SERVICES = ['prowlarr', 'sabnzbd', 'flaresolverr'] as const;
 const BRIDGE_SERVICES = ['sonarr', 'radarr'] as const;
 
 test.describe('VPN egress — leak detection', () => {
@@ -54,7 +54,7 @@ test.describe('VPN egress — leak detection', () => {
 });
 
 test.describe('VPN killswitch — chaos test', () => {
-  test('stopping Gluetun blocks qBittorrent egress rather than leaking via a fallback route', async () => {
+  test('stopping Gluetun blocks SABnzbd egress rather than leaking via a fallback route', async () => {
     test.skip(!DOCKER_AVAILABLE, 'docker CLI not available — run on the NAS directly');
     test.skip(
       process.env.ALLOW_DISRUPTIVE_TESTS !== '1',
@@ -69,10 +69,13 @@ test.describe('VPN killswitch — chaos test', () => {
     try {
       execFileSync('docker', ['stop', 'gluetun'], { timeout: 30_000 });
 
-      // A working killswitch means qBittorrent's egress call fails/times out
-      // entirely — NOT that it falls back to the host's raw route. Returning
-      // hostIp here would mean the killswitch failed and traffic leaked.
-      const leakCheckIp = egressIp('qbittorrent');
+      // A working killswitch means the tunneled client's egress call fails or
+      // times out entirely — NOT that it falls back to the host's raw route.
+      // Returning hostIp here would mean the killswitch failed and traffic
+      // leaked. SABnzbd is the subject because it is the busiest thing left
+      // inside the tunnel; qBittorrent was removed from the stack on
+      // 2026-09-12, and this test used to ride on it.
+      const leakCheckIp = egressIp('sabnzbd');
       expect(leakCheckIp).toBeNull();
     } finally {
       execFileSync('docker', ['start', 'gluetun'], { timeout: 30_000 });
@@ -98,7 +101,7 @@ test.describe('VPN killswitch — chaos test', () => {
 });
 
 test.describe('VPN port forwarding', () => {
-  test('Gluetun forwarded port matches qBittorrent listening port', () => {
+  test('Gluetun forwarded port matches SABnzbd listening port', () => {
     // VPN_PORT_FORWARDING is not enabled in this stack's compose config
     // today (see .env.example's note on it as an optional provider feature)
     // — Gluetun's control server has no forwarded port to report. Nothing to

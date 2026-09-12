@@ -165,18 +165,6 @@ http:
       service: bazarr-lan
 
     # === Download Clients ===
-    qbit-lan:
-      rule: "Host(`qbit.lan`)"
-      entryPoints: [web]
-      middlewares: [https-redirect]
-      service: qbit-lan
-    qbit-lan-secure:
-      rule: "Host(`qbit.lan`)"
-      entryPoints: [websecure]
-      tls: {}
-      middlewares: [admin-auth@docker, security-headers]
-      service: qbit-lan
-
     sabnzbd-lan:
       rule: "Host(`sabnzbd.lan`)"
       entryPoints: [web]
@@ -311,11 +299,6 @@ http:
           - url: "http://172.20.0.9:6767"
 
     # === Download Clients (via Gluetun) ===
-    qbit-lan:
-      loadBalancer:
-        servers:
-          - url: "http://172.20.0.3:8085"
-
     sabnzbd-lan:
       loadBalancer:
         servers:

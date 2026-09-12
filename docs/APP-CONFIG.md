@@ -6,9 +6,9 @@ Your stack is running! Now configure each app to work together.
 
 **Configuration order:** Services depend on each other, so configure them in the order below:
 1. Jellyfin (media server — needed before Seerr)
-2. qBittorrent (downloads — needed before Sonarr/Radarr)
+2. Decypharr (torrent client — needed before Sonarr/Radarr)
 3. SABnzbd (optional Usenet — needed before Sonarr/Radarr if using)
-4. Sonarr & Radarr (library managers — need qBit/SABnzbd configured first)
+4. Sonarr & Radarr (library managers — need Decypharr/SABnzbd configured first)
 5. Prowlarr (indexers — needs Sonarr/Radarr configured first)
 6. Seerr (requests — needs Jellyfin + Sonarr/Radarr configured first)
 7. Bazarr (subtitles — needs Sonarr/Radarr configured first)
@@ -21,7 +21,7 @@ See **[Quick Reference → Service Connection Guide](REFERENCE.md#service-connec
 | | Script-Assisted (Recommended) | Manual |
 |---|---|---|
 | **Time** | ~5 minutes | ~30 minutes |
-| **What happens** | Script configures qBit, Sonarr, Radarr, Prowlarr, Bazarr; you do the rest manually | You configure everything through the web UI |
+| **What happens** | Script configures Sonarr, Radarr, Prowlarr, Bazarr and Pi-hole; you do the rest manually | You configure everything through the web UI |
 | **Guide** | **[APP-CONFIG-QUICK.md](APP-CONFIG-QUICK.md)** | Continue below ↓ |
 
 ---
@@ -42,47 +42,9 @@ Streams your media library to any device.
 
 > **Optional:** [Enable hardware transcoding](APP-CONFIG-ADVANCED.md#hardware-transcoding-intel-quick-sync) for GPU-accelerated playback (recommended for Ugreen NAS). Also see [Kodi for Fire TV](APP-CONFIG-ADVANCED.md#kodi-for-fire-tv-dolby-vision--truehd-atmos) and [RAID5 streaming tuning](APP-CONFIG-ADVANCED.md#raid5-streaming-tuning).
 
-## 4.2 qBittorrent (Torrent Downloads)
+## 4.2 SABnzbd (Usenet Downloads)
 
-Receives download requests from Sonarr and Radarr and downloads files via torrents.
-
-1. **Access:** `http://NAS_IP:8085`
-2. **Get temporary password** (qBittorrent 4.6.1+ generates a random password):
-   ```bash
-   # Run this on your NAS via SSH:
-   docker logs qbittorrent 2>&1 | grep "temporary password"
-   ```
-   Look for: `A temporary password is provided for this session: <password>`
-
-   <details>
-   <summary><strong>Ugreen NAS:</strong> Using UGOS Docker GUI instead</summary>
-
-   You can also find the password in the UGOS web interface:
-   1. Open Docker → Container → qbittorrent → Log tab
-   2. Search for "password"
-
-   ![UGOS Docker logs](images/qbit/1.png)
-
-   </details>
-
-3. **Login:** Username `admin`, password from step 2
-4. **Change password immediately:** Tools → Options → Web UI → Authentication
-5. **Set Torrent Management Mode:** Tools → Options → Downloads → **Default Torrent Management Mode: Automatic**
-   - This tells qBittorrent to use the category save path, enabling hardlinks between download and library directories
-6. **Create categories:** Right-click categories → Add
-   - `tv` → Save path: `/data/torrents/tv`
-   - `movies` → Save path: `/data/torrents/movies`
-
-   > **Why categories matter:** Sonarr/Radarr tell qBittorrent which category to use when requesting downloads. qBittorrent puts files in the category's save path. After download completes, Sonarr/Radarr create hardlinks from `/data/torrents/tv` or `/data/torrents/movies` to your library (`/data/media/tv` or `/data/media/movies`). If categories don't match, downloads won't be found.
-
-7. **Set stall timeout:** Tools → Options → BitTorrent → Seeding Limits → **When inactive for:** `30` minutes → **Pause torrent**. This lets Sonarr/Radarr detect stalled downloads and automatically search for alternatives.
-8. **Set concurrent limits:** Tools → Options → Speed → Queue → **Maximum active downloads:** `5`, **Maximum active uploads:** `5`, **Maximum active torrents:** `10`. Prevents overloading the NAS when many torrents are queued.
-
-> **Optional:** [qBittorrent tuning](APP-CONFIG-ADVANCED.md#qbittorrent-tuning-trash-recommended) (TRaSH recommended settings for encryption, UPnP, VueTorrent mobile UI).
-
-## 4.3 SABnzbd (Usenet Downloads)
-
-SABnzbd provides Usenet downloads as an alternative/complement to qBittorrent.
+SABnzbd provides Usenet downloads alongside Decypharr's TorBox path.
 
 > **Note:** Usenet is routed through VPN for consistency and an extra layer of security.
 
@@ -117,39 +79,32 @@ SABnzbd provides Usenet downloads as an alternative/complement to qBittorrent.
 
 > **Optional:** [SABnzbd hardening](APP-CONFIG-ADVANCED.md#sabnzbd-hardening-trash-recommended) (TRaSH recommended settings for sorting, propagation, hostname whitelist).
 
-> **Next:** Once SABnzbd is set up, you'll add a Usenet indexer in [Prowlarr §4.6](#46-prowlarr-indexer-manager).
+> **Next:** Once SABnzbd is set up, you'll add a Usenet indexer in [Prowlarr §4.5](#45-prowlarr-indexer-manager).
 
-## 4.4 Sonarr (TV Shows)
+## 4.3 Sonarr (TV Shows)
 
-Searches for TV shows, sends download links to qBittorrent/SABnzbd, and organizes completed files.
+Searches for TV shows, sends download links to Decypharr or SABnzbd, and organizes completed files.
 
 1. **Access:** `http://NAS_IP:8989`
 2. **Create admin account** when prompted
 3. **Add Root Folder:** Settings → Media Management → `/data/media/tv`
 4. **Add Download Client(s):** Settings → Download Clients
 
-   **qBittorrent (torrents):**
-   - Add → qBittorrent
-   - Host: `gluetun` (Sonarr is on the bridge; qBittorrent is behind the VPN)
-   - Port: `8085`
-   - Category: `tv`
-
-   **SABnzbd (Usenet):** *(if configured)*
-   - Add → SABnzbd
-   - Host: `172.20.0.3` (gluetun's static IP on the bridge — same pattern as the qBittorrent entry
-     above; SABnzbd is behind the VPN, and using the IP directly avoids SABnzbd's `host_whitelist`
-     hostname check returning `403 Forbidden`)
-   - Port: `8080` (SABnzbd's internal port — not `8082`, which is only the host-published mapping)
-   - API Key: (from SABnzbd Config → General)
-   - Category: `tv`
-
-   **Decypharr / TorBox (debrid):** *(if configured — see [Adding TorBox](SETUP.md#adding-more-services-core))*
+   **Decypharr / TorBox (torrents):** *(setup in [TorBox (Decypharr)](SETUP.md#adding-more-services-core))*
    - Add → qBittorrent (Decypharr speaks the qBittorrent Web API)
    - Host: `decypharr` (Decypharr is on the bridge, same as Sonarr — no VPN hop needed)
    - Port: `8282`
    - **Username:** `http://sonarr:8989` (Sonarr's own URL — not a real qBittorrent login; this is
      how Decypharr identifies which Arr is calling, matched against its own `arrs` config)
    - **Password:** Sonarr's API key (Settings → General → API Key)
+   - Category: `tv`
+
+   **SABnzbd (Usenet):** *(if configured)*
+   - Add → SABnzbd
+   - Host: `172.20.0.3` (gluetun's static IP on the bridge — SABnzbd runs behind the VPN, and
+     using the IP directly avoids SABnzbd's `host_whitelist` hostname check returning `403 Forbidden`)
+   - Port: `8080` (SABnzbd's internal port — not `8082`, which is only the host-published mapping)
+   - API Key: (from SABnzbd Config → General)
    - Category: `tv`
 
 5. **Enable NFO metadata:** Settings → Metadata → Kodi (XBMC) / Emby → **Enable** (see [why this matters](#nfo-metadata))
@@ -173,37 +128,30 @@ Searches for TV shows, sends download links to qBittorrent/SABnzbd, and organize
    - Add condition: Release Title, value `\.iso$`, check **Regex**
    - Settings → Profiles → your quality profile → set `Reject ISO` to `-10000`
 
-## 4.5 Radarr (Movies)
+## 4.4 Radarr (Movies)
 
-Searches for movies, sends download links to qBittorrent/SABnzbd, and organizes completed files.
+Searches for movies, sends download links to Decypharr or SABnzbd, and organizes completed files.
 
 1. **Access:** `http://NAS_IP:7878`
 2. **Create admin account** when prompted
 3. **Add Root Folder:** Settings → Media Management → `/data/media/movies`
 4. **Add Download Client(s):** Settings → Download Clients
 
-   **qBittorrent (torrents):**
-   - Add → qBittorrent
-   - Host: `gluetun` (Radarr is on the bridge; qBittorrent is behind the VPN)
-   - Port: `8085`
-   - Category: `movies`
-
-   **SABnzbd (Usenet):** *(if configured)*
-   - Add → SABnzbd
-   - Host: `172.20.0.3` (gluetun's static IP on the bridge — same pattern as the qBittorrent entry
-     above; SABnzbd is behind the VPN, and using the IP directly avoids SABnzbd's `host_whitelist`
-     hostname check returning `403 Forbidden`)
-   - Port: `8080` (SABnzbd's internal port — not `8082`, which is only the host-published mapping)
-   - API Key: (from SABnzbd Config → General)
-   - Category: `movies`
-
-   **Decypharr / TorBox (debrid):** *(if configured — see [Adding TorBox](SETUP.md#adding-more-services-core))*
+   **Decypharr / TorBox (torrents):** *(setup in [TorBox (Decypharr)](SETUP.md#adding-more-services-core))*
    - Add → qBittorrent (Decypharr speaks the qBittorrent Web API)
    - Host: `decypharr` (Decypharr is on the bridge, same as Radarr — no VPN hop needed)
    - Port: `8282`
    - **Username:** `http://radarr:7878` (Radarr's own URL — not a real qBittorrent login; this is
      how Decypharr identifies which Arr is calling, matched against its own `arrs` config)
    - **Password:** Radarr's API key (Settings → General → API Key)
+   - Category: `movies`
+
+   **SABnzbd (Usenet):** *(if configured)*
+   - Add → SABnzbd
+   - Host: `172.20.0.3` (gluetun's static IP on the bridge — SABnzbd runs behind the VPN, and
+     using the IP directly avoids SABnzbd's `host_whitelist` hostname check returning `403 Forbidden`)
+   - Port: `8080` (SABnzbd's internal port — not `8082`, which is only the host-published mapping)
+   - API Key: (from SABnzbd Config → General)
    - Category: `movies`
 
 5. **Enable NFO metadata:** Settings → Metadata → Kodi (XBMC) / Emby → **Enable** (see [why this matters](#nfo-metadata))
@@ -224,7 +172,7 @@ Searches for movies, sends download links to qBittorrent/SABnzbd, and organizes 
 
 ### Prefer Usenet over Torrents (Optional)
 
-If you have both qBittorrent and SABnzbd configured, Sonarr/Radarr will grab whichever is available first. To prefer Usenet (faster, no seeding):
+If you have both Decypharr and SABnzbd configured, Sonarr/Radarr will grab whichever release scores first. To prefer Usenet (faster, no seeding):
 
 1. Settings → Profiles → Delay Profiles
 2. Click the **wrench/spanner icon** on the existing profile (don't click +)
@@ -235,13 +183,10 @@ This gives Usenet a 30-minute head start before considering torrents.
 
 > **Note:** Do this in both Sonarr and Radarr (same steps in each).
 
-**Preferring TorBox/Decypharr over qBittorrent:** *(if both are configured)* Delay profiles only
-split by protocol (Usenet vs. torrent) — Decypharr shows up as a torrent-protocol client too, so
-it shares the same Torrent Delay as real qBittorrent. To prefer one torrent client over the other,
-set each client's **Priority** instead (Settings → Download Clients → edit the client → Priority
-field, `1` = tried first, `50` = tried last). Give Decypharr a lower number than qBittorrent to
-try the cached/instant TorBox grab first, falling back to VPN-routed qBittorrent for anything
-TorBox doesn't have.
+**Client priority:** Decypharr is the only torrent client, so there is nothing to rank it against.
+Its **Priority** field (Settings → Download Clients → edit the client → Priority, `1` = tried
+first, `50` = tried last) still matters if you add a second client later: give the one you want
+tried first the lower number.
 
 ### NFO Metadata
 
@@ -253,7 +198,7 @@ TorBox doesn't have.
 >
 > **After enabling:** Run a full library refresh to write NFOs for existing media. In Radarr: Movies → Update All. In Sonarr: Series → Update All. New downloads will get NFOs automatically.
 
-## 4.6 Prowlarr (Indexer Manager)
+## 4.5 Prowlarr (Indexer Manager)
 
 Manages torrent/Usenet indexers and syncs them to Sonarr/Radarr.
 
@@ -301,7 +246,7 @@ Manages torrent/Usenet indexers and syncs them to Sonarr/Radarr.
 6. **Connect to Radarr:** Same process — Radarr Server: `http://172.20.0.11:7878`
 7. **Sync:** Settings → Apps → Sync App Indexers
 
-## 4.6a Trakt (Watched-status sync + list-based suggestions)
+## 4.6 Trakt (Watched-status sync + list-based suggestions)
 
 Two independent integrations — install/configure separately, they don't depend on each other.
 

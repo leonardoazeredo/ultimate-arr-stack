@@ -19,7 +19,8 @@ All software included in this stack is **legal, open-source, and has legitimate 
 | **Jellyfin** | Self-hosted media streaming (like a personal Netflix for content you own) |
 | **Sonarr/Radarr** | Media library organization, file renaming, metadata fetching |
 | **Prowlarr** | Search aggregator supporting Usenet providers, public trackers, and indexers |
-| **qBittorrent** | BitTorrent client - torrenting is a legal distribution method used for Linux, Creative Commons content, academic datasets, game patches, and other legal media |
+| **Decypharr / TorBox** | Debrid client - the torrent is fetched by TorBox's own servers and the finished file comes back over HTTPS. Torrenting is a legal distribution method used for Linux, Creative Commons content, academic datasets, game patches, and other legal media |
+| **SABnzbd** | Usenet client - Usenet is a legal, paid distribution channel for the same kinds of content |
 | **Bazarr** | Subtitle management for accessibility |
 | **Seerr** | Request management for household media libraries |
 | **Gluetun VPN** | Network privacy and security |

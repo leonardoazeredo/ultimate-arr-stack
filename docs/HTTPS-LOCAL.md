@@ -3,9 +3,9 @@
 > Return to [Setup Guide](SETUP.md) · Requires [+ local DNS](LOCAL-DNS.md) already set up
 
 Adds basic-auth and HTTPS to every local-only `.lan` host: Sonarr, Radarr, Prowlarr, Bazarr,
-qBittorrent, SABnzbd, Pi-hole, Uptime Kuma, duc, Beszel, the `traefik.lan` dashboard, and — since
-the Jellyfin/Seerr extension — Jellyfin and Seerr too. Several of the original hosts (qBittorrent by
-explicit design) have no auth of their own on the LAN, so this is their only gate. Jellyfin and
+SABnzbd, Pi-hole, Uptime Kuma, duc, Beszel, the `traefik.lan` dashboard, and — since
+the Jellyfin/Seerr extension — Jellyfin and Seerr too. Most of those hosts have no auth of
+their own on the LAN, so this is their only gate. Jellyfin and
 Seerr already have real app-level auth of their own; the basicauth layer here is an intentional
 extra gate on top, applied uniformly with everything else in this tier — see the caveat below
 before relying on it for TV/mobile clients.
@@ -33,7 +33,7 @@ trusts `https://sonarr.lan` etc. without a browser warning.
 brew install mkcert          # macOS; see mkcert's README for other platforms
 mkcert -install               # installs the CA into this machine's trust store
 mkcert -cert-file lan-admin.crt -key-file lan-admin.key \
-  sonarr.lan radarr.lan prowlarr.lan bazarr.lan qbit.lan sabnzbd.lan \
+  sonarr.lan radarr.lan prowlarr.lan bazarr.lan sabnzbd.lan \
   traefik.lan pihole.lan uptime.lan duc.lan beszel.lan jellyfin.lan seerr.lan \
   jellyseerr.lan jellyseer.lan homepage.lan stremio.lan
 ```
@@ -97,7 +97,7 @@ devices that haven't trusted the CA, same as any self-signed cert.
 
 **Verification**
 
-- `https://sonarr.lan` (and the other 12 hosts, including `jellyfin.lan`/`seerr.lan`) load with no
+- `https://sonarr.lan` (and the other hosts, including `jellyfin.lan`/`seerr.lan`) load with no
   cert warning on a CA-trusted device, and prompt for basic-auth before showing the app.
 - `http://sonarr.lan` (and every other host) redirects (301) to its `https://` equivalent.
 - The Cloudflare-facing public URLs (`jellyfin.yourdomain.com` etc.) are unaffected — Cloudflare

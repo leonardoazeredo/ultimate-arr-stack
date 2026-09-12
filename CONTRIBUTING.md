@@ -55,7 +55,7 @@ Internet → Cloudflare Tunnel (or Router Port Forward 80→8080, 443→8443)
                             │
                             └─► Gluetun (VPN Gateway)
                                     │
-                                    └─► qBittorrent, Sonarr, Radarr, Prowlarr
+                                    └─► SABnzbd, Sonarr, Radarr, Prowlarr
                                         (Privacy-protected services)
 ```
 
@@ -83,7 +83,7 @@ This project uses **separate Docker Compose files** for each layer:
 ```
 /volume1/
 ├── Media/
-│   ├── downloads/    # qBittorrent
+│   ├── downloads/    # Decypharr (TorBox)
 │   ├── tv/           # TV shows
 │   └── movies/       # Movies
 └── docker/

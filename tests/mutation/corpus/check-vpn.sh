@@ -52,15 +52,15 @@ mutation check-vpn-tunneled-list-drifts-from-the-e2e \
   --file scripts/check-vpn.sh \
   --bats tests/check-vpn.bats \
   --test "check-vpn: the tunneled list matches the e2e suite's" \
-  --why "drops a service from the tunneled list. Nothing in this script can notice - the loop simply checks three services instead of four and reports OK - and the dropped one keeps leaking. The header says the two implementations must be kept in sync; this is the entry that proves the assertion, not the prose, is what keeps them that way" \
-  --apply 'sed -i "s@^TUNNELED_SERVICES=(qbittorrent prowlarr sabnzbd flaresolverr)\$@TUNNELED_SERVICES=(qbittorrent prowlarr sabnzbd)@" "$F"'
+  --why "drops a service from the tunneled list. Nothing in this script can notice - the loop simply checks two services instead of three and reports OK - and the dropped one keeps leaking. The header says the two implementations must be kept in sync; this is the entry that proves the assertion, not the prose, is what keeps them that way" \
+  --apply 'sed -i "s@^TUNNELED_SERVICES=(prowlarr sabnzbd flaresolverr)\$@TUNNELED_SERVICES=(prowlarr sabnzbd)@" "$F"'
 
 mutation check-vpn-reference-is-itself-tunneled \
   --file scripts/check-vpn.sh \
   --bats tests/check-vpn.bats \
   --test "check-vpn: the WAN reference container is one the e2e spec calls bridge-only" \
   --why "points the WAN reference at a container that is behind Gluetun. The headline check then compares the VPN against itself: the two IPs are always equal, so every single run reports a leak - or, had the comparison been written the other way round, none ever would. Either way the reference stops being a reference and nothing in the script's own output says so" \
-  --apply 'sed -i "s@^BRIDGE_REF=\"\${BRIDGE_REF:-sonarr}\"\$@BRIDGE_REF=\"\${BRIDGE_REF:-qbittorrent}\"@" "$F"'
+  --apply 'sed -i "s@^BRIDGE_REF=\"\${BRIDGE_REF:-sonarr}\"\$@BRIDGE_REF=\"\${BRIDGE_REF:-prowlarr}\"@" "$F"'
 
 # Two tests, one operator: the fallback test is the one named here, and
 # 'a working curl is not followed by wget' pins the same `||` from the other

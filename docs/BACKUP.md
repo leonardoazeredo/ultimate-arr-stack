@@ -23,7 +23,6 @@ The backup script (`scripts/arr-backup.sh`) backs up **state a service cannot re
 | Volume | Kept | Contents |
 |--------|------|----------|
 | gluetun-config | ~7MB | VPN provider settings |
-| qbittorrent-config | ~15MB | Client settings, categories |
 | sabnzbd-config | ~2MB | Usenet provider credentials and settings |
 | prowlarr-config | ~14MB | Indexer configs, API keys |
 | bazarr-config | ~6MB | Subtitle provider credentials |
@@ -78,7 +77,7 @@ Volume prefix: arr-stack_*
 Backup dir:    /tmp/arr-stack-backup-20241217
 
 Backing up gluetun-config... OK (7.1M)
-Backing up qbittorrent-config... OK (8.9M)
+Backing up decypharr-config... OK (2.9M)
 ...
 Summary: 8 backed up, 0 skipped, 0 failed
 Total size: 58M

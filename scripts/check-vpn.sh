@@ -29,7 +29,7 @@ set -euo pipefail
 # Use in cron or monitoring to catch VPN failures:
 #   */5 * * * * /path/to/arr-stack/scripts/check-vpn.sh || notify "VPN leak!"
 
-TUNNELED_SERVICES=(qbittorrent prowlarr sabnzbd flaresolverr)
+TUNNELED_SERVICES=(prowlarr sabnzbd flaresolverr)
 
 # Bridge-only, no VPN dependency, so its egress IS the household's WAN IP.
 # tests/e2e/vpn-security.spec.ts picks the same container for the same reason

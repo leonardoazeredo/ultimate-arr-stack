@@ -33,7 +33,6 @@ if [ -f "$IPS/$2" ]; then cat "$IPS/$2"; else exit 1; fi
     # The healthy world: Proton on one side, the household WAN on the other.
     ip gluetun     "185.107.56.9"
     ip sonarr      "81.20.30.40"
-    ip qbittorrent "185.107.56.9"
     ip prowlarr    "185.107.56.9"
     ip sabnzbd     "185.107.56.9"
     ip flaresolverr "185.107.56.9"
@@ -105,7 +104,6 @@ ts_list() {
     # comparison was against the NAS's 192.168.x.x LAN address, which nothing
     # reported by ifconfig.me can ever equal.
     ip gluetun "81.20.30.40"
-    ip qbittorrent "81.20.30.40"
     ip prowlarr "81.20.30.40"
     ip sabnzbd "81.20.30.40"
     ip flaresolverr "81.20.30.40"
@@ -141,7 +139,7 @@ ts_list() {
     run "$SCRIPT"
     assert_success
     assert_output --partial "VPN IP: 185.107.56.9"
-    assert_output --partial "OK: qbittorrent egress IP matches Gluetun"
+    assert_output --partial "OK: sabnzbd egress IP matches Gluetun"
 }
 
 @test "check-vpn: a working curl is not followed by wget" {
@@ -171,7 +169,7 @@ ts_list() {
     refute_output --partial "OK: VPN is active"
     # The rest of the run still happens: the per-service comparison is against
     # Gluetun, and does not need the WAN reference at all.
-    assert_output --partial "OK: qbittorrent egress IP matches Gluetun"
+    assert_output --partial "OK: sabnzbd egress IP matches Gluetun"
 }
 
 @test "check-vpn: one leaking dependent fails the run and names it" {
@@ -185,10 +183,10 @@ ts_list() {
     # `leaked=1` sets a flag and continues. If it ever became an early exit, the
     # first leak would mask every other one and a run would under-report -- and
     # the exit status, the only thing cron looks at, would be identical.
-    ip qbittorrent "81.20.30.40"
+    ip sabnzbd "81.20.30.40"
     run "$SCRIPT"
     assert_failure
-    assert_output --partial "LEAK DETECTED: qbittorrent"
+    assert_output --partial "LEAK DETECTED: sabnzbd"
     assert_output --partial "OK: flaresolverr egress IP matches Gluetun"
 }
 

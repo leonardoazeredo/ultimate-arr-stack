@@ -54,12 +54,13 @@ Decide how you'll access your media stack:
   </details>
 - **SSH access** to your NAS (enable in NAS settings)
 - **VPN Subscription** - Any provider supported by [Gluetun](https://github.com/qdm12/gluetun-wiki/tree/main/setup/providers) (Surfshark, NordVPN, PIA, Mullvad, ProtonVPN, etc.)
+- **TorBox account** (~$3-10/month) - the debrid service that fetches torrents on its own servers; Decypharr pulls the finished file back over HTTPS. Setup: [TorBox (Decypharr)](#adding-more-services-core)
 - **Usenet Provider** (optional, ~$4-6/month) - Frugal Usenet, Newshosting, Eweka, etc.
 - **Usenet Indexer** (optional) - Usenet-Crawler (free, open registration) or NZBGeek (~$12/year).
   DrunkenSlug's registration is currently closed and NZBFinder's free tier has no working API
-  access — see [Prowlarr setup](APP-CONFIG.md#46-prowlarr-indexer-manager) for details.
+  access — see [Prowlarr setup](APP-CONFIG.md#45-prowlarr-indexer-manager) for details.
 
-> **Why Usenet?** More reliable than public torrents (no fakes), faster downloads, SSL-encrypted (no VPN needed). See [SABnzbd setup](APP-CONFIG.md#43-sabnzbd-usenet-downloads).
+> **Why Usenet?** More reliable than public torrents (no fakes), faster downloads, SSL-encrypted (no VPN needed). See [SABnzbd setup](APP-CONFIG.md#42-sabnzbd-usenet-downloads).
 
 **For + remote access (Cloudflared path):**
 - **Domain name** (~$10/year) - [Cloudflare Registrar](https://www.cloudflare.com/products/registrar/) recommended
@@ -81,10 +82,10 @@ Decide how you'll access your media stack:
 | **Sonarr** | TV show manager - searches for episodes, sends to download client | Core |
 | **Radarr** | Movie manager - searches for movies, sends to download client | Core |
 | **Prowlarr** | Indexer manager - finds download sources for Sonarr/Radarr | Core |
-| **qBittorrent** | Torrent client - downloads files (through VPN) | Core |
+| **Decypharr** | Torrent client - hands releases to TorBox, which downloads them and serves the file back over HTTPS | Core |
 | **SABnzbd** | Usenet client - downloads files via SSL (optional, for Usenet users) | Core |
 | **Bazarr** | Subtitle manager - finds and syncs subtitles for your library | Core |
-| **Gluetun** | VPN container - routes download traffic through VPN so your ISP can't see what you download | Core |
+| **Gluetun** | VPN container - routes downloading and indexer traffic through VPN so your ISP can't see it | Core |
 | **Pi-hole** | DNS server - blocks ads, provides Docker DNS | Core |
 | **Traefik** | Reverse proxy - enables `.lan` domains | + local DNS |
 | **Cloudflared** | Tunnel to Cloudflare - secure remote access without port forwarding | + remote access (Cloudflared path) |
@@ -205,9 +206,9 @@ sudo apt-get update && sudo apt-get install -y git
 
 # Create media and download directories
 sudo mkdir -p /volume1/data/media/{tv,movies}
-sudo mkdir -p /volume1/data/torrents/{tv,movies}
+sudo mkdir -p /volume1/data/torbox/{tv,movies}
 sudo mkdir -p /volume1/data/usenet/{incomplete,complete/{tv,movies}}
-sudo chown -R 1000:1000 /volume1/data/media /volume1/data/torrents /volume1/data/usenet
+sudo chown -R 1000:1000 /volume1/data/media /volume1/data/torbox /volume1/data/usenet
 
 # Set where the stack lives. Default is volume1; change to /volume2/docker/arr-stack
 # if you want the stack on an SSD or second volume. You'll also set this in .env later.
@@ -253,9 +254,9 @@ sudo synopkg install Git
 
 # Create media and download directories
 sudo mkdir -p /volume1/data/media/{tv,movies}
-sudo mkdir -p /volume1/data/torrents/{tv,movies}
+sudo mkdir -p /volume1/data/torbox/{tv,movies}
 sudo mkdir -p /volume1/data/usenet/{incomplete,complete/{tv,movies}}
-sudo chown -R 1000:1000 /volume1/data/media /volume1/data/torrents /volume1/data/usenet
+sudo chown -R 1000:1000 /volume1/data/media /volume1/data/torbox /volume1/data/usenet
 
 # Set where the stack lives. Default is volume1; change to /volume2/docker/arr-stack
 # if you want the stack on an SSD or second volume. You'll also set this in .env later.
@@ -279,7 +280,7 @@ sudo apt-get update && sudo apt-get install -y git
 
 # Create media and download directories
 sudo mkdir -p /srv/data/media/{tv,movies}
-sudo mkdir -p /srv/data/torrents/{tv,movies}
+sudo mkdir -p /srv/data/torbox/{tv,movies}
 sudo mkdir -p /srv/data/usenet/{incomplete,complete/{tv,movies}}
 sudo chown -R 1000:1000 /srv/data
 
@@ -301,7 +302,7 @@ sudo chown -R 1000:1000 /srv/docker/arr-stack
 │   ├── media/                # Library files (TRaSH recommended)
 │   │   ├── movies/           #   Movie library (Radarr → Jellyfin)
 │   │   └── tv/               #   TV show library (Sonarr → Jellyfin)
-│   ├── torrents/             # qBittorrent downloads
+│   ├── torbox/               # Decypharr (TorBox) downloads
 │   │   ├── tv/               #   Sonarr category
 │   │   └── movies/           #   Radarr category
 │   └── usenet/               # SABnzbd downloads
@@ -323,7 +324,7 @@ sudo chown -R 1000:1000 /srv/docker/arr-stack
 >
 > **Multi-volume NAS?** You can keep your Docker install (the arr-stack files, set via `NAS_STACK_DIR`) on one volume and your media library (set via `MEDIA_ROOT`) on another. For example: Docker on `/volume1/docker/arr-stack` with media on `/volume2/data`, or vice versa. Both are set in `.env` (see Step 2.2 for `MEDIA_ROOT`).
 >
-> **Why this structure?** All media directories live under one `MEDIA_ROOT`, mounted as a single `/data` volume in containers that need both downloads and library access (qBittorrent, SABnzbd, Sonarr, Radarr). This enables **hardlinks**: when Sonarr/Radarr import a file, they create a hardlink instead of copying, making imports instant and using zero extra disk space. See [TRaSH Guides: Hardlinks](https://trash-guides.info/Hardlinks/Hardlinks-and-Instant-Moves/).
+> **Why this structure?** All media directories live under one `MEDIA_ROOT`, mounted as a single `/data` volume in containers that need both downloads and library access (Decypharr, SABnzbd, Sonarr, Radarr). This enables **hardlinks**: when Sonarr/Radarr import a file, they create a hardlink instead of copying, making imports instant and using zero extra disk space. See [TRaSH Guides: Hardlinks](https://trash-guides.info/Hardlinks/Hardlinks-and-Instant-Moves/).
 
 ---
 
@@ -505,18 +506,20 @@ Time to verify everything is connected and protected before you start adding con
 Run on NAS via SSH:
 ```bash
 docker exec gluetun wget -qO- https://ipinfo.io/ip       # Should show VPN IP, not your home IP
-docker exec qbittorrent wget -qO- https://ipinfo.io/ip   # Same - confirms qBit uses VPN
+docker exec sabnzbd curl -s https://ipinfo.io/ip         # Same - confirms SABnzbd shares the tunnel
 ```
 
-**Thorough test:** Visit [ipleak.net](https://ipleak.net) from your browser, then run the same test from inside qBittorrent:
+**Thorough test:** Visit [ipleak.net](https://ipleak.net) from your browser, then run the same test from inside SABnzbd:
 ```bash
-docker exec qbittorrent wget -qO- https://ipleak.net/json
+docker exec sabnzbd curl -s https://ipleak.net/json
 ```
-Compare the IPs — qBittorrent should show your VPN's IP, not your home IP.
+Compare the IPs — SABnzbd should show your VPN's IP, not your home IP.
+
+> **Decypharr is deliberately not tunneled.** It only talks to TorBox over HTTPS, so it exits through your home IP — that's expected, and it's why it sits on the bridge with the other apps instead of behind Gluetun. The torrent itself runs on TorBox's servers, not here.
 
 ### Service Integration Test
 1. Sonarr/Radarr: Settings → Download Clients → Test
-2. Add a TV show or movie (noting legal restrictions) → verify it appears in qBittorrent
+2. Add a TV show or movie (noting legal restrictions) → verify it appears in Decypharr (`http://NAS_IP:8282`), or in SABnzbd if the release came from Usenet
 3. After download completes → verify it moves to library
 4. Jellyfin → verify media appears in library
 
@@ -637,13 +640,14 @@ Other *arr apps you can add to your Core stack:
 </details>
 
 <details>
-<summary>Example: Adding TorBox (Decypharr)</summary>
+<summary>TorBox (Decypharr) — the torrent client</summary>
 
 [Decypharr](https://github.com/sirrobot01/decypharr) presents a qBittorrent-compatible API backed
 by [TorBox](https://torbox.app) (a debrid service that downloads torrents on its own servers and
-hands you the finished file over HTTPS). Sonarr/Radarr add it as a **second, separate** download
-client alongside the real qBittorrent — this doesn't replace or change your existing VPN/qBittorrent
-setup.
+hands you the finished file over HTTPS). It is this stack's torrent client: Sonarr/Radarr point at
+it the same way they would at a local qBittorrent, but no torrent peer traffic ever originates from
+your NAS. Decypharr is already defined in the compose file — it needs a TorBox key and its own
+config before it will download anything.
 
 Unlike Lidarr above, Decypharr does **not** run behind Gluetun: it never touches a torrent swarm,
 only TorBox's HTTPS API, so it gains nothing from the VPN (same reasoning as the Sonarr/Radarr
@@ -654,7 +658,7 @@ off-VPN migration — see `docs/MIGRATION-arr-off-vpn.md`).
    TORBOX_API_KEY=your_key_here
    ```
 
-2. Create the storage folders (sibling to `torrents/` and `usenet/`):
+2. Create the storage folders (sibling to `media/` and `usenet/`):
    ```bash
    mkdir -p ${MEDIA_ROOT}/torbox/{tv,movies}
    ```
@@ -690,12 +694,12 @@ off-VPN migration — see `docs/MIGRATION-arr-off-vpn.md`).
 
 5. In Sonarr → Settings → Download Clients (and again in Radarr), add a **new** qBittorrent-type
    client — Host `decypharr`, Port `8282`, Category `tv` (Sonarr) / `movies` (Radarr). **Username
-   and Password are not your qBittorrent credentials** — Decypharr uses them to identify which Arr
+   and Password are not torrent-client credentials** — Decypharr uses them to identify which Arr
    is calling, matched against the `arrs` entries above:
    - Username: the Arr's own URL as Decypharr sees it (`http://sonarr:8989` / `http://radarr:7878`)
    - Password: that Arr's own API key (Settings → General → API Key)
 
-   Leave your existing qBittorrent entry in place — this is additive.
+   SABnzbd stays configured as the Usenet client; both can be enabled at once.
 
 6. **(+ local DNS)** Same optional `.lan` domain steps as the Lidarr example above, using
    `decypharr.lan` → `172.20.0.7`.

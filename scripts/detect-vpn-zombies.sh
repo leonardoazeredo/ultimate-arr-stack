@@ -38,7 +38,7 @@ GLUETUN_ID=$(docker inspect --format '{{.Id}}' gluetun 2>/dev/null) || {
 # Must list every container with network_mode: "service:gluetun" or
 # "container:gluetun" across all compose files — grep for that pattern when
 # adding a new VPN-tunneled service, this list doesn't derive itself.
-DEPENDENTS=(qbittorrent sabnzbd prowlarr flaresolverr vpn-socks5 magnetio-addon)
+DEPENDENTS=(sabnzbd prowlarr flaresolverr vpn-socks5 magnetio-addon)
 zombies=()
 
 for c in "${DEPENDENTS[@]}"; do
@@ -72,7 +72,7 @@ done
 # this into a grep.
 compose_file_for() {
     case "$1" in
-        qbittorrent|sabnzbd|prowlarr|flaresolverr|vpn-socks5) echo "docker-compose.arr-stack.yml" ;;
+        sabnzbd|prowlarr|flaresolverr|vpn-socks5) echo "docker-compose.arr-stack.yml" ;;
         magnetio-addon)                                      echo "docker-compose.magnetio.yml" ;;
         *)                                                   echo "" ;;
     esac

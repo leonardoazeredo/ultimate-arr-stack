@@ -132,7 +132,7 @@ lan_name_count() {
     run check_domains
     assert_success
     for name in jellyfin seerr jellyseerr sonarr radarr prowlarr bazarr \
-                qbit sabnzbd traefik pihole uptime duc beszel stremio; do
+                sabnzbd traefik pihole uptime duc beszel stremio; do
         grep -q " $name.lan " "$DIG_LOG" || {
             echo "never queried: $name.lan"; cat "$DIG_LOG"; return 1
         }

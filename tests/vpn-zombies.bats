@@ -37,7 +37,6 @@ EOF
 @test "detect-vpn-zombies reports clean when every dependent shares gluetun's current netns" {
     run bash -c "
         $(stub_docker current-id '
-            qbittorrent) echo "container:current-id" ;;
             sabnzbd) echo "container:current-id" ;;
             prowlarr) echo "container:current-id" ;;
             flaresolverr) echo "container:current-id" ;;
@@ -53,7 +52,6 @@ EOF
 @test "detect-vpn-zombies flags vpn-socks5 specifically when it's bound to a stale gluetun ID" {
     run bash -c "
         $(stub_docker current-id '
-            qbittorrent) echo "container:current-id" ;;
             sabnzbd) echo "container:current-id" ;;
             prowlarr) echo "container:current-id" ;;
             flaresolverr) echo "container:current-id" ;;
@@ -73,7 +71,7 @@ EOF
     # restart outright ("No such container"). Confirmed live 2026-08-27.
     assert_output --partial "docker compose -f docker-compose.arr-stack.yml up -d --force-recreate"
     refute_output --partial "Fix: docker restart"
-    refute_output --partial "qbittorrent"
+    refute_output --partial "sabnzbd"
 }
 
 @test "detect-vpn-zombies maps every dependent to a compose file" {
@@ -154,7 +152,6 @@ EOF
 @test "detect-vpn-zombies skips a dependent docker inspect can't find rather than crashing" {
     run bash -c "
         $(stub_docker current-id '
-            qbittorrent) echo "container:current-id" ;;
             sabnzbd) return 1 ;;
             prowlarr) echo "container:current-id" ;;
             flaresolverr) echo "container:current-id" ;;

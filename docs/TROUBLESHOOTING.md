@@ -56,7 +56,7 @@ cp .env ".env.bak-$(date +%Y%m%d-%H%M%S)"          # .env is gitignored — edit
 sed -i 's/^VPN_COUNTRIES=United Kingdom$/VPN_COUNTRIES=Netherlands/' .env
 
 # Recreate gluetun AND every container sharing its network namespace
-# (sonarr, radarr, prowlarr, qbittorrent, sabnzbd, flaresolverr — all bounce together)
+# (sabnzbd, prowlarr, flaresolverr, vpn-socks5 — all bounce together)
 docker compose -f docker-compose.arr-stack.yml up -d
 
 # Verify the new exit + that the indexer is reachable again
@@ -69,13 +69,13 @@ echo "$DEF" | python3 -c 'import sys,json;d=json.load(sys.stdin);d["enable"]=Fal
 echo "$DEF" | curl -s -X PUT "http://localhost:9696/api/v1/indexer/3?apikey=$PK" -H "Content-Type: application/json" -d @-
 ```
 
-Surfshark's WireGuard key is account-wide, so changing only `VPN_COUNTRIES` is enough — gluetun picks a server in the new country with the same key. No new config from Surfshark is needed. The VPN only covers the download stack (qBittorrent/usenet/indexers/`*arr`), **not** Jellyfin, so a non-UK exit has no downside for playback. Leave it on a non-blocking country (e.g. Netherlands) to avoid recurrence; revert with the `.env` backup if ever needed.
+Surfshark's WireGuard key is account-wide, so changing only `VPN_COUNTRIES` is enough — gluetun picks a server in the new country with the same key. No new config from Surfshark is needed. The VPN only covers the tunneled services (usenet, indexer scraping, Prowlarr, FlareSolverr), **not** Jellyfin or Decypharr, so a non-UK exit has no downside for playback. Leave it on a non-blocking country (e.g. Netherlands) to avoid recurrence; revert with the `.env` backup if ever needed.
 
 > **Diagnostic gotcha — Prowlarr masks API keys.** `GET /api/v1/indexer/<id>` returns indexer secrets as a short placeholder, **not** the real key. If you curl an indexer's newznab API directly using that masked value you'll get `<error code="102" description="Empty API Key"/>` and zero results — which looks like a dead indexer but isn't. Prowlarr's own searches use the real key (32 chars for NZBgeek). Read the real value from `prowlarr.db` (`Indexers.Settings` JSON) before testing by hand, or just trust Prowlarr's search rather than a manual curl.
 
 ## Indexers: All Slow / Intermittently Failing (Throttled VPN Exit Server)
 
-**Symptom:** Searches feel broken but nothing is hard-down. An interactive search or `GET /api/v1/search` takes **~50s** instead of a second or two. Per-indexer tests are slow (10s+) or return **HTTP 500**, and the slowness hits *everything* riding the tunnel at once — including reliable paid indexers like NZBgeek that should never be slow. Crucially, this is **not** a 451/legal block, and `GET /api/v1/indexerstatus` may show **0 failures** because nothing has crossed the 6-hour auto-disable threshold yet. The web UIs of VPN-protected services (Prowlarr/qBittorrent) also feel laggy and jittery (response times jumping 10ms → 4s).
+**Symptom:** Searches feel broken but nothing is hard-down. An interactive search or `GET /api/v1/search` takes **~50s** instead of a second or two. Per-indexer tests are slow (10s+) or return **HTTP 500**, and the slowness hits *everything* riding the tunnel at once — including reliable paid indexers like NZBgeek that should never be slow. Crucially, this is **not** a 451/legal block, and `GET /api/v1/indexerstatus` may show **0 failures** because nothing has crossed the 6-hour auto-disable threshold yet. The web UIs of VPN-protected services (Prowlarr/SABnzbd) also feel laggy and jittery (response times jumping 10ms → 4s).
 
 This can masquerade as unrelated problems: a `*.lan` service like `seerr.lan` "feeling slow" is **not** caused by this (that path is local and never touches the VPN) — but *triggering a search/request inside Jellyseerr* is, because that call fans out seerr → Sonarr/Radarr → Prowlarr → tunnel.
 
@@ -109,14 +109,14 @@ docker exec gluetun wget -qO- https://ipinfo.io/ip
 # REQUIRED: restart every container sharing gluetun's network namespace.
 # Restarting gluetun alone severs their networking — they go dead (empty/000 responses)
 # until bounced too.
-docker restart prowlarr qbittorrent          # add sabnzbd/sonarr/radarr/bazarr if they share the netns
+docker restart prowlarr sabnzbd flaresolverr vpn-socks5   # every container sharing gluetun's netns
 ```
 
 Re-run the aggregate search to confirm it's back to ~1-2s. (Observed 2026-06-19: a throttled NL server gave a 54s search with two indexers at HTTP 500; `docker restart gluetun` + bouncing the dependents dropped it to **1.2s**, no config change.) If the new server is *also* slow, restart gluetun again to roll the dice on another. Only switch `VPN_COUNTRIES` (the section above) if you actually see HTTP 451 — that's a different problem.
 
 ## Apps Unreachable After a VPN Reconnect (Stale Network Namespace)
 
-> **Note (v1.7.23):** Sonarr and Radarr were moved off the VPN onto the bridge, so they are **no longer affected** by this — a gluetun restart can't strand them. This section now applies only to the remaining VPN-bound apps: **qBittorrent, SABnzbd, Prowlarr, FlareSolverr**.
+> **Note (v1.7.23):** Sonarr and Radarr were moved off the VPN onto the bridge, so they are **no longer affected** by this — a gluetun restart can't strand them. This section now applies only to the remaining VPN-bound apps: **SABnzbd, Prowlarr, FlareSolverr, vpn-socks5**.
 
 **Symptom:** After gluetun restarts (VPN reconnect, server switch, or container recreate), some VPN-bound apps go unreachable from the rest of the stack even though `docker ps` shows them **Up (healthy)**. Classic tells: Prowlarr reporting FlareSolverr down, or Sonarr/Radarr unable to reach their download clients (grabs not starting). The affected container answers fine on its own `localhost` but refuses connections from anything else.
 
@@ -132,7 +132,7 @@ The second case is the nasty one: everything *looks* fine. `deunhealth` won't to
 ```bash
 # Any dependent started BEFORE gluetun is a stale zombie:
 g=$(docker inspect -f '{{.State.StartedAt}}' gluetun | cut -c1-19); echo "gluetun: $g"
-for c in qbittorrent sabnzbd prowlarr flaresolverr; do
+for c in sabnzbd prowlarr flaresolverr vpn-socks5; do
   echo "  $c: $(docker inspect -f '{{.State.StartedAt}}' $c | cut -c1-19)"
 done
 # Confirm reachability through the shared namespace:
@@ -140,7 +140,7 @@ docker exec seerr   wget -qO- http://gluetun:9696/ping   # prowlarr -> {"status"
 docker exec prowlarr wget -qO- http://127.0.0.1:8191/    # flaresolverr -> "ready" (use 127.0.0.1, it's IPv4-only)
 
 # Manual recovery (gluetun-recover does this automatically):
-docker restart qbittorrent sabnzbd prowlarr flaresolverr   # or whichever started before gluetun
+docker restart sabnzbd prowlarr flaresolverr vpn-socks5   # or whichever started before gluetun
 ```
 
 `./scripts/detect-vpn-zombies.sh` automates the check above — it compares each dependent's `network_mode` binding against Gluetun's *current* container ID and prints exactly which ones are stale, plus the correct recovery command for each. It's also exercised as `tests/e2e/resilience.spec.ts` in the Playwright suite. Run it any time you suspect a zombie, or on a schedule via cron/SSH.
@@ -174,15 +174,15 @@ Error response from daemon: ... joining network namespace of container <old-id>:
 
 ```bash
 cd /volume1/docker/arr-stack
-# Five of the six dependents live here; --force-recreate because compose will
+# Four of the five dependents live here; --force-recreate because compose will
 # otherwise consider an "Up" (but zombie) container already up-to-date:
 docker compose -f docker-compose.arr-stack.yml up -d --force-recreate \
-    qbittorrent sabnzbd prowlarr flaresolverr vpn-socks5
+    sabnzbd prowlarr flaresolverr vpn-socks5
 # magnetio-addon is defined in a DIFFERENT file and must go through it:
 docker compose -f docker-compose.magnetio.yml up -d --force-recreate magnetio-addon
 ```
 
-**Don't stop at the arr-stack file.** `vpn-socks5` and `magnetio-addon` are tunneled dependents too, and `magnetio-addon` is defined in `docker-compose.magnetio.yml` — recreating only the four "obvious" apps leaves the other two as zombies that still look healthy. `./scripts/detect-vpn-zombies.sh` prints the correct per-file commands for exactly the containers it found; prefer its output over any list written here, which can go stale.
+**Don't stop at the arr-stack file.** `vpn-socks5` and `magnetio-addon` are tunneled dependents too, and `magnetio-addon` is defined in `docker-compose.magnetio.yml` — recreating only the three "obvious" apps leaves the other two as zombies that still look healthy. `./scripts/detect-vpn-zombies.sh` prints the correct per-file commands for exactly the containers it found; prefer its output over any list written here, which can go stale.
 
 Run `./scripts/detect-vpn-zombies.sh` afterward to confirm every dependent now binds to Gluetun's *new* container ID rather than the old one — this is the exact scenario it's built to catch.
 

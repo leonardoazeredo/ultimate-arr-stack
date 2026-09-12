@@ -55,16 +55,6 @@
           key: "{{HOMEPAGE_VAR_BAZARR_API_KEY}}"
 
 - Downloads:
-    - qBittorrent:
-        icon: qbittorrent.png
-        href: http://qbit.lan
-        description: Torrent client (VPN-protected)
-        widget:
-          type: qbittorrent
-          url: http://gluetun:8085
-          username: "{{HOMEPAGE_VAR_QBITTORRENT_USER}}"
-          password: "{{HOMEPAGE_VAR_QBITTORRENT_PASS}}"
-
     - SABnzbd:
         icon: sabnzbd.png
         href: http://sabnzbd.lan

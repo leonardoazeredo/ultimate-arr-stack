@@ -29,13 +29,6 @@ mutation failing-get-leaks-the-error-body \
   --why "makes a failing GET print the body. Every GET call site is x=\$(api_get ...) feeding json_extract, so an HTML error page would be captured as if it were the resource - and json_extract swallows its own parse errors, so the caller sees an empty answer rather than a failure" \
   --apply 'perl -0pi -e "s/    if \[\[ \\\"\\\$method\\\" != \\\"GET\\\" \]\]; then\n        echo \\\"\\\$body\\\"\n    fi\n/    echo \\\"\\\$body\\\"\n/" "$F"'
 
-mutation qbit-auth-trusts-the-status-code \
-  --file scripts/lib/configure-helpers.sh \
-  --bats tests/lib-configure-helpers.bats \
-  --test "configure-helpers: qbit_auth rejects a 200 whose body is a refusal" \
-  --why "drops the body half of the check. qBittorrent answers a WRONG PASSWORD with HTTP 200 and the body 'Fails.', so a status-only check reports a successful login and hands every later call a cookie that authenticates nothing" \
-  --apply 'sed -i "s@if \[\[ \"\$http_code\" != \"200\" \]\] || \[\[ \"\$body\" != \"Ok.\" \]\]; then@if [[ \"\$http_code\" != \"200\" ]]; then@" "$F"'
-
 mutation wait-accepts-any-http-code \
   --file scripts/lib/configure-helpers.sh \
   --bats tests/lib-configure-helpers.bats \
@@ -54,13 +47,6 @@ mutation wait-unbounded-per-attempt \
 # The 250-line half of this file, and the only part of it that writes. Each
 # entry below is one section of it losing the check that makes the script's
 # "safe to re-run" claim true.
-
-mutation arr-download-client-match-case-sensitive \
-  --file scripts/lib/configure-helpers.sh \
-  --bats tests/lib-configure-helpers.bats \
-  --test "configure-helpers: the download-client match is case-insensitive on the name" \
-  --why "compares the existing client's name case-sensitively. The *arr UI title-cases what the user typed, so an existing QBittorrent no longer matches and a second copy of the same client is added on every run - the same defect the ok/skip split exists to prevent" \
-  --apply 'sed -i "s@c.get(.name.,..).lower() == .qbittorrent.@c.get(\x27name\x27,\x27\x27) == \x27qBittorrent\x27@" "$F"'
 
 mutation arr-category-field-always-tv \
   --file scripts/lib/configure-helpers.sh \

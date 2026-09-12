@@ -10,7 +10,7 @@ mutation compose-download-client-outside-vpn \
   --file docker-compose.arr-stack.yml \
   --bats tests/compose-validation.bats \
   --test "every BitTorrent or Usenet client runs inside gluetun's namespace" \
-  --why "removes qbittorrent's gluetun binding, which is the first occurrence of the line in this file. The service keeps its ports and its volumes, comes up healthy, and downloads through the house's own address instead of the tunnel: every other test in this file passes, and the swarm sees the IP the VPN exists to hide" \
+  --why "removes SABnzbd's gluetun binding, which is the first occurrence of the line in this file. The container keeps its volumes and still comes up healthy, because its healthcheck only ever curls its own localhost - so nothing but this assertion notices, and the usenet provider sees the IP the VPN exists to hide" \
   --apply 'perl -0pi -e "s/    network_mode: \\\"service:gluetun\\\"\n//" "$F"'
 
 mutation compose-project-name-unpinned \

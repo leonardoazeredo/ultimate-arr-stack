@@ -44,7 +44,6 @@ Jellyfin
 Seerr
 Pi-hole
 Prowlarr
-qBittorrent
 Radarr
 Sonarr
 Traefik'

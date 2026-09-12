@@ -94,10 +94,10 @@ created_networks() {
 }
 
 @test "check-network: a network with containers names them and is never offered for removal" {
-    exists_with vpn-net "gluetun qbittorrent "
+    exists_with vpn-net "gluetun sabnzbd "
     run "$DRIVER" check_one_network vpn-net
     assert_success
-    assert_output --partial "vpn-net exists with containers: gluetun qbittorrent"
+    assert_output --partial "vpn-net exists with containers: gluetun sabnzbd"
     refute_output --partial "orphaned"
     assert_nothing_forbidden
 }

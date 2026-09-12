@@ -73,7 +73,7 @@ services:
       # Generate with: htpasswd -nbB admin 'YOUR_PASSWORD'
       - "traefik.http.middlewares.dashboard-auth.basicauth.users=${TRAEFIK_DASHBOARD_AUTH}"
 
-      # Local admin-UI authentication (Sonarr/Radarr/Prowlarr/qBittorrent/
+      # Local admin-UI authentication (Sonarr/Radarr/Prowlarr/
       # Bazarr/SABnzbd/Pi-hole/Uptime Kuma/duc/Beszel/traefik.lan - see
       # traefik/dynamic/local-services.yml's `-secure` routers). Defined as
       # a docker-provider label (not in the file-provider dynamic/ configs)
