@@ -1,0 +1,28 @@
+[Unit]
+Description=Remove stuck Sonarr/Radarr queue items and re-search what was removed
+Documentation=file:/volume1/docker/arr-stack/scripts/queue-cleanup.sh
+
+# The detector this replaces was written in this repo and never scheduled, on
+# any host, from the day it was added -- which is the only reason 67 items sat
+# at 0% for a month while every individual piece of the pipeline worked. A
+# cleanup that only runs when someone remembers to run it is not a guard.
+
+[Service]
+Type=oneshot
+
+# SONARR_API_KEY / RADARR_API_KEY, and HA_WEBHOOK_URL when set. The script
+# reads them through lib/env-file.sh rather than as exported environment, but
+# supplying the file here is what makes the unit self-contained -- no shell
+# profile, no cron PATH.
+EnvironmentFile=/volume1/docker/arr-stack/.env
+
+# The script appends its own run header and trims the file at 1,000 lines; the
+# directory is not in git, so it has to exist before the redirect opens.
+ExecStartPre=/bin/mkdir -p /volume1/docker/arr-stack/logs
+
+# append: rather than the journal, so the record of what was removed survives
+# alongside the log the script already trims. journalctl also has it.
+StandardOutput=append:/volume1/docker/arr-stack/logs/queue-cleanup.log
+StandardError=append:/volume1/docker/arr-stack/logs/queue-cleanup.log
+
+ExecStart=/bin/bash /volume1/docker/arr-stack/scripts/queue-cleanup.sh --apply

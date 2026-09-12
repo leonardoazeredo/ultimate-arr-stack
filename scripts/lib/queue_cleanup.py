@@ -5,6 +5,21 @@ heredoc until 2026-09-01. The pure parts -- the stuck classifier, the URL
 builder, the search-payload shape -- are lifted out so they can be imported and
 tested, and every side effect (HTTP, the clock, the inter-delete sleep) is
 injected so a test can never reach a live Sonarr or Radarr.
+
+Two behaviours below exist for one failure mode, found live on 2026-09-12. A
+debrid client (TorBox, behind Decypharr) failed to resolve a download link,
+gave up, and told nobody: the arr kept the item at 0% "downloading" for a
+month, and because a queue item at the cutoff makes Sonarr reject every
+candidate with "Release in queue already meets cutoff", it could not replace
+one either. 67 items sat in that loop. Removing the item breaks it, and both
+details below are about making the replacement actually happen:
+
+  * A stale item from a debrid client is not blocklisted. The release is fine,
+    the provider failed. Blocklisting it forces a different release that the
+    provider may not have cached, which fails the same way and repeats.
+  * Searches are paced, and aimed at the episodes that were removed rather
+    than at the whole series. A burst of searches answers 429 from the
+    indexer, and Sonarr then disables that indexer for the rest of the run.
 """
 
 import json
@@ -20,6 +35,22 @@ PAGE_SIZE = 50
 # looping forever, not to ration real work. Hitting it is reported, never
 # silent -- a truncation nobody is told about reads as a complete run.
 MAX_PAGES = 100
+
+# How long to wait between search commands. Each one costs indexer requests,
+# and a burst is not free: on 2026-09-12 a run of back-to-back searches got
+# `429 Too Many Requests` from LimeTorrents through Prowlarr, and Sonarr then
+# disabled that indexer outright. The rest of that run reported "0 active
+# indexers" for every search -- items removed, nothing found to replace them,
+# and the indexer down for the following hour.
+SEARCH_INTERVAL_SECONDS = 30
+
+# Debrid clients do the torrenting somewhere else and hand this host an HTTPS
+# link. A download that never starts through one of them failed at link
+# resolution on the provider's side, which is a different thing from a torrent
+# with no peers, and it is why the blocklist rule below is conditional. Matched
+# against the name the operator gave the client in the arr, which is the only
+# signal a queue record carries about who is downloading it.
+DEBRID_CLIENT_PATTERNS = ("decypharr", "torbox", "debrid")
 
 
 def build_url(port, path, key):
@@ -44,7 +75,15 @@ class ArrApi:
         )
         if result.returncode != 0:
             return None
-        return json.loads(result.stdout)
+        try:
+            return json.loads(result.stdout)
+        except json.JSONDecodeError:
+            # A 200 carrying something that is not JSON -- an HTML error page
+            # from whatever sits in front of the arr, or an empty body. The
+            # caller already reads None as "could not fetch the queue" and says
+            # so; raising here instead would abort the run with a traceback and
+            # take the other service's cleanup with it.
+            return None
 
     def delete(self, port, path, key):
         result = subprocess.run(
@@ -96,6 +135,68 @@ def search_payload(svc, target_id):
     if svc["search_key"] == "movieIds":
         return {"name": svc["search_cmd"], svc["search_key"]: [target_id]}
     return {"name": svc["search_cmd"], svc["search_key"]: target_id}
+
+
+def target_search(svc, target_id, removed_episodes):
+    """The search command for one removal target, and the label to log it by.
+
+    For Sonarr, searching the series would re-search every missing episode of
+    it -- dozens of indexer requests to replace one stuck episode, and the
+    indexer answers 429 long before that finishes. When the queue record named
+    its episodes, search exactly those. Radarr's MoviesSearch is already
+    per-film, and a Sonarr record carrying no episode ids (which the API does
+    not normally produce) falls back to the series search.
+    """
+    episodes = sorted(removed_episodes)
+    if episodes and svc["search_key"] == "seriesId":
+        return ({"name": "EpisodeSearch", "episodeIds": episodes},
+                f"episodeIds={','.join(str(episode) for episode in episodes)}")
+    return search_payload(svc, target_id), f"{svc['id_field']}={target_id}"
+
+
+def is_debrid_client(record):
+    """Whether the arr handed this download to a debrid provider.
+
+    Matched against the client name the operator configured, because that name
+    is the only thing a queue record says about where the bytes come from.
+    """
+    client = (record.get("downloadClient") or "").lower()
+    return any(pattern in client for pattern in DEBRID_CLIENT_PATTERNS)
+
+
+def should_blocklist(record, reason_type):
+    """Whether the release behind a stuck item should be blacklisted.
+
+    A dead torrent on a swarm client: yes. The same release is still dead the
+    next time, which is what the blocklist is for. A stale item that never
+    started through a debrid client: no. There the release is fine and the
+    provider failed, so the replacement search has to be free to pick that
+    same release again -- blocklisting it forces a different one, which the
+    provider may not have cached, which fails the same way.
+
+    Only `stale` is exempted. A blocked or failing import is about the files,
+    not about who downloaded them, and is blocklisted as before.
+    """
+    if reason_type == "stale" and is_debrid_client(record):
+        return False
+    return True
+
+
+def episode_ids(record):
+    """Every episode id on a queue record, deduped and sorted.
+
+    Sonarr puts one id in `episodeId` and the full list in `episodes`; a
+    season pack carries many, and the same id can sit in both. Sorted so the
+    search payload it generates is stable between runs.
+    """
+    ids = set()
+    single = record.get("episodeId")
+    if isinstance(single, int):
+        ids.add(single)
+    for episode in record.get("episodes") or []:
+        if isinstance(episode, dict) and isinstance(episode.get("id"), int):
+            ids.add(episode["id"])
+    return tuple(sorted(ids))
 
 
 def _age_hours(added_str, now):
@@ -230,26 +331,31 @@ def process_service(svc, api, apply_changes, verbose, out=print,
 
     out(f"  Found {len(stuck_items)} stuck item(s):")
 
-    search_targets = set()
+    search_targets = {}
     removed_count = 0
 
     for record, reason_type, reason_msg in stuck_items:
         title = record.get("title", "unknown")[:70]
         qid = record.get("id")
         target_id = record.get(svc["id_field"])
+        episodes = episode_ids(record)
 
         if apply_changes:
+            blocklist = should_blocklist(record, reason_type)
             success = api.delete(
                 svc["port"],
-                f"/api/v3/queue/{qid}?removeFromClient=true&blocklist=true",
+                f"/api/v3/queue/{qid}?removeFromClient=true&blocklist={str(blocklist).lower()}",
                 svc["key"]
             )
             if success:
                 out(f"  ✓ Removed: {title}")
                 out(f"    Reason: {reason_msg}")
+                if not blocklist:
+                    out(f"    Not blocklisted: {record.get('downloadClient', 'the client')}"
+                        f" does the downloading, so the release is still usable")
                 removed_count += 1
                 if target_id:
-                    search_targets.add(target_id)
+                    search_targets.setdefault(target_id, set()).update(episodes)
                 sleep(0.5)
             else:
                 out(f"  ✗ Failed to remove: {title}")
@@ -258,7 +364,7 @@ def process_service(svc, api, apply_changes, verbose, out=print,
             out(f"    Reason: {reason_msg}")
             removed_count += 1
             if target_id:
-                search_targets.add(target_id)
+                search_targets.setdefault(target_id, set()).update(episodes)
 
         if verbose:
             pct = 0
@@ -272,14 +378,19 @@ def process_service(svc, api, apply_changes, verbose, out=print,
     if search_targets:
         action = "Triggering" if apply_changes else "Would trigger"
         out(f"\n  {action} searches for {len(search_targets)} {svc['name'].lower()} item(s):")
-        for target_id in sorted(search_targets):
-            payload = search_payload(svc, target_id)
+        targets = sorted(search_targets)
+        for position, target_id in enumerate(targets):
+            payload, label = target_search(svc, target_id, search_targets[target_id])
             if apply_changes:
                 success = api.post_json(svc["port"], "/api/v3/command", svc["key"], payload)
                 status = "queued" if success else "FAILED"
-                out(f"    ✓ Search {svc['id_field']}={target_id}: {status}")
+                out(f"    ✓ Search {label}: {status}")
+                # Nothing to wait for after the last one, and in a dry run
+                # there is no request to space out.
+                if position < len(targets) - 1:
+                    sleep(SEARCH_INTERVAL_SECONDS)
             else:
-                out(f"    [dry-run] Search {svc['id_field']}={target_id}")
+                out(f"    [dry-run] Search {label}")
 
     return removed_count, len(search_targets)
 

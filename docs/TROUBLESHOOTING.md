@@ -579,3 +579,56 @@ ssh -vv user@your-nas.local 'exit' 2>&1 | grep 'kex: algorithm'
 
 **UGOS resilience:** The `sshd_config.d/` drop-in directory is less likely to be wiped than the main config (same principle as using `@reboot` crontab instead of `/etc/rc.local`). If a UGOS update does remove it, you'll just see the warning again — nothing breaks. The client-side config on your Mac is completely UGOS-proof.
 
+
+## Downloads: Queue Items Sit at 0% Forever and Nothing Re-Grabs Them
+
+**Symptom:** Sonarr's queue fills with items that never move. `sizeleft` equals
+`size`, the added date is weeks old, and Status is `warning` while
+`trackedDownloadStatus` is `ok` — so nothing in the queue reads as an error.
+New releases still download fine, which is what makes it look like an indexer
+or bandwidth problem rather than a stuck queue.
+
+**Cause:** two failures stacked. The download client (Decypharr, pulling from
+TorBox) failed to resolve a download link, logged
+`Error running post-download action`, and stopped — without telling Sonarr.
+Sonarr then treats the item as still downloading, and because a queue item at
+the cutoff makes it reject every candidate with `Release in queue already meets
+cutoff: <quality>`, it cannot replace the item either. The episode is stuck in
+both directions until the queue entry is removed.
+
+**Diagnose:**
+
+```bash
+# The queue item: sizeleft == size, weeks old
+curl -s -H "X-Api-Key: $SONARR_API_KEY" \
+  'http://localhost:8989/api/v3/queue?pageSize=500' \
+  | jq '.records[] | select(.sizeleft == .size) | {id, title, added, downloadClient}'
+
+# Why the searches are finding nothing: every release is rejected by the item
+# that is already (not) downloading
+curl -s -H "X-Api-Key: $SONARR_API_KEY" \
+  'http://localhost:8989/api/v3/release?seriesId=8&episodeId=437' | jq '.[0].rejections'
+
+# And the client's side of it
+docker logs --since 24h decypharr 2>&1 | grep -E "Error running post-download|no valid download links"
+```
+
+**Fix:** remove the stuck item and let the arr search again —
+`./scripts/queue-cleanup.sh --apply` does exactly that (dry run first). On
+2026-09-12 this cleared 67 items that had been stuck since mid-August; the
+first re-grabbed episode imported 31 seconds after the grab.
+
+**Do not blocklist these.** For a debrid client the release is fine and the
+provider failed, so blocking it forbids the one release the provider is known
+to have cached. `queue_cleanup.py` skips the blocklist for a stale item whose
+`downloadClient` looks like a debrid provider, and paces the replacement
+searches 30 seconds apart — a burst answers `429` and Sonarr disables the
+indexer for the rest of the run.
+
+**Prevention:** `queue-cleanup.timer` (every 6 hours). It shipped as a
+"suggested cron line" in a comment and was never installed anywhere, which is
+how a month went by with the fix sitting in the repo. Check it is armed:
+
+```bash
+systemctl --user list-timers queue-cleanup.timer
+```
