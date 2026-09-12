@@ -872,3 +872,61 @@ def test_a_malformed_200_is_a_failed_fetch_not_a_traceback(monkeypatch):
     monkeypatch.setattr(m.subprocess, "run",
                         FakeRun(returncode=0, stdout="<html>nope</html>"))
     assert m.ArrApi().get(8989, "/api/v3/queue", "KEY") is None
+
+
+# --- the age leash: two thresholds, and which record gets which -----------
+#
+# A debrid client either resolves a link in seconds or it never will, so a
+# three-hour silence is a failure. A swarm client that has found no peers yet
+# may still find some, so it keeps the day-long rule. These pin the split, the
+# boundary on the short side, and the two client names that must NOT get the
+# short leash.
+
+def test_a_debrid_item_goes_stale_after_three_hours_not_twenty_four():
+    assert m.is_stuck(debrid(size=100, added=ago(2)), NOW)[0] is None
+    kind, why = m.is_stuck(debrid(size=100, added=ago(4)), NOW)
+    assert kind == "stale"
+    # The reason still reports the measured age with its own wording -- the
+    # message is what an operator reads to decide whether the threshold is
+    # right, and "4h" is the evidence for it.
+    assert why == "0% progress for 4h"
+
+
+def test_the_debrid_boundary_is_strictly_greater_than_three_hours():
+    # `> 3` and `>= 3` differ only at exactly three hours.
+    assert m.is_stuck(debrid(size=100, added=ago(3)), NOW)[0] is None
+    assert m.is_stuck(debrid(size=100, added=ago(3.5)), NOW)[0] == "stale"
+
+
+def test_a_swarm_client_keeps_the_twenty_four_hour_rule():
+    # Five hours of silence from a torrent client is ordinary. Deleting on the
+    # debrid threshold here would remove healthy swarm downloads and blocklist
+    # releases that were never the problem.
+    assert m.is_stuck(rec(downloadClient="qBittorrent", size=100, sizeleft=100,
+                          added=ago(5)), NOW)[0] is None
+    assert m.is_stuck(rec(downloadClient="qBittorrent", size=100, sizeleft=100,
+                          added=ago(25)), NOW)[0] == "stale"
+
+
+def test_a_usenet_client_keeps_the_twenty_four_hour_rule():
+    # This stack's usenet client is named "SABnzbd (TorBox Usenet)", so the
+    # debrid pattern matches it. is_debrid_client excludes usenet first, and
+    # the short leash is the second thing that would get it wrong.
+    for client in ("SABnzbd (TorBox Usenet)", "NZBGet"):
+        assert m.is_stuck(rec(downloadClient=client, size=100, sizeleft=100,
+                              added=ago(5)), NOW)[0] is None
+
+
+def test_the_sizeless_debrid_arm_uses_the_shorter_threshold_too():
+    # Two arms, two copies of the comparison. Changing only the first leaves a
+    # metadata-only debrid item waiting a day -- the exact record shape a
+    # debrid client produces when it cannot resolve anything at all.
+    kind, why = m.is_stuck(debrid(size=0, sizeleft=0, added=ago(4)), NOW)
+    assert kind == "stale"
+    assert why == "no size info for 4h"
+
+
+def test_a_record_with_no_client_name_is_treated_as_a_swarm_client():
+    # The default has to be the cautious one: an unrecognised client getting
+    # the three-hour leash would delete real downloads.
+    assert m.is_stuck(rec(size=100, sizeleft=100, added=ago(5)), NOW)[0] is None

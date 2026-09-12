@@ -647,7 +647,10 @@ to have cached. `queue_cleanup.py` skips the blocklist for a stale item whose
 searches 30 seconds apart — a burst answers `429` and Sonarr disables the
 indexer for the rest of the run.
 
-**Prevention:** `queue-cleanup.timer` (every 6 hours). It shipped as a
+**Prevention:** `queue-cleanup.timer` (hourly). A debrid-backed item is
+called dead after 3 hours of no progress rather than the 24-hour rule a swarm
+client gets, so the sweep is set to run faster than the shortest threshold it
+enforces. It shipped as a
 "suggested cron line" in a comment and was never installed anywhere, which is
 how a month went by with the fix sitting in the repo. Check it is armed:
 

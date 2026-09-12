@@ -52,6 +52,22 @@ SEARCH_INTERVAL_SECONDS = 30
 # signal a queue record carries about who is downloading it.
 DEBRID_CLIENT_PATTERNS = ("decypharr", "torbox", "debrid")
 
+# How long a 0%-progress download is given before it is called dead. The two
+# numbers differ because the waits behind them differ.
+#
+# A debrid client resolves a cached release in seconds and tells the arr it is
+# done; an uncached one is fetched on the provider's own servers in minutes.
+# Three hours of 0% through one of them is not slowness, it is the
+# link-resolution failure this script exists for -- and 24 hours was too
+# patient to notice it. On 2026-09-12 the stuck items were 9 hours old, none of
+# them would have been looked at until the next day, and each one was blocking
+# its episode through Sonarr's "Release in queue already meets cutoff".
+#
+# A swarm client is the opposite case: a torrent with no peers yet can still
+# find seeders, so age alone is weak evidence there, and 24 hours stays.
+STALE_HOURS_DEBRID = 3
+STALE_HOURS_DEFAULT = 24
+
 # Usenet clients are named after their provider here too ("SABnzbd (TorBox
 # Usenet)"), so the debrid patterns match them and the exemption below would
 # cover a class of failure it was never meant to cover.
@@ -268,15 +284,20 @@ def is_stuck(record, now=None):
     if "downloading metadata" in error_msg:
         return "metadata", "stuck downloading metadata"
 
-    # Age-based: 0% progress for 24+ hours
+    # Age-based. The leash is shorter for a debrid client: it either resolves a
+    # link in seconds or it never will, so 0% for three hours is a failure
+    # rather than slowness. A swarm client keeps the 24-hour rule, where a
+    # torrent that has found no peers yet may still find some.
+    stale_hours = (STALE_HOURS_DEBRID if is_debrid_client(record)
+                   else STALE_HOURS_DEFAULT)
     if size > 0 and sizeleft == size:
         age_hours = _age_hours(record.get("added", ""), now)
-        if age_hours is not None and age_hours > 24:
+        if age_hours is not None and age_hours > stale_hours:
             return "stale", f"0% progress for {age_hours:.0f}h"
     elif size == 0:
         # No size info at all — likely metadata-only, check age
         age_hours = _age_hours(record.get("added", ""), now)
-        if age_hours is not None and age_hours > 24:
+        if age_hours is not None and age_hours > stale_hours:
             return "stale", f"no size info for {age_hours:.0f}h"
 
     return None, None

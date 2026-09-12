@@ -104,12 +104,30 @@ setup() {
     assert_success
 }
 
-@test "queue-cleanup timer fires faster than the 24-hour staleness threshold" {
-    # The script only removes an item that has made no progress for 24 hours.
-    # A timer that fires less often than that leaves a stuck item in place for
-    # at least two days -- and blocks every replacement search for it the whole
-    # time, which is the part that actually hurt.
-    local hours
-    hours=$(grep '^OnUnitActiveSec=' "$UNITS_DIR/queue-cleanup.timer" | sed 's/^OnUnitActiveSec=//')
-    [ "$hours" = "6h" ] || fail "expected a 6h interval, got '$hours'"
+@test "queue-cleanup timer fires faster than the shortest staleness threshold" {
+    # The script removes an item that has made no progress for STALE_HOURS_*
+    # (24h for a swarm client, 3h for a debrid one). A timer that fires less
+    # often than that leaves a stuck item in place for the difference -- and
+    # blocks every replacement search for it the whole time, which is the part
+    # that actually hurt.
+    #
+    # Both numbers are read from where they live rather than restated here. The
+    # first version of this test hardcoded 6h against a hardcoded 24, so it
+    # would have kept passing on the day the thresholds stopped agreeing with
+    # it, which is precisely when it needed to fail.
+    local threshold
+    threshold=$(grep -oE '^STALE_HOURS_[A-Z_]+ = [0-9]+' "$REPO_ROOT/scripts/lib/queue_cleanup.py" \
+                | grep -oE '[0-9]+$' | sort -n | head -1)
+    [ -n "$threshold" ] || fail "found no STALE_HOURS_* constants to compare against; this guard would pass by comparing nothing"
+
+    local interval
+    interval=$(grep '^OnUnitActiveSec=' "$UNITS_DIR/queue-cleanup.timer" | sed 's/^OnUnitActiveSec=//')
+    case "$interval" in
+        *h) ;;
+        *) fail "expected an hour-based interval, got '$interval'" ;;
+    esac
+
+    local timer_hours="${interval%h}"
+    [ "$timer_hours" -lt "$threshold" ] \
+        || fail "timer fires every ${interval}, which is not faster than the shortest staleness threshold (${threshold}h)"
 }

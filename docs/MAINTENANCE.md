@@ -134,7 +134,7 @@ Torrents frequently stall (dead seeders, stuck metadata, failed imports). The cl
 ./scripts/queue-cleanup.sh --apply -v
 ```
 
-### Automated (systemd timer, every 6 hours)
+### Automated (systemd timer, hourly)
 
 Install once, as the deploy user — no root:
 
@@ -167,7 +167,10 @@ that would have cleared them was in the repo the whole time, working, unused.
 - Failed imports (downloaded but can't import)
 - Blocked imports (already imported, not an upgrade, missing episodes in pack)
 - Import-pending items with warnings (executable files, quality not accepted)
-- Items at 0% progress for more than 24 hours
+- Items at 0% progress for more than 24 hours, or more than 3 hours
+  when the client is a debrid provider (Decypharr/TorBox) — there a stalled
+  link resolution never recovers on its own, and the item blocks its episode
+  the whole time
 
 Items with **any** download progress are never removed, even if slow.
 
