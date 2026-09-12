@@ -100,8 +100,21 @@ test.describe('stremio-jellyfin', () => {
     expect(streams.length, `no stream resolved for ${item.id} (${item.name})`).toBeGreaterThan(0);
     expect(streams[0].url).toContain('/videos/');
 
-    // Range request, like a player starting playback: 206 plus real bytes means
-    // Jellyfin accepted the token embedded in that URL.
+    // Range request, like a player starting playback.
+    //
+    // What this proves, measured by mutating the addon and watching: it catches
+    // a malformed URL -- a wrong id, a missing mediaSourceId, a path that is not
+    // /videos/ -- because those return 404 or a JSON error rather than bytes.
+    //
+    // What it does NOT prove, and the mutation showed this plainly: the
+    // `api_key` in that URL is not what authorises it. Replacing the token with
+    // a fixed wrong value still returned 206 with real media, as did removing
+    // the parameter entirely. Jellyfin 12 serves `/videos/` to anything that can
+    // reach it, so on this network the token is decoration rather than a gate.
+    // The real gate is network reach, which is why the addon's port not being in
+    // the VLAN20 allow-list mattered, and why routing it through Traefik (which
+    // is allowed) is what made it usable. Do not read this assertion as an
+    // access-control check.
     const media = await request.get(streams[0].url, { headers: { Range: 'bytes=0-1023' }, timeout: 30_000 });
     expect([200, 206]).toContain(media.status());
     const body = await media.body();
