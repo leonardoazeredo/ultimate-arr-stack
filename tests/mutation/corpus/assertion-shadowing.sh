@@ -27,7 +27,7 @@ mutation shadowed-assertion-goes-unnoticed \
   --bats tests/shellcheck.bats \
   --test "no test file sources a unit that shadows a function bats-assert reports through" \
   --why "puts a real bats-assert call back into the one test file that sources a fail-defining library. This is the original defect, verbatim: the assertion is inert, the test reports ok whatever the output says, and nothing in the suite objects. If the guard does not go red here it is not guarding" \
-  --apply 'sed -i "s@^    out_has \"COUNTS 0 5 0\"\$@    assert_output --partial \"COUNTS 0 5 0\"@" "$F"'
+  --apply 'sed -i "s@^    out_has \"COUNTS 0 [0-9]* [0-9]*\"\$@    assert_output --partial \"COUNTS\"@" "$F"'
 
 mutation shadowing-guard-compares-nothing \
   --file tests/shellcheck.bats \
