@@ -124,11 +124,32 @@ GO
 @test "decypharr: the build fails if the patch did not take" {
     # The image-build assertion is the only thing standing between "publish
     # succeeded" and "published an unpatched binary that looks healthy".
-    run grep -q 'zz_local_patch_test.go' "$DOCKERFILE"
+    run grep -q 'verify-patch.sh' "$DOCKERFILE"
     assert_success
-    run grep -q 'go test ./pkg/manager/link/' "$DOCKERFILE"
+    run grep -q 'sh /tmp/verify-patch.sh' "$DOCKERFILE"
+    assert_success
+    run test -x "$REPO_ROOT/decypharr/verify-patch.sh"
     assert_success
     run test -f "$REPO_ROOT/decypharr/patch_test.go"
+    assert_success
+}
+
+@test "decypharr: the gate refuses to build when the patch's tests are absent" {
+    # "go test -run <pattern>" exits 0 reporting "no tests to run" when nothing
+    # matches, so a gate that only ran that would go quiet -- and still pass --
+    # the moment the test file stopped being copied in. Assert the guard exists.
+    run grep -q -- '-list' "$REPO_ROOT/decypharr/verify-patch.sh"
+    assert_success
+    run grep -q "refusing to build" "$REPO_ROOT/decypharr/verify-patch.sh"
+    assert_success
+}
+
+@test "decypharr: the gate would fail against unpatched source" {
+    # The assertion that gives the gate its meaning: it names the 400 test and
+    # requires it to be retryable, which unpatched v2.5 is not.
+    run grep -q "TestProvider400IsRetryable" "$REPO_ROOT/decypharr/verify-patch.sh"
+    assert_success
+    run grep -q "IsRetryable\|ShouldRefetch" "$REPO_ROOT/decypharr/patch_test.go"
     assert_success
 }
 
