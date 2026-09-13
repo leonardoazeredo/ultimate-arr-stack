@@ -559,7 +559,13 @@ services:
   # as the Sonarr/Radarr off-VPN migration, see docs/MIGRATION-arr-off-vpn.md).
   # ═══════════════════════════════════════════════════════════════════════════
   decypharr:
-    image: ghcr.io/sirrobot01/decypharr:v2.5
+    # NOT the upstream image. Upstream v2.5 classifies a bare HTTP 400 from the
+    # provider as a PERMANENT link error, so it retries nothing and the title
+    # sits at 0% until queue-cleanup removes it. This tag is upstream v2.5 plus
+    # the fix from upstream PR #402 (still open), built and published by
+    # .github/workflows/decypharr-image.yml from decypharr/Dockerfile. Go back to
+    # ghcr.io/sirrobot01/decypharr once that fix lands in a release.
+    image: ghcr.io/leonardoazeredo/ultimate-arr-stack/decypharr:v2.5-patch1
     container_name: decypharr
     security_opt:
       - no-new-privileges:true

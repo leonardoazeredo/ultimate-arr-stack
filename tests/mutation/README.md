@@ -303,6 +303,7 @@ the day the first of those tests was written, which is the same way `CLAUDE.md`'
 old "14 tests" claim went stale.
 
 <!-- NO-SWEEP-ORACLE: asserted by tests/shellcheck.bats; do not edit by hand -->
+- `decypharr/verify-patch.sh`
 - `duc-service/app/duc.cgi`
 - `duc-service/app/log.cgi`
 - `scripts/arr-backup.sh`
@@ -314,6 +315,16 @@ old "14 tests" claim went stale.
 - `scripts/sync-nas.sh`
 - `terraform/apply.sh`
 <!-- /NO-SWEEP-ORACLE -->
+
+`decypharr/verify-patch.sh` is the one entry here that does have an oracle: it
+is a four-step guard whose whole job is to be run inside an image build, and
+every step of it is asserted in `tests/decypharr-patch.bats` — that it exists,
+that it names the 400 test, that the `go test -list` guard is present, and that
+the test it runs fails against unpatched v2.5. What it is not is a target a
+generated mutant could be scored against: its behaviour depends on a Go tree and
+a compiler, so a mutation sweep would report survivors that say nothing. The
+`TARGETS` list is for files whose oracle runs in this suite; this one's oracle
+runs in the build.
 
 ## The stub harness, and why it has its own corpus entries
 

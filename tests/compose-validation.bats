@@ -106,6 +106,16 @@ registry_probe() {
         # Skip images with variable substitution
         [[ "$image" == *'${'* ]] && continue
 
+        # Skip images this repository publishes itself. Their existence is not a
+        # question for a registry API: .github/workflows/decypharr-image.yml
+        # builds them, and this check would otherwise race that workflow on the
+        # same push -- reporting a missing tag for an image that the other job
+        # was still uploading (observed: a green build publishing at the same
+        # time this test ran red). What still matters about these -- that the
+        # tag compose consumes is the tag something actually publishes -- is
+        # asserted in tests/decypharr-patch.bats, where it cannot race.
+        [[ "$image" == ghcr.io/leonardoazeredo/ultimate-arr-stack/* ]] && continue
+
         # Split image:tag
         local repo="${image%:*}"
         local tag="${image##*:}"
