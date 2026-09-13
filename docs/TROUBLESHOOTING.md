@@ -657,3 +657,64 @@ how a month went by with the fix sitting in the repo. Check it is armed:
 ```bash
 systemctl --user list-timers queue-cleanup.timer
 ```
+
+## TorBox: Every Download Link Returns 403 (error code 1010)
+
+**Symptom:** Everything stops arriving at once. The TorBox dashboard looks
+healthy — hundreds of downloads, nearly all of them "ready" — and shows no
+restriction notice. Sonarr's and Radarr's queues fill with items at 0% that
+never move, and Decypharr logs:
+
+```
+Error running post-download action  error="resolve download link for <file>.mkv: 400: unknown error code: 400"
+```
+
+**This is not a plan limit, and it is not the indexer.** Confirmed 2026-09-13:
+the account is **Pro** — 10 active slots, usenet included, no add-download
+cool-down. The refusal is a transient, account-wide rate limit on TorBox's
+download-link endpoint.
+
+**Cause:** a burst of `createtorrent` calls (a large missing-titles search) plus
+repeated `requestdl` calls earns `403` with `error code: 1010` on
+`/v1/api/torrents/requestdl`. It applies to the whole account regardless of
+which item you ask for, and it clears on its own. Measured that day: it began at
+01:20 BST after ~100 torrents were queued within an hour, refused every request
+for about 90 minutes — new and week-old items, GET and HEAD, `redirect` true and
+false, a 15 GB video and its .nfo sibling alike — then started answering `200`
+again with nothing changed on our side. Links issued before it began keep
+serving for their full 3 hours, so transfers already in flight continue while
+new ones are refused; the pipeline looks half-alive rather than dead.
+
+**Diagnose:** ask for a link to something TorBox already holds. `200` means
+fine; `403 error code: 1010` means the account is being limited right now.
+
+```bash
+TB=$(grep -E '^TORBOX_API_KEY=' .env | cut -d= -f2-)
+curl -s -o /dev/null -w '%{http_code}\n' \
+  "https://api.torbox.app/v1/api/torrents/requestdl?token=$TB&torrent_id=<any cached id>&file_id=<file id>"
+```
+
+Cross-check what the account thinks it has: `GET /v1/api/torrents/mylist`
+returns every torrent with `download_state`, and `GET /v1/api/user/me` carries
+`cooldown_until`. **Neither tells you the plan**, and a non-empty
+`cooldown_until` is the rate-limit timestamp, not a plan property — reading it
+as one produced two wrong diagnoses in a single evening. The plan is Pro; see
+`CLAUDE.md`'s *TorBox Account* section.
+
+**Why it wedges the queue rather than just slowing it:** Decypharr's
+`ErrorCodeToLinkError` maps an unrecognised code to a **permanent** error, so
+`resolveLinkWithRetry` returns immediately instead of retrying. The client keeps
+the torrent, the arr keeps the queue item at 0%, and — because an item at the
+cutoff makes the arr refuse every alternative — the title cannot be replaced
+either. A 90-minute upstream hiccup becomes permanently stuck episodes and
+films.
+
+**Fix:** wait it out. It cleared inside ~90 minutes here. Once links answer
+again, `queue-cleanup.timer` removes the wedged items as they pass the 3-hour
+age rule and re-searches them; because TorBox already holds those releases, the
+re-grab resolves immediately. Do not force-clear the whole queue to hurry it
+along — that submits another burst and can re-trip the limiter.
+
+**Prevention:** queue in ones and twos. A 45-film `MissingMoviesSearch` plus six
+season searches in an hour is what triggered this; `queue-cleanup.timer`'s age
+gate exists to pace exactly that kind of work.

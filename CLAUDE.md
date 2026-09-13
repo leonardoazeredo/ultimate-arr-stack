@@ -1,5 +1,40 @@
 # Claude Code Instructions
 
+## TorBox Account — the plan is Pro, stop re-deriving it
+
+**Confirmed by the account owner, 2026-09-13: the TorBox subscription is Pro, the
+top tier.** Pro means 10 active download slots, usenet included, and no
+add-download cool-down. Do not infer entitlements from the API's numeric `plan`
+field, do not treat a non-empty `cooldown_until` as a plan limit, and do not ask
+the owner to confirm their plan again — it has been stated, and it was wrongly
+doubted once already in a way the owner had to correct.
+
+The payload from `GET /v1/api/user/me?settings=false` is *not* a plan
+description. `plan` is an integer, `total_downloaded` is a counter, and
+`cooldown_until` is a rolling rate-limit timestamp — none of them say "Pro".
+Reading them as if they did produced two wrong conclusions in one evening
+("maybe your plan has no usenet", "maybe you are rate-limited by your plan").
+
+**What a TorBox refusal actually looks like:** a burst of `createtorrent` calls
+plus repeated `requestdl` calls earns an account-wide `403` with
+`error code: 1010` on `/v1/api/torrents/requestdl`. Measured 2026-09-13: it began
+at 01:20 BST after ~100 torrents were queued in an hour, refused *every* request
+for about 90 minutes — new and week-old items, GET and HEAD, both redirect
+modes, video file and .nfo alike — then cleared on its own with no change on our
+side. Already-issued links keep serving throughout (TorBox links live 3 hours),
+so transfers in flight continue while new ones are refused. It is transient, it
+never appears on the dashboard, and it is not a plan restriction.
+
+The sting is downstream: Decypharr maps an unrecognised code to a **permanent**
+error, so it never retries; the arr keeps the item at 0% and, through the cutoff
+rule, refuses every alternative release for that title until `queue-cleanup`
+clears it. See *TorBox: Every Download Link Returns 403* in
+`docs/TROUBLESHOOTING.md` for the probe and the recovery.
+
+**Practical rule:** queue in ones and twos, not hundreds. `queue-cleanup.timer`
+exists to pace this; do not bypass its age gate by force-clearing a whole queue
+at once.
+
 ## NAS Access
 
 SSH credentials are in `.claude/config.local.md`. Read it before running any NAS commands.
