@@ -70,25 +70,14 @@ COPY --from=patched /src/ .
 COPY decypharr/patch_test.go pkg/manager/link/zz_local_patch_test.go
 
 # Fail the build if the patch did not take. The unpatched classifier returns a
-# PERMANENT error for an unrecognised code, so this test is the difference
-# between the shipping binary retrying four times and giving up on the first
-# attempt -- and a build that skipped the patch would otherwise succeed and look
-# perfectly healthy.
-#
-# The -list check is not decoration. "go test -run <pattern>" exits 0 reporting
-# "no tests to run" when nothing matches the pattern, so the whole gate would go
-# quiet -- and still pass -- if the COPY above ever failed to land the file or
-# the test were renamed. Ask for the test names first and refuse to continue
-# without them.
+# PERMANENT error for an unrecognised code, so this is the difference between
+# the shipping binary retrying four times and giving up on the first attempt --
+# and a build that skipped the patch would otherwise succeed and look healthy.
+# The checks live in verify-patch.sh rather than inline: see that file for why.
+COPY decypharr/verify-patch.sh /tmp/verify-patch.sh
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    set -eu; \
-    present=$$(go test ./pkg/manager/link/ -list 'TestProvider400IsRetryable|TestSiblingCodesAreUnchanged' 2>&1); \
-    case "$$present" in \
-      *TestProvider400IsRetryable*) ;; \
-      *) echo "the patch's tests are not in the tree; refusing to build" >&2; echo "$$present" >&2; exit 1 ;; \
-    esac; \
-    go test ./pkg/manager/link/ -run 'TestProvider400IsRetryable|TestSiblingCodesAreUnchanged' -v
+    sh /tmp/verify-patch.sh
 
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
