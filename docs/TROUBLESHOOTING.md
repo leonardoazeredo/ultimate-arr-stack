@@ -658,6 +658,65 @@ how a month went by with the fix sitting in the repo. Check it is armed:
 systemctl --user list-timers queue-cleanup.timer
 ```
 
+## Usenet: SABnzbd Fails Every Article, TorBox's Own Downloader Succeeds
+
+**Symptom:** Nothing ever arrives by usenet. SABnzbd's queue is Idle, its
+history is empty, and Sonarr/Radarr history fills with
+`Aborted, cannot be completed - https://sabnzbd.org/not-complete`,
+`Repair failed, not enough repair blocks`, and
+`Manually marked as failed`. Torrents through Decypharr keep working, which is
+what makes it look like an indexer or a preference problem.
+
+**Cause: the articles are not on TorBox's usenet backbone.** Not a SABnzbd
+misconfiguration, and not the account's usenet entitlement. The two halves were
+measured separately on 2026-09-13 and only one of them fails:
+
+* **TorBox's own usenet path works.** One NZB pulled from Usenet-Crawler was
+  submitted straight to `POST /v1/api/usenet/createusenetdownload` with
+  `curl -F file=@…`. It was accepted (`usenetdownload_id` returned) and polled
+  to `download_state=completed` within a minute. TorBox has the article store
+  and the account can use it.
+* **SABnzbd's NNTP path does not.** The same server answers correctly --
+  `200 Welcome to TorBox`, `AUTHINFO USER` → `381 Need more.`,
+  `AUTHINFO PASS` → `281 Authentication accepted.`, `GROUP alt.binaries.test`
+  → `211 …` -- so credentials, TLS and reachability are all fine. Every
+  *article* is missing: `STAT <id>` → `430 No such article`, and SABnzbd logs
+  the same thing one line per article as
+  `Article … unavailable on all servers, discarding`.
+
+**Diagnose:** separate the two paths before touching any configuration.
+
+```bash
+# 1. NNTP connectivity and auth (should all succeed)
+#    banner -> 200, USER -> 381, PASS -> 281, GROUP -> 211
+# 2. An article from the failing NZB (this is where it breaks)
+#    STAT <message-id> -> 430 No such article
+# 3. The same NZB through TorBox directly
+TB=$(grep -E '^TORBOX_API_KEY=' .env | cut -d= -f2-)
+curl -s -X POST -H "Authorization: Bearer $TB" \
+  -F "file=@/tmp/probe.nzb" -F "name=probe" -F "as_queued=false" \
+  https://api.torbox.app/v1/api/usenet/createusenetdownload
+# then poll /v1/api/usenet/mylist and look at download_state
+```
+
+Credentials live in `~/.config/…`-style config on the NAS, not in `.env`:
+SABnzbd's `[[TorBox]]` block in `/config/sabnzbd.ini` holds `username` (the
+account's `auth_id` UUID) and a 22-character `password`. Both were confirmed
+correct against the account's `auth_id` from `GET /v1/api/user/me?settings=true`.
+
+**Fix:** there is nothing to fix here from this side. The account is Pro, usenet
+is included, the server accepts the login, and TorBox's own downloader completes
+the same NZB. That combination points at backbone coverage or retention for the
+content Usenet-Crawler indexes -- a question for TorBox support, with the
+`usenetdownload_id` from the probe as the evidence.
+
+**Do not read this as "usenet is broken, turn it off".** The path is correctly
+wired end to end and will work the moment the backbone serves the articles.
+Until then it costs one connection attempt per grabbed release and nothing else
+-- but it also means the download-client priorities (SABnzbd at -100 on both
+arrs, i.e. preferred) are sending releases into a path that cannot complete
+them, and every usenet grab ends in a failure the arr has to clean up.
+
 ## TorBox: All Download Links Return 403 (error code 1010)
 
 **Symptom:** Everything stops arriving at once. The TorBox dashboard looks
