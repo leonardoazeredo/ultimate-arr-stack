@@ -930,3 +930,68 @@ def test_a_record_with_no_client_name_is_treated_as_a_swarm_client():
     # The default has to be the cautious one: an unrecognised client getting
     # the three-hour leash would delete real downloads.
     assert m.is_stuck(rec(size=100, sizeleft=100, added=ago(5)), NOW)[0] is None
+
+
+# --- completed downloads the arr refuses to import ------------------------
+#
+# Found in the live queues on 2026-09-13. Both shapes are terminal: the arr has
+# made its decision, the client has nothing left to report, and the item sits
+# in importPending forever. Each one also blocked every alternative release for
+# its title, because a queue item at the cutoff makes the arr reject the rest.
+
+def test_a_sample_verdict_is_stuck_although_the_status_is_completed():
+    # Sonarr reports this with trackedDownloadStatus "completed", not
+    # "warning" -- which is exactly why the older import branch, gated on
+    # warning, never saw it.
+    kind, why = m.is_stuck(rec(trackedDownloadState="importPending",
+                               trackedDownloadStatus="completed",
+                               statusMessages=[{"messages":
+                                                ["Unable to determine if file is a sample"]}]), NOW)
+    assert kind == "import_stuck"
+    assert why == "cannot import: unable to determine if file is a sample"
+
+
+def test_a_release_that_does_not_contain_the_movie_is_stuck():
+    # Radarr's wording, verbatim from the X-Men queue record: the movie was
+    # matched by id, the release name did not parse to it, and Radarr refused.
+    kind, why = m.is_stuck(rec(trackedDownloadState="importPending",
+                               trackedDownloadStatus="warning",
+                               statusMessages=[{"messages":
+                                                ["Movie [X-Men (2000)][tt0120903, 36657] was not found in the grabbed release: X-Men.2000.2160p.WEBDL"]}]), NOW)
+    assert kind == "import_stuck"
+    assert why == "cannot import: was not found in the grabbed release"
+
+
+def test_the_wedged_import_markers_are_matched_case_insensitively():
+    # The arrs are consistent about their own capitalisation today; nothing
+    # promises they will stay that way, and a silent miss here restores the
+    # forever-stuck item this rule exists to remove.
+    kind, _ = m.is_stuck(rec(trackedDownloadState="importPending",
+                             statusMessages=[{"messages":
+                                              ["UNABLE TO DETERMINE IF FILE IS A SAMPLE"]}]), NOW)
+    assert kind == "import_stuck"
+
+
+def test_an_import_pending_item_with_an_unrelated_message_is_left_alone():
+    # The rule keys on two specific verdicts, not on importPending in general:
+    # a download that is simply waiting its turn must survive.
+    assert m.is_stuck(rec(trackedDownloadState="importPending",
+                          trackedDownloadStatus="warning",
+                          statusMessages=[{"messages": ["Waiting to import"]}]), NOW)[0] is None
+
+
+def test_a_wedged_import_is_blocklisted():
+    # Unlike a stale debrid item, the release itself is the problem here, so
+    # the replacement search must not be handed the same file again.
+    assert m.should_blocklist(rec(downloadClient="Decypharr (TorBox)"),
+                              "import_stuck") is True
+
+
+def test_the_import_pending_warning_rule_still_wins_for_its_own_messages():
+    # Ordering guard: the executable/not-an-upgrade verdict is a warning-level
+    # import, classified `import_warning`, and the broader wedged-import rule
+    # sits after it. Swapping the two would silently reclassify both.
+    kind, _ = m.is_stuck(rec(trackedDownloadState="importPending",
+                             trackedDownloadStatus="warning",
+                             statusMessages=[{"messages": ["Not an upgrade for existing file"]}]), NOW)
+    assert kind == "import_warning"
