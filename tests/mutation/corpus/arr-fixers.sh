@@ -168,7 +168,7 @@ mutation queue-python-failure-ignored \
   --file scripts/queue-cleanup.sh \
   --bats tests/queue-cleanup.bats \
   --test "a failing Python half is fatal and says so" \
-  --why "the heredoc form inherited set -e; the extracted form is a subprocess, so without an explicit status check a Python half that died reads as a clean run and the webhook announces a cleanup that never happened. Anchored on the invocation rather than on end-of-line: the keys arrived in the environment on 2026-09-13, so `if !` no longer sits at column zero and dropping the negation is now the mutation" \
+  --why "the heredoc form inherited set -e; the extracted form is a subprocess, so without an explicit status check a Python half that died reads as a clean run and the webhook announces a cleanup that never happened. Anchored on the invocation rather than on end-of-line: the keys arrived in the environment on 2026-09-13, so the negation no longer sits at column zero and dropping the negation is now the mutation" \
   --apply 'sed -i "s@if ! SONARR_API_KEY=@if SONARR_API_KEY=@" "$F"'
 
 # --- scripts/fix-*.sh -----------------------------------------------------
