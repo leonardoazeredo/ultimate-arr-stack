@@ -376,6 +376,20 @@ mutation queue-import-pending-ignores-state \
   --why "the state and the status are two conditions and dropping the state one lets any warning-flagged record with an 'not an upgrade' message be treated as pending import - which deletes and blocklists releases that are still downloading (test_a_still_downloading_item_is_not_judged_by_the_import_pending_rule)" \
   --apply 'sed -i "s@^    if tracked_state == \"importPending\" and tracked_status == \"warning\":\$@    if True and tracked_status == \"warning\":@" "$F"'
 
+# --- the wedged imports, 2026-09-13 ---------------------------------------
+#
+# A completed download the arr has permanently refused: the client has nothing
+# left to report, so the item sits in importPending forever and, through the
+# cutoff rule, blocks every alternative release for its title. Two of these
+# held up an entire X-Men collection and two Sopranos episodes.
+
+mutation wedged-import-not-detected \
+  --file scripts/lib/queue_cleanup.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "blanks the sample-verdict marker, so a completed download Sonarr refused as a possible sample stays in the queue forever while blocking its episode (test_a_sample_verdict_is_stuck_although_the_status_is_completed). Anchored on the marker constant rather than on the comparison, so the rule can be refactored around it without making this entry inert" \
+  --apply 'sed -i "s@^    \"unable to determine if file is a sample\",\$@    \"never-matches-a-real-message\",@" "$F"'
+
 # --- fix_sonarr_folders.py: the blank separator line -----------------------
 
 mutation sonarr-blank-line-separator-removed \

@@ -171,6 +171,10 @@ that would have cleared them was in the repo the whole time, working, unused.
   when the client is a debrid provider (Decypharr/TorBox) — there a stalled
   link resolution never recovers on its own, and the item blocks its episode
   the whole time
+- Completed downloads the arr has permanently refused to import — a sample
+  verdict, or a release that was not found to contain the film. The client has
+  nothing left to report, so without this the item sits in `importPending`
+  forever and blocks every alternative release for that title
 
 Items with **any** download progress are never removed, even if slow.
 

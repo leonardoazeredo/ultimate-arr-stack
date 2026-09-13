@@ -36,6 +36,9 @@ set -euo pipefail
 #   - Downloads with errors (missing files, not available, etc.)
 #   - Items at 0% progress for more than 24 hours (3 hours when the client is
 #     a debrid provider -- see the note below)
+#   - Completed downloads the arr has permanently refused to import (a sample
+#     verdict, or a release that does not contain the film): the client has
+#     nothing left to report, so nothing would ever move the item
 #
 # What is NEVER removed:
 #   - Items with any download progress (even if slow)

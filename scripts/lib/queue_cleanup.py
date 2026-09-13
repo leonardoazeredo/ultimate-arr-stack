@@ -20,6 +20,13 @@ details below are about making the replacement actually happen:
   * Searches are paced, and aimed at the episodes that were removed rather
     than at the whole series. A burst of searches answers 429 from the
     indexer, and Sonarr then disables that indexer for the rest of the run.
+
+A second, unrelated shape was found in the same queues on 2026-09-13: a
+completed download the arr had permanently refused -- a sample verdict on two
+Sopranos episodes, and a release that did not contain the film it was grabbed
+for. The client had nothing left to report, so nothing ever moved the item,
+and through the same cutoff rule each one blocked every alternative release for
+its title. IMPORT_BLOCKING_MARKERS is what makes those two visible.
 """
 
 import json
@@ -72,6 +79,19 @@ STALE_HOURS_DEFAULT = 24
 # Usenet)"), so the debrid patterns match them and the exemption below would
 # cover a class of failure it was never meant to cover.
 USENET_CLIENT_PATTERNS = ("sabnzbd", "nzbget", "nzb")
+
+# Status messages that mean the arr has looked at a completed download and
+# refused the file itself. None of these clear on their own: the decision is
+# the arr's, the client has nothing left to report, and the item stays in
+# importPending indefinitely -- holding its title hostage through the cutoff
+# rule the whole time. Seen live on 2026-09-13:
+#   * Sonarr, "Unable to determine if file is a sample" (two Sopranos episodes)
+#   * Radarr, "Movie [...] was not found in the grabbed release" (X-Men 2000)
+# Matched case-insensitively against every status message on the record.
+IMPORT_BLOCKING_MARKERS = (
+    "unable to determine if file is a sample",
+    "was not found in the grabbed release",
+)
 
 
 def build_url(port, path, key):
@@ -279,6 +299,26 @@ def is_stuck(record, now=None):
         if "executable" in all_msgs or "not an upgrade" in all_msgs:
             reason = "; ".join(msgs[:2]) if msgs else "import pending with warnings"
             return "import_warning", reason
+
+    # Import pending because the arr has permanently refused the file itself.
+    #
+    # Both of these were sat in the queue on 2026-09-13 and neither could ever
+    # clear on its own, because the verdict is the arr's, not the client's:
+    # a completed download sits in importPending and the client has nothing
+    # left to report. Through the cutoff rule each one also blocked every
+    # alternative release for its title -- Radarr rejected 50 of 52 candidates
+    # for X-Men while a 15 GB copy of the film sat on disk unimported.
+    #
+    # Deliberately not gated on trackedDownloadStatus: the sample verdict
+    # arrives with status "completed", and requiring "warning" is what left
+    # these two invisible to this classifier while it removed everything
+    # around them.
+    if tracked_state == "importPending":
+        msgs = _status_messages(record)
+        joined = " ".join(msgs).lower()
+        for marker in IMPORT_BLOCKING_MARKERS:
+            if marker in joined:
+                return "import_stuck", f"cannot import: {marker}"
 
     # Stuck downloading metadata (no peers at all)
     if "downloading metadata" in error_msg:
