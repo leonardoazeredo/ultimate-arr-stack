@@ -194,6 +194,34 @@ that would have cleared them was in the repo the whole time, working, unused.
 
 Items with **any** download progress are never removed, even if slow.
 
+### The size floor is global, not per-profile
+
+The minimum-size filter that decides which releases are acceptable lives in the
+arr's **quality definitions** (`/api/v3/qualitydefinition`), which are global.
+It is not a per-profile or per-indexer setting, and both arrs' profiles carry no
+size keys of their own — checked directly on 2026-09-13: Radarr's quality
+definitions hold the `minSize` values and all seven of its profiles report
+`size keys in items = False`, same for Sonarr's seven.
+
+That matters because lowering the floor to let a release through lets it through
+**everywhere**. Measured the same day, after the floor was lowered:
+
+| | before | after |
+|---|---|---|
+| Radarr `Bluray-1080p` | 50.8 MB/min | **18 MB/min** |
+| Sonarr `Bluray-1080p` | 50.4 MB/min | **18 MB/min** |
+| Sonarr `Bluray-2160p` | — | 94.6 MB/min |
+| Sonarr `WEBDL-2160p` | — | 25 MB/min |
+
+Two consequences worth knowing before changing it again. A 1080p floor of
+18 MB/min admits releases down to roughly 1.5 GB for a 90-minute film, in *any*
+profile that permits 1080p — "Any" included. And 4K is **not** filtered at the
+same rate: `Bluray-2160p` sits an order of magnitude above it, deliberately, so
+a floor lowered for 1080p does not also flatten 4K.
+
+There is no per-catalogue floor to be had here. If one profile should be
+stricter, that is a custom-format or a separate profile, not a second `minSize`.
+
 Removed releases are blocklisted so the same broken release won't be grabbed
 again. The exception is a stale item from a debrid client (TorBox behind
 Decypharr, and the like): there the release is fine and the provider failed, so
