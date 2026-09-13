@@ -388,7 +388,7 @@ mutation wedged-import-not-detected \
   --bats tests/python-suite.bats \
   --test "the extracted modules pass their pytest suite" \
   --why "blanks the sample-verdict marker, so a completed download Sonarr refused as a possible sample stays in the queue forever while blocking its episode (test_a_sample_verdict_is_stuck_although_the_status_is_completed). Anchored on the marker constant rather than on the comparison, so the rule can be refactored around it without making this entry inert" \
-  --apply 'sed -i "s@^    \"unable to determine if file is a sample\",\$@    \"never-matches-a-real-message\"," "$F"'
+  --apply 'sed -i "s@^    \"unable to determine if file is a sample\",\$@    \"never-matches-a-real-message\",@" "$F"'
 
 # --- fix_sonarr_folders.py: the blank separator line -----------------------
 
