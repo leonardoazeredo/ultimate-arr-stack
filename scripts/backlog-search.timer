@@ -1,0 +1,26 @@
+[Unit]
+Description=Queue a bounded slice of the missing backlog every 4 hours
+
+[Timer]
+# Monotonic timers only, and deliberately not OnBootSec.
+#
+# This is the same trap queue-cleanup.timer was caught by, and the reason is
+# worth repeating here because the cost of getting it wrong is identical:
+# OnBootSec measures from the last boot, and on a NAS that has been up for
+# weeks that is always in the past. A unit installed with
+# `systemctl --user enable --now` would then have its first elapse already due
+# and start the service in the same second the schedule was registered.
+# Observed on queue-cleanup, 2026-09-13: unit registered at 23:48:19, log
+# header 23:48:19. OnActiveSec measures from when the timer was activated, so
+# it is the stated delay on a fresh enable and on a timer restart alike.
+OnActiveSec=10min
+OnUnitActiveSec=4h
+Unit=backlog-search.service
+
+# A run issues at most --limit searches per service and then exits, so it
+# cannot overlap itself; AccuracySec is left at its default rather than
+# tightened, because a sweep a minute late costs nothing and a wakeup that
+# fires while the box is busy costs a little.
+
+[Install]
+WantedBy=timers.target

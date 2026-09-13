@@ -89,6 +89,7 @@ TARGETS=(
   "scripts/configure-apps.sh:tests/configure-apps.bats:^configure-apps: "
   "scripts/lib/env-file.sh:tests/lib-env-file.bats:^env-file: "
   "scripts/queue-cleanup.sh:tests/queue-cleanup.bats:^queue-cleanup: "
+  "scripts/backlog-search.sh:tests/backlog-search.bats:^backlog-search: "
   # Both fixers share tests/fix-arr-paths.bats and both anchor on `^fix-`
   # rather than on their own half of it, so the one cross-script test in that
   # file (neither reaches a destructive operation) is part of both oracles

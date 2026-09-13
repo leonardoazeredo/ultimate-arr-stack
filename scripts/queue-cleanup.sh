@@ -88,7 +88,15 @@ for arg in "$@"; do
     --apply) APPLY=true ;;
     --verbose|-v) VERBOSE=true ;;
     --help|-h)
-      sed -n '2,/^$/{ s/^# //; s/^#//; p }' "$0"
+      # The header block at the top of this file, printed verbatim.
+      #
+      # `sed -n '2,/<blank>/p'` with several commands was the obvious
+      # one-liner and is GNU-only: BSD sed rejects it ("extra characters
+      # at the end of p command"), so on macOS --help printed sed's error
+      # and exited 1 instead of the usage block. awk behaved differently
+      # inside this script than standalone. A fixed range costs one line
+      # to maintain and cannot break: the header ends at line 71.
+      sed -n '3,71p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
   esac

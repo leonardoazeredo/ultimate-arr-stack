@@ -1,0 +1,34 @@
+[Unit]
+Description=Queue a bounded slice of the Sonarr/Radarr missing backlog
+Documentation=file:/volume1/docker/arr-stack/scripts/backlog-search.sh
+After=queue-cleanup.service
+
+# Neither arr searches its own backlog: they look for new releases (RSS) and
+# for what is already in their queue. A film added in August and never found
+# would sit missing forever, which is what 28 of 65 films and 3,117 episodes
+# were doing on 2026-09-13.
+#
+# Ordered after queue-cleanup deliberately. That service removes wedged items
+# and re-searches them; this one skips anything already in the queue, so
+# running behind it means a title freed by the cleanup is eligible in the same
+# pass rather than waiting a full interval.
+
+[Service]
+Type=oneshot
+
+# SONARR_API_KEY / RADARR_API_KEY. Read through lib/env-file.sh rather than as
+# exported environment; supplying the file here is what makes the unit
+# self-contained -- no shell profile, no cron PATH.
+EnvironmentFile=/volume1/docker/arr-stack/.env
+
+# The log directory is created inside ExecStart, in the same shell that opens
+# the redirect. An `ExecStartPre=/bin/mkdir` plus StandardOutput=append:<dir>
+# cannot work and fails at boot: systemd applies the unit's StandardOutput to
+# every process it spawns, ExecStartPre included, so mkdir dies with "Failed to
+# set up standard output: No such file or directory" before it can create the
+# directory the redirect points into. Observed as status=209/STDOUT on
+# queue-cleanup.service, 2026-09-12.
+#
+# `exec` so the script is the process systemd tracks and its exit status is the
+# unit's. `>>` rather than systemd's append, for the same reason.
+ExecStart=/bin/bash -c 'mkdir -p /volume1/docker/arr-stack/logs && exec /bin/bash /volume1/docker/arr-stack/scripts/backlog-search.sh --apply >> /volume1/docker/arr-stack/logs/backlog-search.log 2>&1'
