@@ -1,0 +1,93 @@
+name: Decypharr image
+
+# Builds the locally patched Decypharr image and publishes it to GHCR.
+#
+# The image is decypharr v2.5 plus the fix from upstream PR #402, which is open
+# and unmerged: a provider HTTP 400 must be classified retryable rather than
+# permanent, or a title wedges at 0% and never retries. See
+# decypharr/Dockerfile for the detail and docs/TROUBLESHOOTING.md for the
+# symptom, the measurement and the recovery.
+#
+# The NAS pulls this image, it does not build it -- there is no Go toolchain
+# there, and a locally built tag would exist on exactly one machine. Publishing
+# from CI is what makes the patch reproducible and reviewable: the compose file
+# references a real tag, and the recipe that produced it is in this tree.
+#
+# Delete this file, decypharr/, and the compose override once upstream ships the
+# fix in a release and the upstream image is pinned again.
+on:
+  push:
+    branches: ['**']
+    paths:
+      - 'decypharr/**'
+      - '.github/workflows/decypharr-image.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'decypharr/**'
+      - '.github/workflows/decypharr-image.yml'
+  workflow_dispatch: {}
+
+concurrency:
+  group: decypharr-image-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: build and publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        # Skipped on pull requests: a fork's token has no packages:write, and the
+        # build itself is the useful half of a PR run.
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build (and publish on push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: decypharr/Dockerfile
+          # arm64 for the NAS, amd64 so the same tag also runs on a laptop.
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ghcr.io/${{ github.repository }}/decypharr:v2.5-patch1
+            ghcr.io/${{ github.repository }}/decypharr:sha-${{ github.sha }}
+          build-args: |
+            DECYPHARR_VERSION=v2.5
+            VERSION=v2.5-patch1
+            CHANNEL=patched
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify the published image carries the patch
+        # The build already fails if the patch did not take (it runs the patch's
+        # own test against the patched source), so this is the weaker,
+        # end-to-end half: the tag that was really pushed contains the string
+        # the patch introduces. `grep -a` rather than `strings`, which BusyBox
+        # does not ship.
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${{ github.repository }}/decypharr:sha-${{ github.sha }}"
+          docker pull --platform linux/amd64 "$image"
+          if ! docker run --rm --entrypoint /bin/sh "$image" -c \
+              'grep -ac "HTTP 400: link rejected" /usr/bin/decypharr | grep -qv "^0$"'; then
+            echo "::error::published image does not contain the 400-is-retryable patch"
+            exit 1
+          fi
+          echo "patch present in $image"

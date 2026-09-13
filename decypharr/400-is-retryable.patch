@@ -1,0 +1,41 @@
+Backport of upstream PR #402 (github.com/sirrobot01/decypharr), which is open
+and unmerged as of v2.5.
+
+TorBox can answer a link-validation request with a bare HTTP 400. The provider
+API path in ErrorCodeToLinkError has no case for "400", so it falls through to
+the default branch, which classifies the error as PERMANENT. resolveLinkWithRetry
+returns immediately on a permanent error, so the 4 attempts and the exponential
+backoff are never used, and fetchAndValidate memoises the failure against the
+link URL. See docs/TROUBLESHOOTING.md, "TorBox: ... 400: unknown error code: 400".
+
+ClassifyStreamStatus already treats a CDN-layer 400 as refetchable. This makes
+the provider-API path agree.
+
+This patch applies to v2.5 and is removed when upstream ships the fix.
+
+diff --git a/pkg/manager/link/errors.go b/pkg/manager/link/errors.go
+--- a/pkg/manager/link/errors.go
++++ b/pkg/manager/link/errors.go
+@@ -107,6 +107,9 @@ var (
+ 	Err404 = errors.New("HTTP 404 Not Found")
+ 	Err429 = errors.New("HTTP 429 Too Many Requests")
+ 	Err503 = errors.New("HTTP 503 Service Unavailable")
++	// ErrLinkRejected is a 400 from the provider/CDN, which in practice means
++	// the presigned link expired or rotated rather than a malformed request.
++	ErrLinkRejected = errors.New("HTTP 400: link rejected")
+ )
+ 
+ // NewLinkError creates a new LinkError with the given error and category
+@@ -157,6 +160,14 @@ func ErrorCodeToLinkError(code string) *Error {
+ 		return NewPermanentError(Err404, code)
+ 	case "429":
+ 		return NewRetryableError(Err429, code)
++	// TorBox returns a bare 400 for a presigned link that has expired or
++	// rotated. ClassifyStreamStatus already treats 400 at the CDN layer as
++	// refetchable; the provider-API path must agree, otherwise a stale link is
++	// classified permanent and no retry is ever attempted.
++	case "400":
++		return NewRefetchableError(ErrLinkRejected, code)
+ 	case "503", "read_pxy_timeout":
+ 		return NewRetryableError(Err503, code)
+ 	default:

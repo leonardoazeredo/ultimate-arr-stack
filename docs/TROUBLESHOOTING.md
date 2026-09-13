@@ -658,7 +658,7 @@ how a month went by with the fix sitting in the repo. Check it is armed:
 systemctl --user list-timers queue-cleanup.timer
 ```
 
-## TorBox: Every Download Link Returns 403 (error code 1010)
+## TorBox: All Download Links Return 403 (error code 1010)
 
 **Symptom:** Everything stops arriving at once. The TorBox dashboard looks
 healthy — hundreds of downloads, nearly all of them "ready" — and shows no
@@ -668,6 +668,9 @@ never move, and Decypharr logs:
 ```
 Error running post-download action  error="resolve download link for <file>.mkv: 400: unknown error code: 400"
 ```
+
+The rate limit and that `400` are two different things, an hour apart, and the
+second is the one that wedges the queue. See *Related: the bare 400* below.
 
 **This is not a plan limit, and it is not the indexer.** Confirmed 2026-09-13:
 the account is **Pro** — 10 active slots, usenet included, no add-download
@@ -709,27 +712,52 @@ returns every torrent with `download_state`, and `GET /v1/api/user/me` carries
 as one produced two wrong diagnoses in a single evening. The plan is Pro; see
 `CLAUDE.md`'s *TorBox Account* section.
 
-**Why it wedges the queue rather than just slowing it:** Decypharr's
-`ErrorCodeToLinkError` maps an unrecognised code to a **permanent** error, so
-`resolveLinkWithRetry` returns immediately instead of retrying. The client keeps
-the torrent, the arr keeps the queue item at 0%, and — because an item at the
-cutoff makes the arr refuse every alternative — the title cannot be replaced
-either. A 90-minute upstream hiccup becomes permanently stuck episodes and
-films.
+**Related: the bare 400.** The 403 above is the rate limit. This is the other
+error, and it is the one that wedges the queue. Decypharr's
+`ErrorCodeToLinkError` has no case for `"400"`, so it falls through to the
+default branch, which classifies the error as **permanent**. Two consequences,
+both measured in the v2.5 source:
 
-**Fix:** wait it out. It cleared inside ~90 minutes here. Once links answer
-again, `queue-cleanup.timer` removes the wedged items as they pass the 3-hour
-age rule and re-searches them — **but do not expect the re-grab to succeed just
-because the refusals stopped.** Measured the same evening: six titles were
-removed at 00:16 and re-grabbed by the arr's next RSS sync, and by 00:45 all six
-were stalled again at 0%, because Decypharr was still treating the link error as
-permanent and the indexer kept offering the same release. The refusals stopping
-and the queue recovering are separate events, and `queue-cleanup` is what
-connects them: the first removal is exempt from the blocklist (the provider may
-have been transiently broken), and a release that comes back a second time is
-blocklisted, which is what forces a different release instead of the same one
-forever. Give it two sweeps. Do not force-clear the whole queue to hurry it
-along — that submits another burst and can re-trip the limiter.
+- `resolveLinkWithRetry` returns at the first attempt instead of using its four
+  tries and its exponential backoff (`pkg/manager/downloader.go`). The log shows
+  no `link fetch failed, retrying` line at all, which is the tell.
+- `fetchAndValidate` memoises the failure against the link URL, and the link URL
+  for a given torrent is derived from `torrent_id`/`file_id`, so the same
+  request keeps producing the same URL.
+
+The client keeps the torrent, the arr keeps the queue item at 0%, and — because
+an item at the cutoff makes the arr refuse every alternative — the title cannot
+be replaced either. A transient upstream hiccup becomes permanently stuck
+episodes and films.
+
+**This is fixed locally.** `decypharr/Dockerfile` builds the pinned upstream
+release with upstream's own open fix ([PR #402](https://github.com/sirrobot01/decypharr/pull/402))
+applied, and `.github/workflows/decypharr-image.yml` publishes it. The compose
+file uses that image instead of `ghcr.io/sirrobot01/decypharr:v2.5`. Confirm the
+running image carries the fix:
+
+```bash
+docker inspect decypharr --format '{{.Config.Image}}'   # .../decypharr:v2.5-patch1
+```
+
+The `400` itself still appears in the logs — it is a real upstream answer — but
+it now costs a retry rather than the file. Delete `decypharr/`, its workflow and
+the compose reference once upstream merges the fix into a release.
+
+**Fix (the rate limit itself):** wait it out. It cleared inside ~90 minutes
+here. Once links answer again, `queue-cleanup.timer` removes the wedged items as
+they pass the 3-hour age rule and re-searches them — **but do not expect a
+queue-cleanup re-grab to succeed on its own.** Measured the same evening, before
+the 400 fix was deployed: six titles were removed at 00:16 and re-grabbed by the
+arr's next RSS sync, and by 00:45 all six were stalled again at 0%, because
+Decypharr was still treating the link error as permanent and the indexer kept
+offering the same release. The refusals stopping and the queue recovering are
+separate events, and `queue-cleanup` is what connects them: the first removal is
+exempt from the blocklist (the provider may have been transiently broken), and a
+release that comes back a second time is blocklisted, which forces a different
+release instead of the same one forever. Give it two sweeps. Do not force-clear
+the whole queue to hurry it along — that submits another burst and can re-trip
+the limiter.
 
 **Prevention:** queue in ones and twos. A 45-film `MissingMoviesSearch` plus six
 season searches in an hour is what triggered this; `queue-cleanup.timer`'s age
