@@ -312,6 +312,7 @@ Without the `gh release edit` step, the release stays Draft and won't show as La
 ```
 scripts/
 ├── arr-backup.sh                 # Back up the Docker named volumes
+├── backlog-search.sh             # Queue a bounded slice of the missing backlog
 ├── backup-prune.sh               # GFS-tiered retention over those backups
 ├── boot-compose-up.sh            # Reconcile every stack after a reboot or UGOS update
 ├── check-network.sh              # Find and optionally clean orphaned Docker networks
@@ -342,6 +343,7 @@ scripts/
     ├── check-image-versions.sh # Check for stale Docker image tags
     ├── configure-helpers.sh    # HTTP/JSON helpers for configure-apps.sh
     ├── env-file.sh             # Read a single value out of a .env file
+    ├── backlog_search.py       # The backlog sweeper's logic, as an importable module
     ├── fix_radarr_paths.py     # The Radarr fixer's logic, as an importable module
     ├── fix_sonarr_folders.py   # The Sonarr fixer's logic, as an importable module
     └── queue_cleanup.py        # The queue cleaner's logic, as an importable module

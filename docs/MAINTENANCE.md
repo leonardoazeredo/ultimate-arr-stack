@@ -146,6 +146,55 @@ systemctl --user enable --now queue-cleanup.timer
 systemctl --user list-timers queue-cleanup.timer     # confirm it is armed
 ```
 
+### Backlog search (systemd timer, every 4 hours)
+
+Neither arr searches its own backlog. They search for new releases (RSS) and for
+what is already in their queue, so a film added in August and never found sits
+missing indefinitely. Measured on this NAS 2026-09-13: 24 films missing with 97
+grabbable releases available for one of them, and 3,107 episodes missing across
+42 series — while the only grabs that day were ones a human asked for by hand.
+
+Install once, as the deploy user — no root:
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp scripts/backlog-search.service scripts/backlog-search.timer ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now backlog-search.timer
+systemctl --user list-timers backlog-search.timer     # confirm it is armed
+```
+
+Output goes to `logs/backlog-search.log`. What it searched, and when, is in
+`logs/backlog-search-state.json`.
+
+**The two services are paced differently, and both calls come from measurement.**
+
+Sonarr is **bounded**: at most `--limit` seasons per run (default 10), walking
+the backlog in a stable order. The arr's own `MissingEpisodeSearch` is the trap
+here — measured, it opened with *"Performing search for 3116 episodes"*, could
+not be cancelled (Sonarr answers 409 for a command already started), and had to
+be killed by restarting the container. That is the shape of the burst that
+earned this account a 90-minute TorBox refusal earlier the same day. Work is per
+season, so one `SeasonSearch` covers a season instead of one request per
+episode: ~200 requests for this library rather than ~3,100. Once fewer than
+`--limit` seasons remain it switches to the bulk command, which is bounded by
+definition by then.
+
+Radarr is **bulk with a cooldown**, the opposite call: `MissingMoviesSearch`
+grabbed 5 films in 4 minutes, while `MoviesSearch` on a single film processed
+2-4 releases per call and grabbed nothing — even for a film with 22 approved and
+43 download-allowed releases in the same indexer results. The per-film path is
+what does not work here. Bulk is affordable because the candidate set is 24
+films, and `--cooldown` (default 6h) stops it re-presenting that set every
+interval.
+
+At ten seasons per run every four hours, this backlog drains in roughly three
+and a half days. Check progress with a dry run, which changes nothing:
+
+```bash
+./scripts/backlog-search.sh          # what the next run would do
+```
+
 **Deploying this unit can run it.** The timer's first elapse is
 `OnActiveSec=15min`, measured from when the timer was activated — so
 `enable --now` on a running system starts a sweep 15 minutes later, with no
