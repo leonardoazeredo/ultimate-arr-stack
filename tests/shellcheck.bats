@@ -30,6 +30,15 @@ setup() {
 
 # Every tracked file that declares itself a shell script, minus the vendored
 # bats-core submodule (not ours to fix).
+#
+# Tracked, not found: the question is what this repository ships, and a walk
+# would answer for whatever happens to be lying in the tree -- including the
+# very mutant `run-mutations.sh` has staged at the moment a sweep calls this.
+# That also makes `git` a hard requirement, which the NAS does not have (it
+# drives this repo through a containerised alpine/git). Callers comparing
+# against the list must skip when it is missing rather than compare against an
+# empty one: an empty list is precisely what the guards below exist to detect,
+# so an absent tool would otherwise read as a broken repository.
 shell_files() {
     local f
     while read -r f; do
@@ -117,6 +126,16 @@ sweep_targets() {
     # It fails in BOTH directions on purpose. Naming a file as unswept when it
     # has a target is the stale half; omitting one that has no target is the
     # half that would quietly under-report coverage as the repo grows.
+    #
+    # Skip rather than fail without a host git: `shell_files` enumerates with
+    # `git ls-files`, so the derived list would be empty and the emptiness guard
+    # below would report a broken discovery on a host that merely lacks the
+    # tool. That is how this test read on the NAS when the mutation corpus was
+    # run there -- `no-sweep-list-blind-to-a-new-target` came back ERRORED with
+    # `git: command not found` instead of being judged.
+    command -v git >/dev/null 2>&1 \
+        || skip "no host git binary: this guard enumerates files with git ls-files, so it would compare against nothing here"
+
     local expected actual
     expected="$(comm -23 <(production_shell_files | sort) <(sweep_targets))"
 
