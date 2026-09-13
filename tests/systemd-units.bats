@@ -104,6 +104,27 @@ setup() {
     assert_success
 }
 
+@test "queue-cleanup timer's first elapse is measured from activation, not boot" {
+    # OnBootSec measures from the last boot. On a NAS that has been up for
+    # weeks that is always in the past, so the grace period it looks like it
+    # buys does not exist: `systemctl --user enable --now queue-cleanup.timer`
+    # registers a timer whose first elapse is already due, and the service
+    # starts the same second. Measured on the NAS 2026-09-13 -- unit
+    # registered at 23:48:19, log header 23:48:19, "Summary (APPLIED): 16
+    # items removed, 7 searches triggered". A destructive sweep fired by the
+    # act of installing the schedule.
+    #
+    # OnActiveSec counts from when the timer was activated, so it is 15
+    # minutes in every case, and this test is what stops anyone putting
+    # OnBootSec back. A unit file cannot express the difference; the comment
+    # above each line cannot fail.
+    run grep -E '^On(Boot|Startup|UnitInactive)Sec=' "$UNITS_DIR/queue-cleanup.timer"
+    assert_failure
+
+    run grep '^OnActiveSec=' "$UNITS_DIR/queue-cleanup.timer"
+    assert_success
+}
+
 @test "queue-cleanup timer fires faster than the shortest staleness threshold" {
     # The script removes an item that has made no progress for STALE_HOURS_*
     # (24h for a swarm client, 3h for a debrid one). A timer that fires less

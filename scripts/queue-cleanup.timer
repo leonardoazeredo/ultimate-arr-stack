@@ -2,17 +2,21 @@
 Description=Run the arr-stack stuck-queue cleanup hourly
 
 [Timer]
-# 15min rather than 5: this one deletes from the download clients, and a boot
-# is exactly when the clients are still coming up behind gluetun. The other
-# two timers only read.
+# Monotonic timers only, and deliberately not OnBootSec.
 #
-# Hourly, and that is set by the shortest staleness threshold in
-# scripts/lib/queue_cleanup.py rather than by taste: a debrid-backed item is
-# called dead after 3 hours of no progress, and a sweep that runs less often
-# than the threshold it enforces leaves dead items sitting for the difference.
-# tests/systemd-units.bats derives both numbers and fails if this one is ever
-# the slower of the two.
-OnBootSec=15min
+# OnBootSec measures from the last boot, and on a NAS that has been up for
+# weeks that is always in the past. So the 15 minutes it looked like it bought
+# did not exist: `systemctl --user enable --now queue-cleanup.timer` on an
+# already-running system registered a timer whose first elapse was due
+# immediately, and the service started the same second. Observed 2026-09-13 --
+# unit registered at 23:48:19, log header 23:48:19, "Summary (APPLIED): 16
+# items removed, 7 searches triggered". That is a destructive sweep fired by
+# the act of installing the schedule, which is not what a 15-minute grace
+# period means. OnActiveSec measures from when the timer was activated, so it
+# is 15 minutes in every case, and it applies on a fresh enable and on a timer
+# restart alike. It also gives the age gate its say: nothing under 3 hours old
+# is removed regardless of when the sweep runs.
+OnActiveSec=15min
 OnUnitActiveSec=1h
 Unit=queue-cleanup.service
 

@@ -296,8 +296,15 @@ mutation queue-api-loses-the-url \
   --file scripts/lib/queue_cleanup.py \
   --bats tests/python-suite.bats \
   --test "the extracted modules pass their pytest suite" \
-  --why "curl with no URL exits 2, which the returncode check turns into None, which fetch_queue reports as 'Failed to fetch queue' - so a run that never asked for anything looks exactly like an arr service being down (test_get_shells_out_to_curl_with_the_built_url)" \
-  --apply 'sed -i "s@^            \[\"curl\", \"-s\", \"-f\", build_url(port, path, key)\],\$@            [\"curl\", \"-s\", \"-f\"],@" "$F"'
+  --why "curl with no URL exits 2, which the returncode check turns into None, which fetch_queue reports as 'Failed to fetch queue' - so a run that never asked for anything looks exactly like an arr service being down (test_get_shells_out_to_curl_with_the_built_url). Anchored on the line that builds the config, not on the curl argv: since 2026-09-13 the URL travels to curl on stdin rather than as an argument, and the argv is a fixed five-element list for every request" \
+  --apply 'sed -i "s@^    lines = \[f\"url = {quoted(url)}\"\]\$@    lines = []@" "$F"'
+
+mutation queue-api-key-back-into-the-argv \
+  --file scripts/lib/queue_cleanup.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "the key was an argv element until 2026-09-13, which put both arr API keys in the process list - readable by any user on the box through /proc/<pid>/cmdline, on a script systemd runs hourly. Putting it back is the exact regression, and only a test that asserts on the key's ABSENCE from the argv can see it: every 'is the right URL being requested' assertion still passes (test_the_api_key_is_not_an_argv_element)" \
+  --apply 'sed -i "s@^            \[\"curl\", \"-s\", \"-f\", \"--config\", \"-\"\],\$@            [\"curl\", \"-s\", \"-f\", url],@" "$F"'
 
 mutation queue-api-ignores-curl-status \
   --file scripts/lib/queue_cleanup.py \
@@ -345,7 +352,7 @@ mutation queue-main-drops-the-apply-flag \
   --file scripts/lib/queue_cleanup.py \
   --bats tests/python-suite.bats \
   --test "the extracted modules pass their pytest suite" \
-  --why "run()'\''s next parameter is verbose, so dropping apply_changes at the call site silently promotes the verbose flag into it: \`--verbose\` alone would delete and blocklist for real, and no test that injects its own api could ever see it (test_main_maps_argv_onto_the_run_arguments)" \
+  --why "run()'\''s next parameter is verbose, so dropping apply_changes at the call site silently promotes the verbose flag into it: \`--verbose\` alone would delete and blocklist for real. The spy test cannot see this on its own -- it replaces run() entirely, so it only reports what main() handed over and never exercises the call -- which is why test_main_passes_apply_changes_as_its_own_argument drives the real run() as well" \
   --apply 'sed -i "s@^    run(services(sonarr_key, radarr_key), ArrApi(), apply_changes, verbose)\$@    run(services(sonarr_key, radarr_key), ArrApi(), verbose)@" "$F"'
 
 mutation queue-script-entry-inert \
@@ -411,8 +418,58 @@ mutation debrid-stale-item-still-blocklisted \
   --file scripts/lib/queue_cleanup.py \
   --bats tests/python-suite.bats \
   --test "the extracted modules pass their pytest suite" \
-  --why "blocklisting a stale debrid item forbids the one release the provider is known to have cached, so the replacement is a different release that fails the same way -- the loop this exemption exists to end (test_a_stale_debrid_item_is_not_blocklisted)" \
+  --why "blocklisting a stale debrid item on its first removal forbids the one release the provider is known to have cached, so the replacement is a different release that fails the same way -- the loop this exemption exists to end (test_a_stale_debrid_item_is_not_blocklisted). Anchored on the first-strike condition itself, which is what the exemption has meant since the second-strike rule landed; it used to read the old stale-and-debrid line, which the rewrite made unmatchable" \
   --apply 'sed -i "s@^    if reason_type == \"stale\" and is_debrid_client(record):\$@    if False:@" "$F"'
+
+# --- the refused imports and the removal memory, 2026-09-13 ----------------
+#
+# A completed download the arr refused to match, and the second-strike rule
+# that keeps the first-strike exemption from becoming a livelock. Three
+# separate behaviours, each of which shipped wrong at least once: the file was
+# deleted, the release was blocklisted, and the release was then re-grabbed
+# forever because nothing remembered it had already been removed.
+
+mutation refused-import-deletes-the-download \
+  --file scripts/lib/queue_cleanup.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "an import_refused item is a completed download the arr would not match -- the bytes are fine and both live cases (a 2.9 GB Sopranos episode, a 15 GB X-Men) imported cleanly by hand minutes after the first version of this rule deleted them. Deleting the download there throws away a working release and searches for a different one (test_a_wedged_import_is_removed_from_the_queue_but_kept_on_disk)" \
+  --apply 'sed -i "s@^    return reason_type not in KEEP_FILE_REASONS\$@    return True@" "$F"'
+
+mutation refused-import-blocklisted \
+  --file scripts/lib/queue_cleanup.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "blocklisting a file that is sitting on disk, complete and importable, blacklists a working release over a naming or sampling verdict (test_a_refused_import_is_never_blocklisted)" \
+  --apply 'sed -i "s@^    if reason_type in KEEP_FILE_REASONS:\$@    if False:@" "$F"'
+
+mutation refused-import-still-searched \
+  --file scripts/lib/queue_cleanup.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "a replacement search while the file is still on disk can only fetch the same bytes a second time. The guard is what makes 'keep the file' and 'search for a replacement' mutually exclusive, and dropping it changes no removal count and no log line -- only the search command that should never have been sent (test_a_kept_download_triggers_no_replacement_search)" \
+  --apply 'sed -i "s@^                if target_id and not keep_file:\$@                if target_id:@" "$F"'
+
+mutation removal-memory-never-written \
+  --file scripts/lib/queue_cleanup.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "without the write there is no memory, so every stale debrid removal is a first removal and the release is never blocklisted -- the livelock that removed and re-grabbed six titles inside 40 minutes on 2026-09-13. The URL the delete asks for is identical either way, so only reading the state file back can see it (test_the_second_run_over_a_remembered_release_blocklists_it)" \
+  --apply 'sed -i "s@^    if apply_changes and total_removed > 0:\$@    if False:@" "$F"'
+
+mutation removal-memory-written-by-a-dry-run \
+  --file scripts/lib/queue_cleanup.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "the memory has to describe what was actually removed. A dry run that records what it WOULD have removed blocklists a release on a removal it survived -- the state file starts disagreeing with reality, and every future --apply run acts on the dry run's intentions instead (test_an_applied_run_writes_the_state_and_a_dry_run_does_not)" \
+  --apply 'sed -i "s@^    if apply_changes and total_removed > 0:\$@    if total_removed > 0:@" "$F"'
+
+mutation removal-memory-ignores-its-own-age-cutoff \
+  --file scripts/lib/queue_cleanup.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "STATE_RETENTION_DAYS exists so a removal a fortnight ago is a new attempt rather than a repeat of the old one, and so the file stays a few hundred entries rather than growing forever (test_a_stale_entry_is_pruned_and_a_fresh_one_is_kept)" \
+  --apply 'sed -i "s@^    return kept\$@    return dict(state)@" "$F"'
 
 mutation debrid-search-ignores-the-removed-episodes \
   --file scripts/lib/queue_cleanup.py \
@@ -448,6 +505,13 @@ mutation queue-unit-log-dir-not-created \
   --test "queue-cleanup unit creates its log directory before redirecting into it" \
   --why "logs/ is gitignored, so on a fresh deploy it does not exist and the append has nothing to open. Moving the mkdir out of the ExecStart shell is also the shape that fails at boot with status=209/STDOUT -- systemd applies the unit's StandardOutput to ExecStartPre too, so a separate mkdir dies setting up the redirect to the directory it was about to create" \
   --apply 'sed -i "s@mkdir -p /volume1/docker/arr-stack/logs && @@" "$F"'
+
+mutation queue-timer-first-elapse-from-boot \
+  --file scripts/queue-cleanup.timer \
+  --bats tests/systemd-units.bats \
+  --test "queue-cleanup timer's first elapse is measured from activation, not boot" \
+  --why "OnBootSec measures from the last boot, and on a NAS up for weeks that is always in the past -- so '15 minutes after boot' has already elapsed and the timer's first sweep fires in the same second it is registered. Measured 2026-09-13: unit registered 23:48:19, log header 23:48:19, 16 items removed. Installing a schedule ran a destructive sweep, and the mutation is invisible to every other assertion in this file, which only checks that the timer repeats" \
+  --apply 'sed -i "s@^OnActiveSec=15min\$@OnBootSec=15min@" "$F"'
 
 mutation queue-timer-never-enabled \
   --file scripts/queue-cleanup.timer \

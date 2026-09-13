@@ -146,6 +146,22 @@ systemctl --user enable --now queue-cleanup.timer
 systemctl --user list-timers queue-cleanup.timer     # confirm it is armed
 ```
 
+**Deploying this unit can run it.** The timer's first elapse is
+`OnActiveSec=15min`, measured from when the timer was activated — so
+`enable --now` on a running system starts a sweep 15 minutes later, with no
+further warning. That is intended, and it is also true on any redeploy that
+restarts the timer, so check `logs/queue-cleanup.log` afterwards before assuming
+nothing happened.
+
+It used to be `OnBootSec=15min`, which looks like the same grace period and is
+not: on a NAS that has been up for weeks, "15 minutes after boot" is always in
+the past, so the timer's first elapse was already due and the service started in
+the same second the timer was registered. Measured 2026-09-13 — unit registered
+at 23:48:19, log header 23:48:19, *"Summary (APPLIED): 16 items removed, 7
+searches triggered"*. Installing a schedule fired a destructive sweep, and
+nothing in `systemctl` output says so. `tests/systemd-units.bats` fails if
+`OnBootSec` (or `OnStartupSec`/`OnUnitInactiveSec`) ever comes back.
+
 Output goes to `logs/queue-cleanup.log` (created by the unit, trimmed at 1,000 lines) and to the user journal:
 
 ```bash

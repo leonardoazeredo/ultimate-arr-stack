@@ -557,6 +557,30 @@ class FakeRun:
 
 
 CURL_KWARGS = {"capture_output": True, "text": True, "timeout": 30}
+CURL_ARGV = ["curl", "-s", "-f", "--config", "-"]
+
+
+def curl_config(fake, index=0):
+    """The config text handed to curl on stdin by call `index`.
+
+    Every real request goes through here rather than through argv. The API key
+    used to be an argv element, where /proc/<pid>/cmdline shows it to any user
+    on the box -- and this script runs hourly from systemd. Asserting on this
+    text is therefore asserting on where the key went, not just on the request
+    being well-formed.
+    """
+    return fake.calls[index][1]["input"]
+
+
+def config_value(text, field):
+    """The value of one `field = "..."` line, unescaped."""
+    prefix = f"{field} = "
+    for line in text.splitlines():
+        if line.startswith(prefix):
+            value = line[len(prefix):]
+            assert value.startswith('"') and value.endswith('"'), value
+            return value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+    raise AssertionError(f"no {field} in:\n{text}")
 
 
 def test_get_shells_out_to_curl_with_the_built_url(monkeypatch):
@@ -564,10 +588,37 @@ def test_get_shells_out_to_curl_with_the_built_url(monkeypatch):
     monkeypatch.setattr(m.subprocess, "run", fake)
     assert m.ArrApi().get(8989, "/api/v3/queue", "KEY") == {"records": [],
                                                            "totalRecords": 0}
-    assert fake.calls == [(
-        ["curl", "-s", "-f", "http://localhost:8989/api/v3/queue?apikey=KEY"],
-        CURL_KWARGS,
-    )]
+    assert fake.calls[0][0] == CURL_ARGV
+    assert fake.calls[0][1] == dict(CURL_KWARGS, input=curl_config(fake))
+    assert config_value(curl_config(fake), "url") == \
+        "http://localhost:8989/api/v3/queue?apikey=KEY"
+
+
+def test_the_api_key_is_not_an_argv_element(monkeypatch):
+    # The whole point of the config-file transport. An argv assertion that only
+    # checks the argv *shape* would pass with the key appended to it.
+    fake = FakeRun(stdout="{}")
+    monkeypatch.setattr(m.subprocess, "run", fake)
+    m.ArrApi().get(8989, "/api/v3/queue", "S3CRET")
+    argv, kwargs = fake.calls[0]
+    assert not any("S3CRET" in str(element) for element in argv)
+    assert "S3CRET" in kwargs["input"]
+
+
+def test_a_quote_or_backslash_in_a_value_survives_the_round_trip(monkeypatch):
+    # curl's config format quotes values, so a value carrying a quote would end
+    # its own line and the rest would be parsed as curl options. A title with
+    # either character is ordinary; a key with one is not, but the escaping is
+    # shared and this is the function that has to be right.
+    fake = FakeRun()
+    monkeypatch.setattr(m.subprocess, "run", fake)
+    m.ArrApi().post_json(7878, "/api/v3/command", 'KEY"with\\both',
+                         {"title": 'He said "hi" back\\slash'})
+    text = curl_config(fake)
+    assert config_value(text, "url") == \
+        'http://localhost:7878/api/v3/command?apikey=KEY"with\\both'
+    assert json.loads(config_value(text, "data")) == \
+        {"title": 'He said "hi" back\\slash'}
 
 
 def test_a_failed_curl_yields_none_rather_than_a_parse_error(monkeypatch):
@@ -582,11 +633,11 @@ def test_delete_sends_the_delete_verb_and_reports_success(monkeypatch):
     monkeypatch.setattr(m.subprocess, "run", fake)
     assert m.ArrApi().delete(7878, "/api/v3/queue/9?removeFromClient=true",
                              "KEY") is True
-    assert fake.calls == [(
-        ["curl", "-s", "-f", "-X", "DELETE",
-         "http://localhost:7878/api/v3/queue/9?removeFromClient=true&apikey=KEY"],
-        CURL_KWARGS,
-    )]
+    text = curl_config(fake)
+    assert config_value(text, "request") == "DELETE"
+    assert config_value(text, "url") == \
+        "http://localhost:7878/api/v3/queue/9?removeFromClient=true&apikey=KEY"
+    assert "data = " not in text
 
 
 def test_a_failed_delete_reports_false(monkeypatch):
@@ -599,16 +650,14 @@ def test_post_json_sends_the_payload_as_a_json_body(monkeypatch):
     monkeypatch.setattr(m.subprocess, "run", fake)
     assert m.ArrApi().post_json(7878, "/api/v3/command", "KEY",
                                 {"name": "MoviesSearch", "movieIds": [3]}) is True
-    argv, kwargs = fake.calls[0]
-    assert argv == [
-        "curl", "-s", "-f", "-X", "POST",
-        "-H", "Content-Type: application/json",
-        "-d", '{"name": "MoviesSearch", "movieIds": [3]}',
-        "http://localhost:7878/api/v3/command?apikey=KEY",
-    ]
-    assert kwargs == CURL_KWARGS
+    text = curl_config(fake)
+    assert config_value(text, "request") == "POST"
+    assert config_value(text, "url") == \
+        "http://localhost:7878/api/v3/command?apikey=KEY"
+    assert 'header = "Content-Type: application/json"' in text
     # The body must survive a round trip, not merely look right as a string.
-    assert json.loads(argv[8]) == {"name": "MoviesSearch", "movieIds": [3]}
+    assert json.loads(config_value(text, "data")) == \
+        {"name": "MoviesSearch", "movieIds": [3]}
 
 
 def test_a_failed_post_reports_false(monkeypatch):
@@ -697,12 +746,62 @@ def test_main_maps_argv_onto_the_run_arguments(monkeypatch):
         return 0, 0
 
     monkeypatch.setattr(m, "run", spy)
-    assert m.main(["prog", "true", "false", "SK", "RK"]) == 0
+    monkeypatch.setenv("SONARR_API_KEY", "SK")
+    monkeypatch.setenv("RADARR_API_KEY", "RK")
+    assert m.main(["prog", "true", "false"]) == 0
     assert seen["apply_changes"] is True
     assert seen["verbose"] is False
     assert isinstance(seen["api"], m.ArrApi)
     assert [s["name"] for s in seen["svcs"]] == ["Sonarr", "Radarr"]
     assert [s["key"] for s in seen["svcs"]] == ["SK", "RK"]
+
+
+def test_main_does_not_read_the_keys_from_argv(monkeypatch):
+    # The keys were argv elements 3 and 4 until 2026-09-13, which put both of
+    # them in this process's command line -- visible in /proc/<pid>/cmdline to
+    # any user on the box, on a script that systemd runs hourly. Extra argv is
+    # now ignored outright, and the environment is the only source.
+    seen = {}
+    monkeypatch.setattr(m, "run", lambda svcs, api, a, v, **kw: seen.update(
+        keys=[s["key"] for s in svcs]) or (0, 0))
+    monkeypatch.setenv("SONARR_API_KEY", "FROM-ENV")
+    monkeypatch.delenv("RADARR_API_KEY", raising=False)
+    m.main(["prog", "true", "false", "FROM-ARGV", "ALSO-ARGV"])
+    assert seen["keys"] == ["FROM-ENV"]
+
+
+def test_main_with_no_keys_in_the_environment_does_nothing(monkeypatch):
+    # An absent key is an empty string, and services() drops a service whose
+    # key is empty -- so a misconfigured environment is a clean no-op rather
+    # than a run against two unauthenticated APIs.
+    seen = {}
+    monkeypatch.delenv("SONARR_API_KEY", raising=False)
+    monkeypatch.delenv("RADARR_API_KEY", raising=False)
+    monkeypatch.setattr(m, "run", lambda svcs, api, a, v, **kw: seen.update(
+        names=[s["name"] for s in svcs]) or (0, 0))
+    assert m.main(["prog", "true", "false"]) == 0
+    assert seen["names"] == []
+
+
+def test_main_passes_apply_changes_as_its_own_argument(monkeypatch):
+    # Not covered by the spy above, and that is the point: the spy replaces
+    # run() entirely, so it can only report what main() handed it. This drives
+    # the REAL run() with a fake api and no configured keys, which means the
+    # stack is services() -> run() -> process_service() -> api, and the flag's
+    # position in that call matters. Drop it and ArrApi() lands in
+    # apply_changes (truthy) while the real flag lands in verbose -- an
+    # --apply run that quietly becomes a dry run, which is the exact shape of
+    # the qBittorrent-removal bug this test is named after.
+    monkeypatch.delenv("SONARR_API_KEY", raising=False)
+    monkeypatch.delenv("RADARR_API_KEY", raising=False)
+    api = FakeApi([stuck()])
+    monkeypatch.setattr(m, "ArrApi", lambda: api)
+    lines = []
+    assert m.main(["prog", "true", "false", "unused"]) == 0
+    # Same code path, with the output captured so the mode can be asserted on.
+    m.run(m.services("", ""), api, True, False, out=lines.append, now=NOW,
+          sleep=lambda _: None)
+    assert any("Summary (APPLIED)" in line for line in lines)
 
 
 def test_main_treats_anything_but_the_literal_true_as_false(monkeypatch):
@@ -711,7 +810,7 @@ def test_main_treats_anything_but_the_literal_true_as_false(monkeypatch):
     seen = {}
     monkeypatch.setattr(m, "run", lambda svcs, api, a, v, **kw: seen.update(
         apply_changes=a, verbose=v) or (0, 0))
-    m.main(["prog", "True", "1", "SK", ""])
+    m.main(["prog", "True", "1"])
     assert seen == {"apply_changes": False, "verbose": False}
 
 
@@ -741,6 +840,11 @@ def debrid(**kw):
     kw.setdefault("downloadClient", "Decypharr (TorBox)")
     kw.setdefault("sizeleft", 100)
     kw.setdefault("added", ago(48))
+    # The series id too: every real record carries one, and the removal memory
+    # keys on it alongside the title. A fixture without it produces the key
+    # "Sonarr|None|Item" and the second-strike tests would all pass vacuously
+    # against a key nothing else uses.
+    kw.setdefault("seriesId", 7)
     return rec(**kw)
 
 
@@ -947,7 +1051,7 @@ def test_a_sample_verdict_is_stuck_although_the_status_is_completed():
                                trackedDownloadStatus="completed",
                                statusMessages=[{"messages":
                                                 ["Unable to determine if file is a sample"]}]), NOW)
-    assert kind == "import_stuck"
+    assert kind == "import_refused"
     assert why == "cannot import: unable to determine if file is a sample"
 
 
@@ -958,7 +1062,7 @@ def test_a_release_that_does_not_contain_the_movie_is_stuck():
                                trackedDownloadStatus="warning",
                                statusMessages=[{"messages":
                                                 ["Movie [X-Men (2000)][tt0120903, 36657] was not found in the grabbed release: X-Men.2000.2160p.WEBDL"]}]), NOW)
-    assert kind == "import_stuck"
+    assert kind == "import_refused"
     assert why == "cannot import: was not found in the grabbed release"
 
 
@@ -969,7 +1073,7 @@ def test_the_wedged_import_markers_are_matched_case_insensitively():
     kind, _ = m.is_stuck(rec(trackedDownloadState="importPending",
                              statusMessages=[{"messages":
                                               ["UNABLE TO DETERMINE IF FILE IS A SAMPLE"]}]), NOW)
-    assert kind == "import_stuck"
+    assert kind == "import_refused"
 
 
 def test_an_import_pending_item_with_an_unrelated_message_is_left_alone():
@@ -980,13 +1084,6 @@ def test_an_import_pending_item_with_an_unrelated_message_is_left_alone():
                           statusMessages=[{"messages": ["Waiting to import"]}]), NOW)[0] is None
 
 
-def test_a_wedged_import_is_blocklisted():
-    # Unlike a stale debrid item, the release itself is the problem here, so
-    # the replacement search must not be handed the same file again.
-    assert m.should_blocklist(rec(downloadClient="Decypharr (TorBox)"),
-                              "import_stuck") is True
-
-
 def test_the_import_pending_warning_rule_still_wins_for_its_own_messages():
     # Ordering guard: the executable/not-an-upgrade verdict is a warning-level
     # import, classified `import_warning`, and the broader wedged-import rule
@@ -995,3 +1092,249 @@ def test_the_import_pending_warning_rule_still_wins_for_its_own_messages():
                              trackedDownloadStatus="warning",
                              statusMessages=[{"messages": ["Not an upgrade for existing file"]}]), NOW)
     assert kind == "import_warning"
+
+
+# --- refused imports: keep the file, do not blocklist ---------------------
+#
+# The first version of this rule classified a refused import as `import_stuck`
+# and treated it like every other removal: delete from the client, blocklist
+# the release, search again. All three were wrong, and the evidence is what
+# happened next. Both live files -- a 2.9 GB Sopranos episode and a 15 GB
+# X-Men -- imported cleanly by hand minutes after the script deleted them, so
+# the release was never the problem and blocklisting it dropped a working
+# copy. And a replacement search is pointless while the file is still on disk:
+# all it can do is fetch the same bytes twice.
+
+def refused(**kw):
+    """A completed download the arr refused to match."""
+    kw.setdefault("trackedDownloadState", "importPending")
+    kw.setdefault("statusMessages", [{"messages":
+                                      ["Unable to determine if file is a sample"]}])
+    kw.setdefault("seriesId", 7)
+    kw.setdefault("movieId", 7)
+    kw.setdefault("size", 2000)
+    return rec(**kw)
+
+
+def test_a_refused_import_is_never_blocklisted():
+    # Blocklisting it would blacklist a release that is sitting on disk,
+    # complete and importable, over a naming or sampling verdict.
+    assert m.should_blocklist(refused(), "import_refused") is False
+    assert m.should_blocklist(debrid(), "import_refused") is False
+
+
+def test_a_refused_import_keeps_the_download_on_disk():
+    assert m.should_remove_from_client(refused(), "import_refused") is False
+
+
+def test_every_other_reason_still_deletes_the_download():
+    # The exemption is one reason type wide. Widening it is how a dead 15 GB
+    # torrent stops being cleaned up.
+    for reason in ("stale", "error", "import_stuck", "import_blocked",
+                   "import_warning", "metadata"):
+        assert m.should_remove_from_client(debrid(), reason) is True
+
+
+def test_a_wedged_import_is_removed_from_the_queue_but_kept_on_disk():
+    api = FakeApi([refused()])
+    lines = []
+    m.process_service(svc(), api, True, False, out=lines.append, now=NOW,
+                      sleep=lambda _: None)
+    assert api.deletes == [
+        "/api/v3/queue/1?removeFromClient=false&blocklist=false"]
+    assert any("Kept on disk" in line for line in lines)
+    assert not any("blocklisted" in line.lower() and "Not blocklisted" not in line
+                   for line in lines)
+
+
+def test_a_kept_download_triggers_no_replacement_search():
+    # The file is still there. A search cannot improve on it, and can only
+    # fetch a second copy of something already on disk.
+    api = FakeApi([refused()])
+    removed, searches = m.process_service(svc(), api, True, False,
+                                          out=lambda *_: None, now=NOW,
+                                          sleep=lambda _: None)
+    assert (removed, searches) == (1, 0)
+    assert api.posts == []
+
+
+def test_the_dry_run_says_the_download_would_be_kept():
+    api = FakeApi([refused()])
+    lines = []
+    removed, searches = m.process_service(svc(), api, False, False,
+                                          out=lines.append, now=NOW)
+    assert (removed, searches) == (1, 0)
+    assert any("Would keep the download on disk" in line for line in lines)
+
+
+def test_an_import_stuck_that_is_not_a_refusal_still_deletes_and_blocklists():
+    # `import_stuck` and `import_refused` are separate reason types precisely
+    # so that the KEEP_FILE_REASONS exemption cannot swallow the stuck-import
+    # case, where the download really is the problem.
+    api = FakeApi([rec(trackedDownloadState="importing",
+                       trackedDownloadStatus="warning", seriesId=7)])
+    m.process_service(svc(), api, True, False, out=lambda *_: None, now=NOW,
+                      sleep=lambda _: None)
+    assert api.deletes == [
+        "/api/v3/queue/1?removeFromClient=true&blocklist=true"]
+
+
+# --- the second-strike blocklist ------------------------------------------
+#
+# Found live on 2026-09-13. The first-strike exemption above is what keeps a
+# transient provider failure from costing a release its place in the queue --
+# but on its own it is a livelock. Six titles were removed at 00:16, re-grabbed
+# by the arr's next RSS sync, and stalled again by 00:45, because nothing was
+# blocklisted and the indexer kept offering the same release. The memory of
+# what was removed is what breaks the loop.
+
+def test_a_release_is_remembered_by_service_target_and_title():
+    key = m.removal_key(svc(), {"seriesId": 7, "title": "Show.S01E01.1080p"})
+    assert key == "Sonarr|7|Show.S01E01.1080p"
+
+
+def test_a_record_with_no_title_still_gets_a_key():
+    assert m.removal_key(svc(), {"seriesId": 7}) == "Sonarr|7|unknown"
+
+
+def test_a_second_removal_of_the_same_release_is_blocklisted():
+    state = {}
+    m.remember_removal(state, svc(), debrid(), NOW)
+    assert m.should_blocklist(debrid(), "stale", removed_before=True) is True
+    assert m.should_blocklist(debrid(), "stale", removed_before=False) is False
+
+
+def test_the_first_removal_records_what_it_did():
+    state = {}
+    m.remember_removal(state, svc(), debrid(), NOW)
+    assert state["Sonarr|7|Item"]["count"] == 1
+    assert state["Sonarr|7|Item"]["last"] == NOW.isoformat()
+    m.remember_removal(state, svc(), debrid(), NOW)
+    assert state["Sonarr|7|Item"]["count"] == 2
+
+
+def test_a_corrupt_count_does_not_abort_the_run():
+    # The file outlives the code that wrote it and sits on the NAS between
+    # releases. Raising here aborts a run that has already deleted items from
+    # the client.
+    state = {"Sonarr|7|Item": {"count": "two", "last": NOW.isoformat()}}
+    m.remember_removal(state, svc(), debrid(), NOW)
+    assert state["Sonarr|7|Item"]["count"] == 1
+
+
+def test_a_missing_state_file_is_an_empty_memory(tmp_path):
+    assert m.load_state(str(tmp_path / "nope.json")) == {}
+
+
+def test_a_corrupt_state_file_is_an_empty_memory(tmp_path):
+    path = tmp_path / "state.json"
+    path.write_text("{ this is not json")
+    assert m.load_state(str(path)) == {}
+
+
+def test_a_state_file_that_is_not_an_object_is_an_empty_memory(tmp_path):
+    path = tmp_path / "state.json"
+    path.write_text('["a list, not a mapping"]')
+    assert m.load_state(str(path)) == {}
+
+
+def test_the_state_round_trips_through_a_file(tmp_path):
+    path = str(tmp_path / "nested" / "state.json")
+    state = {}
+    m.remember_removal(state, svc(), debrid(), NOW)
+    m.save_state(state, path=path, out=lambda *_: None)
+    assert m.load_state(path) == state
+
+
+def test_an_unwritable_state_file_does_not_abort_the_run(tmp_path, capsys):
+    # Reported, never raised. A cleanup that removed items and then died while
+    # writing its own bookkeeping is worse than one that forgot them.
+    lines = []
+    m.save_state({}, path=str(tmp_path), out=lines.append)
+    assert any("Could not write the removal memory" in line for line in lines)
+
+
+def test_a_stale_entry_is_pruned_and_a_fresh_one_is_kept():
+    old = (NOW - timedelta(days=m.STATE_RETENTION_DAYS + 1)).isoformat()
+    state = {"old": {"last": old}, "new": {"last": NOW.isoformat()}}
+    assert set(m.prune_state(state, NOW)) == {"new"}
+
+
+def test_an_entry_with_an_unreadable_timestamp_is_pruned():
+    # Otherwise it can never age out, and the file grows without bound.
+    assert m.prune_state({"x": {"last": "not a date"}}, NOW) == {}
+    assert m.prune_state({"x": {}}, NOW) == {}
+
+
+def test_the_state_path_sits_beside_the_log_it_is_gitignored_with():
+    # Three dirnames from scripts/lib/, not two: two lands in scripts/, which
+    # nothing else in this stack writes to.
+    assert m.STATE_PATH == os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(m.__file__)))), "logs", "queue-cleanup-state.json")
+
+
+def test_an_applied_run_writes_the_state_and_a_dry_run_does_not(tmp_path):
+    path = str(tmp_path / "state.json")
+
+    api = FakeApi([debrid()])
+    m.run(m.services("SK", ""), api, False, False, out=lambda *_: None,
+          now=NOW, state_path=path)
+    assert not os.path.exists(path), "a dry run recorded removals that never happened"
+
+    api = FakeApi([debrid()])
+    m.run(m.services("SK", ""), api, True, False, out=lambda *_: None,
+          now=NOW, sleep=lambda _: None, state_path=path)
+    assert m.load_state(path)["Sonarr|7|Item"]["count"] == 1
+
+
+def test_a_run_that_removed_nothing_does_not_write_state(tmp_path):
+    path = str(tmp_path / "state.json")
+    api = FakeApi([rec(added=ago(1))])
+    m.run(m.services("SK", ""), api, True, False, out=lambda *_: None,
+          now=NOW, state_path=path)
+    assert not os.path.exists(path)
+
+
+def test_the_second_run_over_a_remembered_release_blocklists_it(tmp_path):
+    # The livelock, end to end: remove, re-grab, remove again -- and the second
+    # removal is the one that stops the indexer offering it a third time.
+    path = str(tmp_path / "state.json")
+    first = FakeApi([debrid()])
+    m.run(m.services("SK", ""), first, True, False, out=lambda *_: None,
+          now=NOW, sleep=lambda _: None, state_path=path)
+    assert first.deletes == [
+        "/api/v3/queue/1?removeFromClient=true&blocklist=false"]
+
+    regrabbed = FakeApi([debrid(id=1)])
+    m.run(m.services("SK", ""), regrabbed, True, False, out=lambda *_: None,
+          now=NOW, sleep=lambda _: None, state_path=path)
+    assert regrabbed.deletes == [
+        "/api/v3/queue/1?removeFromClient=true&blocklist=true"]
+    assert m.load_state(path)["Sonarr|7|Item"]["count"] == 2
+
+
+def test_an_expired_removal_is_a_first_strike_again(tmp_path):
+    path = tmp_path / "state.json"
+    stale_stamp = (NOW - timedelta(days=m.STATE_RETENTION_DAYS + 1)).isoformat()
+    path.write_text(json.dumps({"Sonarr|7|Item": {"count": 1,
+                                                  "last": stale_stamp}}))
+    api = FakeApi([debrid()])
+    m.run(m.services("SK", ""), api, True, False, out=lambda *_: None,
+          now=NOW, sleep=lambda _: None, state_path=str(path))
+    assert api.deletes == [
+        "/api/v3/queue/1?removeFromClient=true&blocklist=false"]
+
+
+def test_a_dry_run_over_a_remembered_release_leaves_the_memory_alone(tmp_path):
+    # The memory has to describe what was actually removed. A dry run that
+    # recorded its intentions would blocklist a release on a removal it
+    # survived.
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps({"Sonarr|7|Item": {"count": 1,
+                                                  "last": NOW.isoformat()}}))
+    before = path.read_text()
+    api = FakeApi([debrid()])
+    m.run(m.services("SK", ""), api, False, False, out=lambda *_: None,
+          now=NOW, state_path=str(path))
+    assert path.read_text() == before
