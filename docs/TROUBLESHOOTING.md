@@ -681,9 +681,17 @@ which item you ask for, and it clears on its own. Measured that day: it began at
 01:20 BST after ~100 torrents were queued within an hour, refused every request
 for about 90 minutes — new and week-old items, GET and HEAD, `redirect` true and
 false, a 15 GB video and its .nfo sibling alike — then started answering `200`
-again with nothing changed on our side. Links issued before it began keep
+again. What ended it was time, not anything done here: the same probes that had
+been refused for 90 minutes were answered again with no configuration change, no
+restart and no key rotation in between. Links issued before it began keep
 serving for their full 3 hours, so transfers already in flight continue while
 new ones are refused; the pipeline looks half-alive rather than dead.
+
+None of which means the queue recovers by itself afterwards. An earlier draft of
+this section said so, in the same paragraph as the sentence above, and the two
+contradicted each other: nothing changed here is why the *refusals* stopped, and
+also why every item they wedged stayed wedged, and also why the items that
+`queue-cleanup` then removed were re-grabbed unchanged. See *Fix* below.
 
 **Diagnose:** ask for a link to something TorBox already holds. `200` means
 fine; `403 error code: 1010` means the account is being limited right now.
@@ -711,8 +719,16 @@ films.
 
 **Fix:** wait it out. It cleared inside ~90 minutes here. Once links answer
 again, `queue-cleanup.timer` removes the wedged items as they pass the 3-hour
-age rule and re-searches them; because TorBox already holds those releases, the
-re-grab resolves immediately. Do not force-clear the whole queue to hurry it
+age rule and re-searches them — **but do not expect the re-grab to succeed just
+because the refusals stopped.** Measured the same evening: six titles were
+removed at 00:16 and re-grabbed by the arr's next RSS sync, and by 00:45 all six
+were stalled again at 0%, because Decypharr was still treating the link error as
+permanent and the indexer kept offering the same release. The refusals stopping
+and the queue recovering are separate events, and `queue-cleanup` is what
+connects them: the first removal is exempt from the blocklist (the provider may
+have been transiently broken), and a release that comes back a second time is
+blocklisted, which is what forces a different release instead of the same one
+forever. Give it two sweeps. Do not force-clear the whole queue to hurry it
 along — that submits another burst and can re-trip the limiter.
 
 **Prevention:** queue in ones and twos. A 45-film `MissingMoviesSearch` plus six

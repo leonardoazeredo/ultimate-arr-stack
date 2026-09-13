@@ -76,26 +76,53 @@ env_with() {
 }
 
 # --- the argv boundary into Python ----------------------------------------
+#
+# The two flags cross this boundary as argv and the two API keys cross it in the
+# environment. That split is the point: until 2026-09-13 the keys were argv
+# elements 3 and 4, which put both of them in the process's command line --
+# readable through /proc/<pid>/cmdline by any user on the box, on a script
+# systemd runs hourly. Every test below therefore asserts on what is *absent*
+# from the argv as well as what is present.
 
-@test "queue-cleanup: passes apply, verbose and both keys in that order" {
+@test "queue-cleanup: passes apply and verbose as argv, in that order" {
     # Pinned because a type mismatch across exactly this boundary is what made
     # fix-sonarr-folders.sh's --apply inert for its whole life: bash writes
     # `true`/`false` and the Python compared against "True".
     stub_tool python3 'echo "ARGV: $*"'
     run "$SCRIPT" --apply -v
-    [[ "$output" == *"ARGV: "*"queue_cleanup.py true true KEY-sonarr KEY-radarr"* ]]
+    [[ "$output" == *"ARGV: "*"queue_cleanup.py true true"* ]]
+}
+
+@test "queue-cleanup: the API keys do not appear in the Python argv" {
+    # The regression this exists for. `key=value cmd` puts the key in cmd's
+    # environment; `cmd key` puts it in cmd's argv, and argv is world-readable
+    # on Linux. Asserting only on the args that ARE there cannot tell the two
+    # apart, because the argv with the keys appended still contains all of them.
+    stub_tool python3 'echo "ARGV: $*"'
+    run "$SCRIPT" --apply
+    [[ "$output" != *"KEY-sonarr"* ]]
+    [[ "$output" != *"KEY-radarr"* ]]
+}
+
+@test "queue-cleanup: the API keys reach the Python half in the environment" {
+    # The other half of the same contract: dropping the keys from the argv is
+    # only correct because they arrive this way instead. Without this, deleting
+    # them from the command line would look like a fix.
+    stub_tool python3 'echo "ENV: sonarr=$SONARR_API_KEY radarr=$RADARR_API_KEY"'
+    run "$SCRIPT" --apply
+    [[ "$output" == *"ENV: sonarr=KEY-sonarr radarr=KEY-radarr"* ]]
 }
 
 @test "queue-cleanup: a dry run passes false, not an empty string" {
     stub_tool python3 'echo "ARGV: $*"'
     run "$SCRIPT"
-    [[ "$output" == *"queue_cleanup.py false false KEY-sonarr KEY-radarr"* ]]
+    [[ "$output" == *"queue_cleanup.py false false"* ]]
 }
 
 @test "queue-cleanup: --verbose is accepted as well as -v" {
     stub_tool python3 'echo "ARGV: $*"'
     run "$SCRIPT" --verbose
-    [[ "$output" == *"queue_cleanup.py false true "* ]]
+    [[ "$output" == *"queue_cleanup.py false true"* ]]
 }
 
 @test "queue-cleanup: a failing Python half is fatal and says so" {
@@ -135,10 +162,12 @@ env_with() {
 
 @test "queue-cleanup: one key set is enough to proceed" {
     env_with SONARR_API_KEY=KEY-sonarr
-    stub_tool python3 'echo "ARGV: $*"'
+    stub_tool python3 'echo "ENV: sonarr=${SONARR_API_KEY:-unset} radarr=${RADARR_API_KEY:-unset}"'
     run "$SCRIPT"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"queue_cleanup.py false false KEY-sonarr "* ]]
+    # The unset one is an empty env var, not a missing one and not a stray
+    # argv element -- main() turns it into "" and services() then drops Radarr.
+    [[ "$output" == *"ENV: sonarr=KEY-sonarr radarr="* ]]
 }
 
 @test "queue-cleanup: a .env with unrelated keys set is not enough" {

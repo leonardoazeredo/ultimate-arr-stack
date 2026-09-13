@@ -48,11 +48,21 @@ set -euo pipefail
 # episodes themselves for Sonarr, the film for Radarr -- spaced out, because
 # a burst of searches gets 429 from the indexer and Sonarr then disables it.
 #
-# The one case that is NOT blocklisted is a stale item from a debrid client
-# (TorBox behind Decypharr, and the like). There the release is fine and the
-# provider failed to resolve a link, so the replacement search has to be free
-# to pick that same release again; blocklisting it forces a different one the
-# provider may not have cached, which fails the same way.
+# The one case that is NOT blocklisted on its first removal is a stale item
+# from a debrid client (TorBox behind Decypharr, and the like). There the
+# release is fine and the provider failed to resolve a link, so the replacement
+# search has to be free to pick that same release again; blocklisting it forces
+# a different one the provider may not have cached, which fails the same way.
+# That exemption is first-strike only -- what was removed is remembered in
+# logs/queue-cleanup-state.json, and the same release coming back a second time
+# is blocklisted. Without the record the exemption is a livelock: the same six
+# titles were removed, re-grabbed and stalled again in under 40 minutes on
+# 2026-09-13.
+#
+# Completed downloads the arr refused to match (a sample verdict, a release
+# that does not contain the film) are removed from the queue but NOT from the
+# client: the bytes are fine and import by hand, so deleting them throws away a
+# working release.
 #
 # ⚠️  This script was generated with LLM assistance and human-reviewed.
 #     Read and understand it before running. Do not execute scripts you
@@ -130,8 +140,14 @@ fi
 # reach a heredoc, universalmutator cannot parse one, and pytest cannot
 # import one. Argument indices are unchanged -- `python3 -` and
 # `python3 file.py` both put the first argument at sys.argv[1].
-if ! python3 "${SCRIPT_DIR}/lib/queue_cleanup.py" \
-        "$APPLY" "$VERBOSE" "$SONARR_KEY" "$RADARR_KEY"; then
+#
+# The keys go through the environment, not argv. They were argv arguments
+# until 2026-09-13, which put both arr API keys in this process's command
+# line, readable by anyone on the box through /proc/<pid>/cmdline -- and the
+# script runs hourly from systemd. An env assignment prefixed to the command
+# is still a credential on the process, but not on display in `ps`.
+if ! SONARR_API_KEY="$SONARR_KEY" RADARR_API_KEY="$RADARR_KEY" \
+        python3 "${SCRIPT_DIR}/lib/queue_cleanup.py" "$APPLY" "$VERBOSE"; then
     echo "ERROR: the queue cleanup exited non-zero; no webhook was sent." >&2
     exit 1
 fi

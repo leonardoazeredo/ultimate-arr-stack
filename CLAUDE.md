@@ -25,6 +25,13 @@ side. Already-issued links keep serving throughout (TorBox links live 3 hours),
 so transfers in flight continue while new ones are refused. It is transient, it
 never appears on the dashboard, and it is not a plan restriction.
 
+**"Cleared on its own" describes the refusals, not the queue.** The same absent
+change is why nothing recovered by itself: the items it wedged stayed at 0%
+until `queue-cleanup` removed them, and the items that *were* removed came back
+unchanged and stalled again within the half hour. Do not read this paragraph as
+"wait and it sorts itself out" — it is the opposite, and the two claims used to
+sit in the same document contradicting each other.
+
 The sting is downstream: Decypharr maps an unrecognised code to a **permanent**
 error, so it never retries; the arr keeps the item at 0% and, through the cutoff
 rule, refuses every alternative release for that title until `queue-cleanup`
