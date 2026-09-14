@@ -73,6 +73,7 @@ import shutil
 import subprocess
 import sys
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from xml.etree import ElementTree
 
@@ -89,6 +90,20 @@ API_TIMEOUT = 120
 # A staging directory older than this with no job claiming it came from a crash
 # mid-fetch, not from a fetch in progress.
 STALE_STAGING_HOURS = 1.0
+
+# How many finished releases are downloaded at once.
+#
+# One at a time was the ceiling on this whole path: a pass that finds five
+# completed releases pulled them in series, so the last one waited for four
+# full downloads plus four unpacks. Each fetch is a curl download and then an
+# unrar, and both spend nearly all their time waiting, so overlapping them
+# costs nothing but disk.
+#
+# Bounded, not unbounded. The unpack is CPU-bound and this runs on a NAS that
+# is also transcoding for Jellyfin, and the arr's importer reads the same
+# pool. Three keeps several CDN streams busy without stacking four unrars
+# against a transcode; raise it only with a measurement of the NAS's own load.
+FETCH_WORKERS = 3
 
 
 class TorBoxError(RuntimeError):
@@ -621,6 +636,22 @@ def sweep_staging(staging_dir, keep, older_than_hours=STALE_STAGING_HOURS,
     return removed
 
 
+def _fetch_one(torbox, key, job, watch_dir, staging_dir):
+    """Fetch one release, keeping its output to itself.
+
+    `fetch` narrates as it goes, and those lines would interleave into
+    nonsense if three of them shared a stream. Each call collects into its own
+    list and the caller prints them whole, so the log still reads as one
+    release at a time even though the work overlapped.
+    """
+    lines = []
+    try:
+        ok = fetch(torbox, key, job, watch_dir, staging_dir, out=lines.append)
+        return ok, lines, None
+    except Exception as err:  # noqa: BLE001 - classified by the caller
+        return False, lines, err
+
+
 def run(nzb_dir, watch_dir, staging_dir, state_path, failed_log, api_key,
         apply_changes=False, timeout_hours=24.0, verbose=False, out=print):
     """One pass: submit new NZBs, poll in-flight jobs, fetch completed ones."""
@@ -643,31 +674,51 @@ def run(nzb_dir, watch_dir, staging_dir, state_path, failed_log, api_key,
     submitted = submit(torbox, nzb_dir, state, out=out)
     save_state(state_path, state)
 
-    fetched = 0
-    for key, name, status in poll(torbox, state, timeout_hours, failed_log, out=out):
-        if status == "complete":
-            try:
-                if fetch(torbox, key, state["jobs"][key], watch_dir, staging_dir, out=out):
-                    del state["jobs"][key]
-                    fetched += 1
-                    discard_nzb(nzb_dir, name)
-            except PermanentError as err:
-                # Nothing will change on a retry, and a retry re-downloads the
-                # whole release. Record it, drop it, and clear the NZB so the
-                # next pass does not pick the same release up again.
-                record_failure(failed_log, name, f"unusable: {err}")
-                del state["jobs"][key]
-                discard_nzb(nzb_dir, name)
-                out(f"    ! {name}: {err}")
-            except Exception as err:  # noqa: BLE001 - one bad release must not stop the sweep
-                out(f"    ! {name}: fetch failed, will retry: {err}")
-        elif status in ("failed", "timeout"):
+    results = list(poll(torbox, state, timeout_hours, failed_log, out=out))
+
+    # Anything that is not a completed download settles here first. A failure
+    # or a timeout is terminal and costs one line to record; the fetch is the
+    # only part of a pass that takes minutes, so it goes last and in parallel.
+    for key, name, status in results:
+        if status in ("failed", "timeout"):
             # Both are terminal, and `poll` has already logged them.
             discard_nzb(nzb_dir, name)
             if status == "timeout":
                 out(f"    ! {name}: timed out")
-        elif verbose:
+        elif status != "complete" and verbose:
             out(f"    ... {name}: {status}")
+
+    fetched = 0
+    to_fetch = [(key, name) for key, name, status in results if status == "complete"]
+    if to_fetch:
+        with ThreadPoolExecutor(max_workers=min(FETCH_WORKERS, len(to_fetch))) as pool:
+            pending = {
+                pool.submit(_fetch_one, torbox, key, state["jobs"][key],
+                            watch_dir, staging_dir): (key, name)
+                for key, name in to_fetch
+            }
+            for future in as_completed(pending):
+                key, name = pending[future]
+                ok, lines, err = future.result()
+                for line in lines:
+                    out(line)
+                if ok:
+                    del state["jobs"][key]
+                    fetched += 1
+                    discard_nzb(nzb_dir, name)
+                elif isinstance(err, PermanentError):
+                    # Nothing will change on a retry, and a retry re-downloads
+                    # the whole release. Record it, drop it, and clear the NZB
+                    # so the next pass does not pick the same release up
+                    # again.
+                    record_failure(failed_log, name, f"unusable: {err}")
+                    del state["jobs"][key]
+                    discard_nzb(nzb_dir, name)
+                    out(f"    ! {name}: {err}")
+                else:
+                    # One bad release must not stop the sweep, and a transient
+                    # failure must leave the job in place to be retried.
+                    out(f"    ! {name}: fetch failed, will retry: {err}")
     save_state(state_path, state)
 
     sweep_staging(staging_dir, set(state["jobs"]), out=out)
