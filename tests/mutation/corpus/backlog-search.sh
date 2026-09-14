@@ -36,7 +36,7 @@ mutation backlog-cooldowns-share-one-kind \
 # --- the unbounded command comes back --------------------------------------
 
 mutation backlog-search-reaches-for-the-unbounded-command \
-  --file scripts/lib/backlog_search.py \
+  --file scripts/backlog-search.sh \
   --bats tests/backlog-search.bats \
   --test "^backlog-search: the script never shells out to an unbounded arr command" \
   --why "MissingEpisodeSearch searches the whole backlog in one command, cannot be cancelled once started, and had to be killed by restarting Sonarr on 2026-09-13. This entry proves the guard that keeps the unbounded command out of the script can actually fail" \
