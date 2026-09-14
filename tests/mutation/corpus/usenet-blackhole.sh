@@ -127,3 +127,31 @@ mutation usenet-blackhole-429-read-as-an-ordinary-error \
   --test "the extracted modules pass their pytest suite" \
   --why "a 429 that is not distinguished from a 500 is retried on the next pass like any other transient failure. That is the entire bug: the status is the one signal that says stop asking rather than try again" \
   --apply 'sed -i "s@^        if code == \"429\":\$@        if False:@" "$F"'
+
+# --- the ten active download slots ------------------------------------------
+#
+# The other half of the 429 problem, and the larger half by count. Measured
+# 2026-09-14: one pass spent 51 refusals offering releases to an account that
+# already had ten downloads running, each refusal a call against the same
+# 60-an-hour budget.
+
+mutation usenet-blackhole-active-limit-read-as-a-per-release-failure \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "without its own type an ACTIVE_LIMIT is an ordinary 500, so the loop carries on offering every remaining NZB to a provider that has already said there is no room. That is the 51-refusals-in-one-pass measurement, and the same reasoning that makes the 429 break out applies here" \
+  --apply 'sed -i "s@^        if api_error_code(body) == \"ACTIVE_LIMIT\":\$@        if False:@" "$F"'
+
+mutation usenet-blackhole-active-limit-does-not-stop-the-pass \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "continuing past the refusal spends one call per waiting release on an answer that cannot change within the pass. The point of the break is that the next pass, two minutes later, is a submission rather than a waste when a slot has freed" \
+  --apply 'sed -i "s@^            out(f\"    ! {release}: no free slots, stopping this pass: {err}\")\$@            out(f\"    ! {release}: no free slots\")\n            continue\n            break@g" "$F"'
+
+mutation usenet-blackhole-any-500-stops-the-pass \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "treating every 500 as a full account abandons a batch over one release the provider stumbled on. ACTIVE_LIMIT shares its status with UNKNOWN_ERROR, DOWNLOAD_SERVER_ERROR and a dozen others, which is why the decision is read from the body" \
+  --apply 'sed -i "s@^        if api_error_code(body) == \"ACTIVE_LIMIT\":\$@        if True:@" "$F"'
