@@ -16,7 +16,7 @@ A Docker Compose media stack for a NAS: request a film or a series, it downloads
 | Library | **Sonarr**, **Radarr** | Series and film management, quality profiles, imports |
 | Indexers | **Prowlarr** | Indexer manager; keeps Sonarr/Radarr in sync |
 | Subtitles | **Bazarr** | Subtitle search and sync |
-| Downloads | **Decypharr** (torrents via TorBox debrid), **SABnzbd** (Usenet) | All egress through the VPN except where deliberately not |
+| Downloads | **Decypharr** (torrents via TorBox debrid), **usenet-blackhole** (Usenet via TorBox) | Both let TorBox fetch the release and pull the finished file back over HTTPS; only indexer scraping goes through the VPN |
 | Playback | **Jellyfin** | Media server and apps |
 | VPN | **Gluetun**, **vpn-socks5** | WireGuard tunnel for the download clients; SOCKS proxy |
 | DNS | **Pi-hole**, **dnscrypt-proxy** | Network-wide DNS + ad blocking, upstream encrypted |
@@ -31,8 +31,8 @@ A Docker Compose media stack for a NAS: request a film or a series, it downloads
               (arr-core bridge,      │
                172.20.0.0/24)        │
                                      ▼
-   Seerr ──▶ Sonarr / Radarr ──┬─▶ Decypharr ──▶ TorBox (debrid, HTTPS)
-                               └─▶ SABnzbd ──▶ Gluetun ──▶ VPN provider
+   Seerr ──▶ Sonarr / Radarr ──┬─▶ Decypharr ───────▶ TorBox (debrid, HTTPS)
+                               └─▶ usenet-blackhole ─▶ TorBox (usenet API, HTTPS)
                     │                                          ▲
                     ▼                                          │
                 Jellyfin ◀── media volume (hardlinked, no copies)

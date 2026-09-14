@@ -48,8 +48,8 @@ Preview what it will do without making changes:
 
 | Service | Settings |
 |---------|----------|
-| Sonarr | Root folder, SABnzbd download client, TRaSH naming, NFO metadata, Reject ISO custom format, Usenet delay profile |
-| Radarr | Root folder, SABnzbd download client, TRaSH naming, NFO metadata, Reject ISO custom format, Usenet delay profile |
+| Sonarr | Root folder, Usenet Blackhole download client, TRaSH naming, NFO metadata, Reject ISO custom format, Usenet delay profile |
+| Radarr | Root folder, Usenet Blackhole download client, TRaSH naming, NFO metadata, Reject ISO custom format, Usenet delay profile |
 | Prowlarr | FlareSolverr proxy, Sonarr + Radarr app sync |
 | Bazarr | Sonarr + Radarr connections, subtitle sync (ffsubsync), Sub-Zero content mods, default English language |
 | Pi-hole | Upstream DNS pointed at the in-stack `dnscrypt-proxy` resolver |
@@ -74,6 +74,8 @@ Config (⚙️) → Folders → set **absolute paths**:
 - Completed Download Folder: `/data/usenet/complete`
 
 > For hardening settings and `.lan` hostname whitelist, see [SABnzbd Advanced Setup](APP-CONFIG-ADVANCED.md#sabnzbd-hardening-trash-recommended).
+>
+> **SABnzbd is not the arrs' usenet client.** `configure-apps.sh` gives Sonarr and Radarr a Blackhole client pointing at `/data/usenet/blackhole/{nzb,complete}`, and a systemd timer carries those NZBs through TorBox's API. SABnzbd's own connection to `nntp.torbox.app` reaches only articles about 90 days old, which is most of what an indexer returns — see [Usenet](TROUBLESHOOTING.md#usenet-sabnzbd-fails-every-article-torboxs-own-downloader-succeeds). The folders above matter only if you point SABnzbd at a provider of your own.
 
 ### 3. Prowlarr — Add your indexers
 

@@ -7,8 +7,8 @@ Your stack is running! Now configure each app to work together.
 **Configuration order:** Services depend on each other, so configure them in the order below:
 1. Jellyfin (media server — needed before Seerr)
 2. Decypharr (torrent client — needed before Sonarr/Radarr)
-3. SABnzbd (optional Usenet — needed before Sonarr/Radarr if using)
-4. Sonarr & Radarr (library managers — need Decypharr/SABnzbd configured first)
+3. Usenet (optional — `configure-apps.sh` adds the TorBox blackhole client for you)
+4. Sonarr & Radarr (library managers — need Decypharr configured first)
 5. Prowlarr (indexers — needs Sonarr/Radarr configured first)
 6. Seerr (requests — needs Jellyfin + Sonarr/Radarr configured first)
 7. Bazarr (subtitles — needs Sonarr/Radarr configured first)
@@ -42,11 +42,38 @@ Streams your media library to any device.
 
 > **Optional:** [Enable hardware transcoding](APP-CONFIG-ADVANCED.md#hardware-transcoding-intel-quick-sync) for GPU-accelerated playback (recommended for Ugreen NAS). Also see [Kodi for Fire TV](APP-CONFIG-ADVANCED.md#kodi-for-fire-tv-dolby-vision--truehd-atmos) and [RAID5 streaming tuning](APP-CONFIG-ADVANCED.md#raid5-streaming-tuning).
 
-## 4.2 SABnzbd (Usenet Downloads)
+## 4.2 Usenet (TorBox Blackhole)
 
-SABnzbd provides Usenet downloads alongside Decypharr's TorBox path.
+Usenet runs through TorBox's API. Sonarr and Radarr get the arrs' own **Blackhole** download
+client, which writes each `.nzb` it grabs into one folder and polls a second for the finished
+release:
 
-> **Note:** Usenet is routed through VPN for consistency and an extra layer of security.
+| Setting | Value |
+|---------|-------|
+| NZB Folder | `/data/usenet/blackhole/nzb` |
+| Watch Folder | `/data/usenet/blackhole/complete` |
+
+`configure-apps.sh` adds that client to both arrs, so there is nothing to set up by hand — provided
+the **SABnzbd container is running**, which is this stack's marker for "this deployment wants
+usenet". Stop that container and re-run the script and the client is simply not added; the blackhole
+itself needs no service and no credential of its own. Between the two folders sits
+[usenet-blackhole.timer](MAINTENANCE.md#usenet-blackhole-systemd-timer-every-2-minutes):
+it submits each NZB to TorBox, waits for the download, fetches it, unpacks the RAR volumes a scene
+release is usually posted as, and moves the result into the watch folder.
+
+> **Why a blackhole and not SABnzbd?** SABnzbd's TorBox server (`nntp.torbox.app`) serves articles
+> only up to about 90 days old, and most of what an indexer returns is older: 81 of 85 Sonarr
+> usenet grabs failed on it while the identical releases completed through TorBox's API. The
+> measurements are in [Usenet: SABnzbd Fails Every
+> Article](TROUBLESHOOTING.md#usenet-sabnzbd-fails-every-article-torboxs-own-downloader-succeeds).
+
+> **Next:** add a Usenet indexer in [Prowlarr §4.5](#45-prowlarr-indexer-manager).
+
+### Using a usenet provider of your own instead
+
+SABnzbd is still part of the stack and still works, and you may prefer paying a provider to
+routing everything through TorBox. To go that way, replace the Blackhole client with SABnzbd in
+each arr (Settings → Download Clients), then:
 
 1. **Access:** `http://NAS_IP:8082`
 2. **Run Quick-Start Wizard** with your Usenet provider details:
@@ -79,11 +106,13 @@ SABnzbd provides Usenet downloads alongside Decypharr's TorBox path.
 
 > **Optional:** [SABnzbd hardening](APP-CONFIG-ADVANCED.md#sabnzbd-hardening-trash-recommended) (TRaSH recommended settings for sorting, propagation, hostname whitelist).
 
-> **Next:** Once SABnzbd is set up, you'll add a Usenet indexer in [Prowlarr §4.5](#45-prowlarr-indexer-manager).
+> **Leave the blackhole timer running** even on this path. It is harmless with an empty NZB folder,
+> and a re-run of `configure-apps.sh` will put the Blackhole client back.
 
 ## 4.3 Sonarr (TV Shows)
 
-Searches for TV shows, sends download links to Decypharr or SABnzbd, and organizes completed files.
+Searches for TV shows, sends download links to Decypharr (torrents) or the Blackhole client
+(usenet), and organizes completed files.
 
 1. **Access:** `http://NAS_IP:8989`
 2. **Create admin account** when prompted
@@ -99,13 +128,13 @@ Searches for TV shows, sends download links to Decypharr or SABnzbd, and organiz
    - **Password:** Sonarr's API key (Settings → General → API Key)
    - Category: `tv`
 
-   **SABnzbd (Usenet):** *(if configured)*
-   - Add → SABnzbd
-   - Host: `172.20.0.3` (gluetun's static IP on the bridge — SABnzbd runs behind the VPN, and
-     using the IP directly avoids SABnzbd's `host_whitelist` hostname check returning `403 Forbidden`)
-   - Port: `8080` (SABnzbd's internal port — not `8082`, which is only the host-published mapping)
-   - API Key: (from SABnzbd Config → General)
-   - Category: `tv`
+   **Usenet Blackhole:** *(added by `configure-apps.sh`)*
+   - Add → Blackhole
+   - NZB Folder: `/data/usenet/blackhole/nzb`
+   - Watch Folder: `/data/usenet/blackhole/complete`
+   - There is no host or API key, because no usenet server is involved: a timer moves each NZB
+     between those two folders through TorBox's API — see [§4.2](#42-usenet-torbox-blackhole)
+   - No category (the Blackhole client has no such field)
 
 5. **Enable NFO metadata:** Settings → Metadata → Kodi (XBMC) / Emby → **Enable** (see [why this matters](#nfo-metadata))
    - Series Metadata: ✅
@@ -130,7 +159,8 @@ Searches for TV shows, sends download links to Decypharr or SABnzbd, and organiz
 
 ## 4.4 Radarr (Movies)
 
-Searches for movies, sends download links to Decypharr or SABnzbd, and organizes completed files.
+Searches for movies, sends download links to Decypharr (torrents) or the Blackhole client
+(usenet), and organizes completed files.
 
 1. **Access:** `http://NAS_IP:7878`
 2. **Create admin account** when prompted
@@ -146,13 +176,13 @@ Searches for movies, sends download links to Decypharr or SABnzbd, and organizes
    - **Password:** Radarr's API key (Settings → General → API Key)
    - Category: `movies`
 
-   **SABnzbd (Usenet):** *(if configured)*
-   - Add → SABnzbd
-   - Host: `172.20.0.3` (gluetun's static IP on the bridge — SABnzbd runs behind the VPN, and
-     using the IP directly avoids SABnzbd's `host_whitelist` hostname check returning `403 Forbidden`)
-   - Port: `8080` (SABnzbd's internal port — not `8082`, which is only the host-published mapping)
-   - API Key: (from SABnzbd Config → General)
-   - Category: `movies`
+   **Usenet Blackhole:** *(added by `configure-apps.sh`)*
+   - Add → Blackhole
+   - NZB Folder: `/data/usenet/blackhole/nzb`
+   - Watch Folder: `/data/usenet/blackhole/complete`
+   - There is no host or API key, because no usenet server is involved: a timer moves each NZB
+     between those two folders through TorBox's API — see [§4.2](#42-usenet-torbox-blackhole)
+   - No category (the Blackhole client has no such field)
 
 5. **Enable NFO metadata:** Settings → Metadata → Kodi (XBMC) / Emby → **Enable** (see [why this matters](#nfo-metadata))
    - Movie Metadata: ✅
@@ -172,7 +202,8 @@ Searches for movies, sends download links to Decypharr or SABnzbd, and organizes
 
 ### Prefer Usenet over Torrents (Optional)
 
-If you have both Decypharr and SABnzbd configured, Sonarr/Radarr will grab whichever release scores first. To prefer Usenet (faster, no seeding):
+With both Decypharr and the Blackhole client enabled, Sonarr/Radarr grab whichever release scores
+first. To prefer Usenet (faster, no seeding):
 
 1. Settings → Profiles → Delay Profiles
 2. Click the **wrench/spanner icon** on the existing profile (don't click +)
@@ -205,7 +236,7 @@ Manages torrent/Usenet indexers and syncs them to Sonarr/Radarr.
 1. **Access:** `http://NAS_IP:9696`
 2. **Create admin account** when prompted
 3. **Add Torrent Indexers:** Indexers (left sidebar) → + button → search by name
-4. **If using SABnzbd: Add Usenet Indexer**
+4. **If using Usenet: Add Usenet Indexer**
    - **Indexers** (left sidebar, NOT Settings → Indexer Proxies) → + button
    - Search by indexer name (e.g., "NZBGeek", "Usenet-Crawler") — use **Generic Newznab** if
      Prowlarr has no built-in definition for your indexer, with Url `https://<indexer-host>` and
@@ -223,9 +254,11 @@ Manages torrent/Usenet indexers and syncs them to Sonarr/Radarr.
    > changelog) currently doesn't resolve in DNS at all — confirmed via TorBox's own authoritative
    > nameserver, not just a local issue.
 
-   > **Full pipeline verified end-to-end (2026-08-15):** Usenet-Crawler search → Radarr grab →
-   > SABnzbd download/repair/unpack → Radarr hardlink-import, all confirmed with a real movie
-   > grab. One gotcha along the way: SABnzbd's TorBox NNTP server (`nntp.torbox.app:563`) rejected
+   > **Full pipeline verified end-to-end (2026-08-15), back when SABnzbd was the usenet client:**
+   > Usenet-Crawler search → Radarr grab → SABnzbd download/repair/unpack → Radarr hardlink-import,
+   > all confirmed with a real movie grab. That half is historical — SABnzbd no longer does the
+   > downloading (see [§4.2](#42-usenet-torbox-blackhole)) — but the TorBox credentials note below
+   > still applies if you point SABnzbd at a provider. One gotcha along the way: SABnzbd's TorBox NNTP server (`nntp.torbox.app:563`) rejected
    > login with a generic `482 Invalid username or password` even though the credentials matched
    > what was on file — this looked like a rate limit (TorBox's `/v1/api/user/me` showed a
    > `cooldown_until` field at the time) but was actually just **stale/incorrect Usenet
