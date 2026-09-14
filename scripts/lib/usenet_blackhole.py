@@ -74,7 +74,7 @@ import subprocess
 import sys
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from xml.etree import ElementTree
 
 TORBOX_API = "https://api.torbox.app/v1/api"
@@ -134,9 +134,34 @@ STALE_STAGING_HOURS = 1.0
 # against a transcode; raise it only with a measurement of the NAS's own load.
 FETCH_WORKERS = 3
 
+# How long to stop submitting after TorBox refuses one with a 429.
+#
+# `createusenetdownload` is limited to 60 calls an hour, and a pass that finds a
+# backlog offers every NZB it holds. Each offer is a call, so a pass that runs
+# into the limit and is retried two minutes later spends the next hour's budget
+# re-asking a question already answered: measured 2026-09-14, three refusals
+# recurring on pass after pass with nothing submitted in between, against 47
+# refusals to 37 acceptances overall.
+#
+# The API documents the window ("60 per 1 hour") and sends no Retry-After, so
+# the wait is the documented one. Guessing shorter costs calls on the probe; a
+# window is a sliding count, so waiting it out is the cheap side of the
+# trade. Polling and fetching continue throughout -- only submissions pause,
+# and the outbox holds them.
+RATE_LIMIT_BACKOFF_HOURS = 1.0
+
 
 class TorBoxError(RuntimeError):
     pass
+
+
+class RateLimited(TorBoxError):
+    """TorBox refused the call with a 429, so the hourly budget is spent.
+
+    Separate from TorBoxError because the answer is not "retry this one", it is
+    "stop asking for a while" -- and because the caller has to know that
+    offering the next NZB is as pointless as offering this one.
+    """
 
 
 class PermanentError(TorBoxError):
@@ -182,7 +207,13 @@ def _run_curl(lines, timeout=API_TIMEOUT):
         raise TorBoxError(f"curl exit {proc.returncode}: {proc.stderr.strip()[:200]}")
     body, _, code = proc.stdout.rpartition("\n")
     if not code.startswith("2"):
-        raise TorBoxError(f"HTTP {code}: {body.strip()[:240]}")
+        message = f"HTTP {code}: {body.strip()[:240]}"
+        # 429 is the one status where retrying the same call is the wrong
+        # answer, so it gets its own type rather than being another string the
+        # caller has to pattern-match on.
+        if code == "429":
+            raise RateLimited(message)
+        raise TorBoxError(message)
     return body
 
 
@@ -294,6 +325,41 @@ def save_state(path, state):
         raise StateError(f"cannot write {path}: {err}") from err
 
 
+def backoff_until(state):
+    """When submissions may resume, or None if they are not paused.
+
+    An unparseable timestamp reads as "not paused" rather than as a failure:
+    the worst case is one more refused call, where refusing to run would stop
+    the whole watcher over a malformed field.
+    """
+    raw = state.get("rate_limited_until")
+    if not raw:
+        return None
+    try:
+        moment = datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment
+
+
+def in_backoff(state, now=None):
+    """Whether submissions are paused, and for how much longer."""
+    until = backoff_until(state)
+    if until is None:
+        return None
+    now = now or datetime.now(timezone.utc)
+    return until if until > now else None
+
+
+def note_rate_limit(state, now=None):
+    """Record that TorBox refused a call, and pause submissions until it lifts."""
+    now = now or datetime.now(timezone.utc)
+    until = now + timedelta(hours=RATE_LIMIT_BACKOFF_HOURS)
+    state["rate_limited_until"] = until.isoformat()
+
+
 def job_key(nzb_path):
     """Identity for an NZB: its content hash, not its path.
 
@@ -376,6 +442,14 @@ def submit(torbox, nzb_dir, state, out=print):
         release = os.path.splitext(name)[0]
         try:
             data = torbox.submit_file(path, release)
+        except RateLimited as err:
+            # Stop the whole pass, not just this release. The hourly budget is
+            # spent, so every remaining NZB would earn the same refusal and
+            # spend another call from a budget that is already empty. The
+            # outbox keeps them all until the window moves.
+            note_rate_limit(state)
+            out(f"    ! {release}: rate limited, pausing submissions: {err}")
+            break
         except TorBoxError as err:
             out(f"    ! {release}: submit failed: {err}")
             continue
@@ -704,7 +778,22 @@ def run(nzb_dir, watch_dir, staging_dir, state_path, failed_log, api_key,
         return 0
 
     torbox = TorBox(api_key)
-    submitted = submit(torbox, nzb_dir, state, out=out)
+
+    paused_until = in_backoff(state)
+    if paused_until is not None:
+        # Submissions are the only thing that pauses. Polling and fetching run
+        # as normal, so downloads already in flight still finish; the outbox
+        # simply waits. Saying so every pass is the point: otherwise a quiet
+        # log reads as "nothing pending" rather than "deliberately holding".
+        wait = paused_until - datetime.now(timezone.utc)
+        out(f"  submissions paused for {wait.total_seconds() / 60:.0f}m more "
+            f"(until {paused_until.astimezone(timezone.utc).strftime('%H:%M')}Z)")
+        submitted = 0
+    else:
+        # Past the deadline, so the marker is stale. Dropping it here rather
+        # than inside in_backoff keeps that a question with no side effects.
+        state.pop("rate_limited_until", None)
+        submitted = submit(torbox, nzb_dir, state, out=out)
     save_state(state_path, state)
 
     results = list(poll(torbox, state, timeout_hours, failed_log, out=out))
