@@ -27,6 +27,8 @@ asserted below.
 
 import json
 import os
+import threading
+import time
 import zipfile
 from datetime import datetime, timedelta, timezone
 
@@ -750,6 +752,153 @@ def test_a_failed_fetch_leaves_the_job_in_flight(tmp_path, monkeypatch):
     assert len(jobs) == 1
     assert next(iter(jobs.values()))["name"] == "Rel-GRP"
     assert not (watch / "Rel-GRP").exists()
+
+
+# --- fetching several releases at once -------------------------------------
+#
+# One at a time was the ceiling on this whole path. A pass that finds five
+# finished releases pulled them in series, so the last waited out four full
+# downloads and four unpacks. Each fetch is a curl download then an unrar, and
+# both are nearly all waiting, so overlapping them costs nothing but disk.
+
+def several_jobs(tmp_path, count):
+    """`count` in-flight jobs, each a distinct NZB, all reported completed.
+
+    The bodies have to differ: `job_key` hashes the content, so identical NZBs
+    are one job, and a fixture that reused the default body would pass every
+    assertion below against a single release.
+    """
+    nzb_dir = tmp_path / "nzb"
+    nzb_dir.mkdir()
+    watch = tmp_path / "watch"
+    watch.mkdir()
+    state_path = str(tmp_path / "state.json")
+    jobs, listing = {}, []
+    for i in range(count):
+        name = "Rel-%d-GRP" % i
+        body = VALID_NZB.replace(b"Some.Release-GRP", name.encode())
+        path = write_nzb(str(nzb_dir), name + ".nzb", body)
+        jobs[m.job_key(path)] = job(name=name, torbox_id=i + 1)
+        listing.append({"id": i + 1, "download_state": "completed"})
+    m.save_state(state_path, {"jobs": jobs})
+    return nzb_dir, watch, state_path, listing
+
+
+def test_finished_releases_are_fetched_concurrently(tmp_path, monkeypatch):
+    # A barrier is what makes this a test of concurrency rather than of
+    # wall-clock. Every worker must arrive before any of them leaves, so a
+    # serial implementation never starts the second fetch: the barrier times
+    # out, the fetches fail, and the jobs are still in flight at the end.
+    #
+    # Three is written out rather than taken from FETCH_WORKERS on purpose.
+    # Sized off the constant, this test shrinks its own fixture when the
+    # constant is mutated -- FETCH_WORKERS = 1 makes one job and a one-slot
+    # barrier, which releases immediately and passes. That is exactly the
+    # regression it exists to catch, and it survived until this was hardcoded.
+    nzb_dir, watch, state_path, listing = several_jobs(tmp_path, 3)
+    barrier = threading.Barrier(3, timeout=5)
+    started = []
+
+    def fake_fetch(torbox, key, job, watch_dir, staging_dir, out=print):
+        started.append(job["name"])
+        barrier.wait()
+        out(f"    fetched: {job['name']}")
+        return True
+
+    monkeypatch.setattr(m, "fetch", fake_fetch)
+    monkeypatch.setattr(m, "TorBox", lambda *a, **k: FakeTorBox(list_result=listing))
+    m.run(str(nzb_dir), str(watch), str(tmp_path / "staging"), state_path,
+          str(tmp_path / "f.log"), "key", apply_changes=True, out=lambda *a: None)
+
+    assert len(started) == m.FETCH_WORKERS
+    assert m.load_state(state_path)["jobs"] == {}
+
+
+def test_the_fetch_pool_is_bounded(tmp_path, monkeypatch):
+    # Unbounded would stack an unrar per completed release on a NAS that is
+    # also transcoding, and the arr's importer reads the same disk.
+    nzb_dir, watch, state_path, listing = several_jobs(tmp_path, m.FETCH_WORKERS * 2)
+    lock = threading.Lock()
+    live, peak = 0, 0
+
+    def fake_fetch(torbox, key, job, watch_dir, staging_dir, out=print):
+        nonlocal live, peak
+        with lock:
+            live += 1
+            peak = max(peak, live)
+        time.sleep(0.05)
+        with lock:
+            live -= 1
+        out(f"    fetched: {job['name']}")
+        return True
+
+    monkeypatch.setattr(m, "fetch", fake_fetch)
+    monkeypatch.setattr(m, "TorBox", lambda *a, **k: FakeTorBox(list_result=listing))
+    m.run(str(nzb_dir), str(watch), str(tmp_path / "staging"), state_path,
+          str(tmp_path / "f.log"), "key", apply_changes=True, out=lambda *a: None)
+
+    assert peak <= m.FETCH_WORKERS
+    assert peak >= 2, "the pool never overlapped anything, so it is not parallel"
+    assert m.load_state(state_path)["jobs"] == {}
+
+
+def test_the_pool_is_not_pinned_to_one_worker():
+    # FETCH_WORKERS is the knob; a regression to 1 would restore the serial
+    # behaviour the concurrency test above is written to catch.
+    assert m.FETCH_WORKERS >= 2
+
+
+def test_one_releases_output_is_not_interleaved_with_anothers(tmp_path, monkeypatch):
+    # Three threads sharing a print stream would put a release's lines inside
+    # another's. Each fetch collects its own and the caller prints them whole.
+    nzb_dir, watch, state_path, listing = several_jobs(tmp_path, 3)
+    lines = []
+
+    def fake_fetch(torbox, key, job, watch_dir, staging_dir, out=print):
+        name = job["name"]
+        out(f"    unpacked {name}")
+        out(f"    fetched: {name}")
+        return True
+
+    monkeypatch.setattr(m, "fetch", fake_fetch)
+    monkeypatch.setattr(m, "TorBox", lambda *a, **k: FakeTorBox(list_result=listing))
+    m.run(str(nzb_dir), str(watch), str(tmp_path / "staging"), state_path,
+          str(tmp_path / "f.log"), "key", apply_changes=True, out=lines.append)
+
+    body = [l for l in lines if "fetched: Rel-" in l or "unpacked Rel-" in l]
+    assert len(body) == 6
+    # Each release's two lines must be adjacent, in its own order.
+    for i in range(0, len(body), 2):
+        first, second = body[i], body[i + 1]
+        assert "unpacked" in first and "fetched" in second
+        assert first.split()[-1] == second.split()[-1]
+
+
+def test_a_permanent_failure_in_a_batch_drops_only_that_release(tmp_path, monkeypatch):
+    # Under concurrency the three outcomes are decided per future, in the
+    # caller. A permanent failure must not take the successful fetches with it,
+    # and the transient one must stay in flight to be retried.
+    nzb_dir, watch, state_path, listing = several_jobs(tmp_path, 3)
+    outcome = {"Rel-0-GRP": True, "Rel-1-GRP": False, "Rel-2-GRP": False}
+
+    def fake_fetch(torbox, key, job, watch_dir, staging_dir, out=print):
+        name = job["name"]
+        if name == "Rel-1-GRP":
+            raise m.PermanentError("no unpacker")
+        out(f"    fetched: {name}")
+        return outcome[name]
+
+    monkeypatch.setattr(m, "fetch", fake_fetch)
+    monkeypatch.setattr(m, "TorBox", lambda *a, **k: FakeTorBox(list_result=listing))
+    failed_log = str(tmp_path / "failed.log")
+    m.run(str(nzb_dir), str(watch), str(tmp_path / "staging"), state_path,
+          failed_log, "key", apply_changes=True, out=lambda *a: None)
+
+    jobs = m.load_state(state_path)["jobs"]
+    # Rel-0 delivered and Rel-1 is unusable, so both leave the state file;
+    # only the transient one stays, to be retried next pass.
+    assert [j["name"] for j in jobs.values()] == ["Rel-2-GRP"]
+    assert "no unpacker" in open(failed_log).read()
 
 
 # --- stale staging ---------------------------------------------------------

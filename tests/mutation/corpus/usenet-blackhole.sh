@@ -42,3 +42,31 @@ mutation usenet-blackhole-staging-inside-the-watch-folder \
   --test "^usenet-blackhole: staging is not inside the arr's watch folder" \
   --why "Sonarr does not skip dot-directories at the top level of a watch folder: DiskProviderBase.GetDirectories skips only FileAttributes.System, and DiskScanService.FilterPaths matches dot-segments with a regex that needs a trailing separator, which PathExtensions.GetRelativePath has already trimmed off. A staging directory parked in there is reported to the arr as a completed download, and its half-written files are what get imported" \
   --apply 'perl -pi -e "s/\Qcomplete}\"\E/staging}\"/" "$F"'
+
+# --- the fetch pool: serial, unbounded, or interleaved ----------------------
+#
+# One at a time was the ceiling on this path: a pass that found five finished
+# releases pulled them in series, so the last waited out four downloads and
+# four unpacks. These three pin the concurrency, its bound, and the thing that
+# goes wrong when three threads share one output stream.
+
+mutation usenet-blackhole-fetches-one-at-a-time \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "FETCH_WORKERS = 1 restores the serial fetch this was written to remove, and it is the mutation that matters most here: the concurrency test sizes its barrier at three and is hardcoded rather than reading the constant, because a fixture that read it would shrink to one job and one barrier slot and pass against a serial implementation" \
+  --apply 'sed -i "s@^FETCH_WORKERS = 3\$@FETCH_WORKERS = 1@" "$F"'
+
+mutation usenet-blackhole-fetch-pool-unbounded \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "an uncapped pool starts an unrar per completed release at once. The unpack is CPU-bound and this runs on a NAS that is also transcoding, with the arr's importer reading the same disk, so the bound is what keeps a large batch from stalling everything else on the box" \
+  --apply 'sed -i "s@max_workers=min(FETCH_WORKERS, len(to_fetch))@max_workers=None@" "$F"'
+
+mutation usenet-blackhole-fetch-output-interleaved \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "each fetch collects its own lines and the caller prints them whole. Handing the shared stream to three threads instead puts one release's progress inside another's, which is how a log stops being readable at exactly the moment -- several concurrent failures -- when someone needs it" \
+  --apply 'sed -i "s@out=lines.append)@out=print)@" "$F"'
