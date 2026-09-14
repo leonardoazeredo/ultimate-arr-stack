@@ -1179,6 +1179,221 @@ def test_an_import_stuck_that_is_not_a_refusal_still_deletes_and_blocklists():
         "/api/v3/queue/1?removeFromClient=true&blocklist=true"]
 
 
+# --- a client's own error, whatever status the arr pairs with it ----------
+#
+# Found live on 2026-09-14. Four items sat in Sonarr's queue with
+# `errorMessage: "qBittorrent is reporting an error"` and
+# `trackedDownloadStatus: "ok"`. The keyword branch above requires "warning",
+# so it never looked at them, and each one held one of Decypharr's five
+# download slots -- the same five that had already been wedged all morning.
+#
+# The status is the arr's summary, not the client's verdict, and the two
+# disagree here. Gating on it is what the importPending comment in the module
+# already warns about; this is the second branch to make that mistake.
+
+def client_error(msg="qBittorrent is reporting an error", **kw):
+    """A record carrying a download client's error through the arr.
+
+    The client name is set because `is_debrid_client` reads it and the
+    blocklist tests below are about which branch that lands in -- without it
+    they would pass against the swarm branch and prove nothing.
+    """
+    kw.setdefault("downloadClient", "Decypharr (TorBox)")
+    kw.setdefault("trackedDownloadStatus", "ok")
+    kw.setdefault("errorMessage", msg)
+    kw.setdefault("seriesId", 7)
+    return rec(**kw)
+
+
+def test_a_client_error_is_removed_even_when_the_status_is_ok():
+    # The whole fix. With the status gate left in place this returns None and
+    # the item holds its slot indefinitely.
+    kind, why = m.is_stuck(client_error(), NOW)
+    assert kind == "client_error"
+    assert why == "qbittorrent is reporting an error"
+
+
+def test_the_client_name_is_not_part_of_the_match():
+    # Each arr phrases this with whichever client is configured, so pinning
+    # "qBittorrent" would cover exactly one deployment's client.
+    for name in ("qBittorrent", "SABnzbd", "Transmission", "Deluge"):
+        kind, _ = m.is_stuck(client_error(f"{name} is reporting an error"), NOW)
+        assert kind == "client_error", name
+
+
+def test_a_client_error_carried_in_a_status_message_is_found_too():
+    # The arr puts this in errorMessage on the records seen so far, but the
+    # same text arrives as a status message elsewhere, and reading only one
+    # of the two places is how a rule covers half its cases.
+    kind, _ = m.is_stuck(rec(statusMessages=[{"messages":
+                                              ["qBittorrent is reporting an error"]}]), NOW)
+    assert kind == "client_error"
+
+
+def test_an_ordinary_status_message_is_not_a_client_error():
+    # Guards the marker against becoming "any message at all": these are real
+    # status messages from healthy items.
+    for msg in ("Waiting to import", "No files found are eligible for import",
+                "Not an upgrade for existing file"):
+        kind, _ = m.is_stuck(rec(statusMessages=[{"messages": [msg]}]), NOW)
+        assert kind is None, msg
+
+
+def test_a_client_error_is_checked_at_any_progress():
+    # The four live records were at 0%, 0%, 76% and 100%. None of those is a
+    # reason to keep waiting once the client has said the item is broken.
+    for sizeleft in (100, 25, 0):
+        kind, _ = m.is_stuck(client_error(size=100, sizeleft=sizeleft), NOW)
+        assert kind == "client_error", sizeleft
+
+
+def test_a_client_error_from_a_debrid_client_is_not_blocklisted_first():
+    # The live message is TorBox refusing requestdl with a 400 -- the provider
+    # failing to hand over a release that is itself fine. Blocklisting it would
+    # force a different release, which the provider may not have cached.
+    assert m.should_blocklist(client_error(), "client_error") is False
+
+
+def test_a_client_error_from_a_debrid_client_is_blocklisted_second():
+    # First strike only, for the same livelock reason as `stale`: with nothing
+    # ever blocklisted the arr re-grabs the identical release and it fails
+    # identically.
+    assert m.should_blocklist(client_error(), "client_error",
+                              removed_before=True) is True
+
+
+def test_a_client_error_from_a_swarm_client_is_blocklisted_immediately():
+    assert m.should_blocklist(client_error(downloadClient="qBittorrent"),
+                              "client_error") is True
+
+
+def test_a_client_error_does_delete_the_download():
+    # Unlike a refused import, a client that says the item is broken is not one
+    # to trust the bytes to.
+    assert m.should_remove_from_client(client_error(), "client_error") is True
+
+
+# --- finished, and the arr never imports it -------------------------------
+#
+# Found live on 2026-09-14, and the more expensive of the two. Four items were
+# complete on disk, reported `sizeleft: 0` with `trackedDownloadState:
+# "downloading"` and no message of any kind -- exactly the shape the 0%
+# rule cannot see, because that rule wants `sizeleft == size`. They held all
+# five of Decypharr's slots for eight hours while 56 items queued behind them,
+# got culled at the three-hour mark for sitting at 0%, and were re-grabbed into
+# the same full slots.
+#
+# All four imported cleanly by hand once pointed at the file, which is what
+# makes the file worth keeping.
+
+def finished(**kw):
+    """A download that finished, with the client still calling it downloading."""
+    kw.setdefault("size", 1000)
+    kw.setdefault("sizeleft", 0)
+    kw.setdefault("trackedDownloadState", "downloading")
+    kw.setdefault("trackedDownloadStatus", "ok")
+    kw.setdefault("seriesId", 7)
+    return rec(**kw)
+
+
+def test_a_finished_download_the_arr_never_imported_is_removed():
+    kind, why = m.is_stuck(debrid(**finished(added=ago(10))), NOW)
+    assert kind == "complete_not_imported"
+    assert why == "finished but not imported for 10h"
+
+
+def test_a_finished_download_is_given_the_debrid_leash():
+    # Three hours, not zero: a healthy item spends a minute or two here while
+    # the arr notices, and deleting on sight would race every normal import.
+    assert m.is_stuck(debrid(**finished(added=ago(0.5))), NOW)[0] is None
+    assert m.is_stuck(debrid(**finished(added=ago(3))), NOW)[0] is None
+    assert m.is_stuck(debrid(**finished(added=ago(3.5))), NOW)[0] == "complete_not_imported"
+
+
+def test_a_finished_swarm_download_keeps_the_longer_leash():
+    # A swarm client can legitimately sit at 100% while it seeds or rechecks,
+    # so the same record is not evidence of anything after five hours.
+    assert m.is_stuck(rec(downloadClient="qBittorrent", **finished(added=ago(5))), NOW)[0] is None
+    assert m.is_stuck(rec(downloadClient="qBittorrent",
+                          **finished(added=ago(25))), NOW)[0] == "complete_not_imported"
+
+
+def test_a_half_downloaded_item_is_not_a_finished_one():
+    # `sizeleft == 0` and not `sizeleft == 0 or sizeleft < size`. A partial
+    # download is progress, and the next test in the age section already
+    # protects that case from the other rule.
+    assert m.is_stuck(debrid(**finished(sizeleft=1, added=ago(500))), NOW)[0] is None
+
+
+def test_a_sizeless_item_is_not_a_finished_one():
+    # size == 0 means "no size information", not "nothing to download", and it
+    # has its own arm of the age rule with its own wording. Left young, so the
+    # only thing this can show is which rule declines to claim it -- an old one
+    # is `stale` on the other arm, which is correct and tested above.
+    assert m.is_stuck(debrid(**finished(size=0, sizeleft=0, added=ago(1))), NOW)[0] is None
+
+
+def test_a_download_that_moved_on_to_importing_is_left_alone():
+    # The state is half the condition. Once the arr has picked the item up, the
+    # client is no longer the thing being waited on, whatever it still reports
+    # -- so this rule must not claim it. `importBlocked` is listed only for
+    # that: it has a reason of its own, which is a different rule's business.
+    for state in ("importPending", "importing", "importBlocked"):
+        kind, _ = m.is_stuck(debrid(**finished(trackedDownloadState=state,
+                                               added=ago(500))), NOW)
+        assert kind != "complete_not_imported", state
+    for state in ("importPending", "importing"):
+        assert m.is_stuck(debrid(**finished(trackedDownloadState=state,
+                                            added=ago(500))), NOW)[0] is None, state
+
+
+def test_a_finished_download_with_no_timestamp_is_not_removed():
+    assert m.is_stuck(debrid(**finished(added=None)), NOW)[0] is None
+    assert m.is_stuck(debrid(**finished(added="not a date")), NOW)[0] is None
+
+
+def test_a_client_error_wins_over_the_finished_rule():
+    # Both match a 100% record. The client's verdict is the specific one, and
+    # it is the one whose handling differs: that file is deleted, this one is
+    # kept.
+    both = client_error(size=100, sizeleft=0, added=ago(500))
+    assert m.is_stuck(both, NOW)[0] == "client_error"
+
+
+def test_a_finished_download_the_arr_never_imported_keeps_its_file():
+    # The bytes are complete and importable; the arr simply never asked. All
+    # four live cases imported by hand within minutes. Deleting them would have
+    # thrown away ~5.5 GB that was already on disk.
+    assert m.should_remove_from_client(finished(), "complete_not_imported") is False
+
+
+def test_a_finished_download_the_arr_never_imported_is_never_blocklisted():
+    # The release is not the problem, so the replacement search has to stay
+    # free to pick it again.
+    assert m.should_blocklist(finished(), "complete_not_imported") is False
+    assert m.should_blocklist(finished(), "complete_not_imported",
+                              removed_before=True) is False
+
+
+def test_the_dry_run_says_a_finished_download_would_be_kept():
+    api = FakeApi([debrid(**finished(added=ago(10)))])
+    lines = []
+    removed, searches = m.process_service(svc(), api, False, False,
+                                          out=lines.append, now=NOW)
+    assert (removed, searches) == (1, 0)
+    assert any("Would keep the download on disk" in line for line in lines)
+
+
+def test_a_finished_download_is_removed_from_the_client_but_kept_on_disk():
+    # The queue entry is what blocks every alternative release through the
+    # cutoff rule, so it has to go even though the file stays.
+    api = FakeApi([debrid(**finished(added=ago(10)))])
+    m.process_service(svc(), api, True, False, out=lambda *_: None, now=NOW,
+                      sleep=lambda _: None)
+    assert api.deletes == [
+        "/api/v3/queue/1?removeFromClient=false&blocklist=false"]
+
+
 # --- the second-strike blocklist ------------------------------------------
 #
 # Found live on 2026-09-13. The first-strike exemption above is what keeps a

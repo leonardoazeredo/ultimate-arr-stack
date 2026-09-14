@@ -105,13 +105,32 @@ IMPORT_BLOCKING_MARKERS = (
     "was not found in the grabbed release",
 )
 
+# Messages that are the arr relaying a verdict from the download client
+# itself: the client has already decided this item is broken. Sonarr and
+# Radarr phrase it "<client> is reporting an error", so matching the tail
+# covers every client rather than just qBittorrent.
+#
+# Trusted at any trackedDownloadStatus, which is the whole point. On
+# 2026-09-14 four items sat in Sonarr's queue with this exact message, an
+# error on the record, and `trackedDownloadStatus: "ok"` -- the keyword branch
+# above requires "warning" and would not look at them, so nothing removed
+# them and each held one of Decypharr's five download slots. Whenever the arr
+# carries a client's error through, the status it sets alongside is not
+# something to gate on.
+CLIENT_ERROR_MARKERS = ("is reporting an error",)
+
 
 # Reason types whose files are kept on disk and left alone beyond the queue
 # entry itself. An `import_refused` item is a completed download the arr would
 # not match -- the bytes are all there and the verdict is about naming or
 # sampling, so deleting them throws away a working release and asking for a
 # different one. Both live cases on 2026-09-13 imported cleanly by hand.
-KEEP_FILE_REASONS = ("import_refused",)
+#
+# `complete_not_imported` is the same reasoning with a different cause: the
+# download finished and the arr simply never asked for it. All four items that
+# wedged Decypharr's slots on 2026-09-14 were in exactly this state, and all
+# four imported cleanly by hand once pointed at the file.
+KEEP_FILE_REASONS = ("import_refused", "complete_not_imported")
 
 # Where the script remembers what it has already removed once. Without it the
 # first-strike exemption above is a livelock: remove the item, the arr's next
@@ -294,14 +313,20 @@ def should_blocklist(record, reason_type, removed_before=False):
     on the second removal, which is the same thing the swarm case does
     immediately, just one round later.
 
-    `import_refused` is exempt regardless. The arr's verdict there is about
-    matching -- a sample call, a release that did not contain the film -- not
-    about the release being bad, and both live cases imported cleanly by hand.
-    Blocklisting those would blacklist a working release over a naming quirk.
+    `client_error` gets the same first-strike exemption for the same reason.
+    The live messages there are TorBox refusing `requestdl` with a 400, which
+    is the provider failing to hand over a release that is itself fine -- four
+    of them downloaded completely and imported by hand the same morning.
+
+    `import_refused` and `complete_not_imported` are exempt regardless. The
+    arr's verdict there is about matching -- a sample call, a release that did
+    not contain the film -- not about the release being bad, and both live
+    cases imported cleanly by hand. Blocklisting those would blacklist a
+    working release over a naming quirk.
     """
     if reason_type in KEEP_FILE_REASONS:
         return False
-    if reason_type == "stale" and is_debrid_client(record):
+    if reason_type in ("stale", "client_error") and is_debrid_client(record):
         return removed_before
     return True
 
@@ -320,6 +345,10 @@ def should_remove_from_client(record, reason_type):
     imported by hand minutes after this script had deleted them. The queue
     entry still has to go (it is what blocks every alternative through the
     cutoff rule), and it goes with `removeFromClient=false`.
+
+    `complete_not_imported` is the same answer for the same reason: the bytes
+    are on disk and the arr never asked for them. Both are listed together in
+    KEEP_FILE_REASONS, so this returns False for either.
     """
     return reason_type not in KEEP_FILE_REASONS
 
@@ -441,6 +470,16 @@ def episode_ids(record):
     return tuple(sorted(ids))
 
 
+def _leash_hours(record):
+    """How long this client's download is given before the queue entry is dead.
+
+    One place for the pair of numbers, because both age rules below are asking
+    the same question -- is this silence normal for this kind of client -- and
+    two copies of the comparison is how they drift apart.
+    """
+    return STALE_HOURS_DEBRID if is_debrid_client(record) else STALE_HOURS_DEFAULT
+
+
 def _age_hours(added_str, now):
     """Hours since `added`, or None if it is missing or unparseable."""
     if not added_str:
@@ -467,6 +506,14 @@ def is_stuck(record, now=None):
     error_msg = (record.get("errorMessage", "") or "").lower()
     size = record.get("size", 0)
     sizeleft = record.get("sizeleft", 0)
+
+    # Everything the arr has to say about this item, from either place it says
+    # it. The client's verdict lands in `errorMessage` on some records and in a
+    # status message on others, and reading only one of them is how a rule
+    # quietly covers half the cases it was written for.
+    all_messages = " ".join(
+        [error_msg] + [m.lower() for m in _status_messages(record)]
+    )
 
     # Error-based: stalled, unavailable, missing, etc.
     if tracked_status == "warning":
@@ -517,12 +564,34 @@ def is_stuck(record, now=None):
     if "downloading metadata" in error_msg:
         return "metadata", "stuck downloading metadata"
 
+    # A client's own verdict, carried through by the arr. Checked before
+    # anything below because it is the only branch that reads a message the
+    # client authored, and it is deliberately not gated on
+    # trackedDownloadStatus -- see CLIENT_ERROR_MARKERS.
+    if any(marker in all_messages for marker in CLIENT_ERROR_MARKERS):
+        detail = error_msg.strip() or "download client reports an error"
+        return "client_error", detail
+
+    # Complete, and the arr has never imported it. The client has no bytes
+    # left to fetch and never declares the item finished, so the arr waits
+    # forever; sizeleft is 0, so the 0%-progress rule below cannot see it and
+    # there is no message to match. Four of these held every Decypharr slot
+    # for eight hours on 2026-09-14 while 56 items queued behind them.
+    #
+    # Reached only when the client is silent: an errored record is caught
+    # above, and its file is deleted rather than kept, because a client that
+    # says the download failed is not one to trust the bytes to.
+    if size > 0 and sizeleft == 0 and tracked_state == "downloading":
+        age_hours = _age_hours(record.get("added", ""), now)
+        if age_hours is not None and age_hours > _leash_hours(record):
+            return ("complete_not_imported",
+                    f"finished but not imported for {age_hours:.0f}h")
+
     # Age-based. The leash is shorter for a debrid client: it either resolves a
     # link in seconds or it never will, so 0% for three hours is a failure
     # rather than slowness. A swarm client keeps the 24-hour rule, where a
     # torrent that has found no peers yet may still find some.
-    stale_hours = (STALE_HOURS_DEBRID if is_debrid_client(record)
-                   else STALE_HOURS_DEFAULT)
+    stale_hours = _leash_hours(record)
     if size > 0 and sizeleft == size:
         age_hours = _age_hours(record.get("added", ""), now)
         if age_hours is not None and age_hours > stale_hours:

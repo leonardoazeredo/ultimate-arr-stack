@@ -90,6 +90,27 @@ mutation stale-threshold-inverted \
   --why "the age floor is what stops a download that started ten minutes ago being deleted from the client and blocklisted; comparing the wrong way round deletes exactly the healthy ones (test_zero_progress_becomes_stale_only_after_twenty_four_hours). Anchored on the shared variable, not a literal hour count, so retuning the threshold for debrid clients cannot make this entry inert -- which is exactly what happened while it read '> 24'" \
   --apply 'sed -i "0,/^        if age_hours is not None and age_hours > stale_hours:\$/s@^        if age_hours is not None and age_hours > stale_hours:\$@        if age_hours is not None and age_hours < stale_hours:@" "$F"'
 
+mutation client-error-requires-warning-status \
+  --file scripts/lib/queue_cleanup.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "puts the warning-status gate back on the branch that exists to not have one. Four items were live with a client's error in errorMessage, trackedDownloadStatus 'ok', and each holding one of Decypharr's five download slots; gated this way nothing removes them and they hold it forever (test_a_client_error_is_removed_even_when_the_status_is_ok)" \
+  --apply 'sed -i "s@^    if any(marker in all_messages for marker in CLIENT_ERROR_MARKERS):\$@    if tracked_status == \"warning\" and any(marker in all_messages for marker in CLIENT_ERROR_MARKERS):@" "$F"'
+
+mutation finished-download-not-detected \
+  --file scripts/lib/queue_cleanup.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "reuses the 0%-progress comparison on the 100% case, which is the blind spot itself: sizeleft is 0 on a finished download and size is not, so the condition is never true and the rule silently does nothing. Four items in that state wedged every Decypharr slot for eight hours on 2026-09-14 (test_a_finished_download_the_arr_never_imported_is_removed)" \
+  --apply 'sed -i "s@^    if size > 0 and sizeleft == 0 and tracked_state == \"downloading\":\$@    if size > 0 and sizeleft == size and tracked_state == \"downloading\":@" "$F"'
+
+mutation client-error-blocklisted-immediately \
+  --file scripts/lib/queue_cleanup.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "drops the debrid first strike for a client error, so a provider that refused one link gets its release blocklisted. The release is fine -- the live messages are TorBox answering 400 to requestdl on items that downloaded completely minutes later -- and blocking it forces a different release the provider may not have cached (test_a_client_error_from_a_debrid_client_is_not_blocklisted_first)" \
+  --apply 'sed -i "s@^    if reason_type in (\"stale\", \"client_error\") and is_debrid_client(record):\$@    if reason_type == \"stale\" and is_debrid_client(record):@" "$F"'
+
 mutation error-removal-ignores-warning-status \
   --file scripts/lib/queue_cleanup.py \
   --bats tests/python-suite.bats \
@@ -418,8 +439,8 @@ mutation debrid-stale-item-still-blocklisted \
   --file scripts/lib/queue_cleanup.py \
   --bats tests/python-suite.bats \
   --test "the extracted modules pass their pytest suite" \
-  --why "blocklisting a stale debrid item on its first removal forbids the one release the provider is known to have cached, so the replacement is a different release that fails the same way -- the loop this exemption exists to end (test_a_stale_debrid_item_is_not_blocklisted). Anchored on the first-strike condition itself, which is what the exemption has meant since the second-strike rule landed; it used to read the old stale-and-debrid line, which the rewrite made unmatchable" \
-  --apply 'sed -i "s@^    if reason_type == \"stale\" and is_debrid_client(record):\$@    if False:@" "$F"'
+  --why "blocklisting a stale debrid item on its first removal forbids the one release the provider is known to have cached, so the replacement is a different release that fails the same way -- the loop this exemption exists to end (test_a_stale_debrid_item_is_not_blocklisted). Anchored on the first-strike condition, which has now been rewritten twice: it read the old stale-and-debrid line, then a single-comparison line, and both were unmatchable the moment the condition changed shape. This one follows the condition rather than the shape, so adding another reason to the same tuple leaves it working -- and if the line is restructured again, grep the corpus for it first" \
+  --apply 'sed -i "s@^    if reason_type in (\"stale\", \"client_error\") and is_debrid_client(record):\$@    if False:@" "$F"'
 
 # --- the refused imports and the removal memory, 2026-09-13 ----------------
 #
