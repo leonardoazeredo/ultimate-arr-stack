@@ -326,6 +326,7 @@ scripts/
 ├── queue-cleanup.sh              # Remove stuck items from the Sonarr/Radarr queues
 ├── restart-stack.sh              # Restart a stack without ever using `down`
 ├── sync-nas.sh                   # Move the NAS deploy copy onto the local branch
+├── usenet-blackhole.sh           # Move NZBs between the arrs and TorBox's API
 ├── post-merge                    # Hook: push main, then sync the NAS to it
 ├── pre-commit                    # Main hook (symlinked from .git/hooks/)
 └── lib/
@@ -346,6 +347,7 @@ scripts/
     ├── backlog_search.py       # The backlog sweeper's logic, as an importable module
     ├── fix_radarr_paths.py     # The Radarr fixer's logic, as an importable module
     ├── fix_sonarr_folders.py   # The Sonarr fixer's logic, as an importable module
+    ├── usenet_blackhole.py     # The TorBox usenet watcher's logic, as an importable module
     └── queue_cleanup.py        # The queue cleaner's logic, as an importable module
 ```
 <!-- /SCRIPTS-TREE-ORACLE -->

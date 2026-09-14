@@ -667,55 +667,79 @@ history is empty, and Sonarr/Radarr history fills with
 `Manually marked as failed`. Torrents through Decypharr keep working, which is
 what makes it look like an indexer or a preference problem.
 
-**Cause: the articles are not on TorBox's usenet backbone.** Not a SABnzbd
-misconfiguration, and not the account's usenet entitlement. The two halves were
-measured separately on 2026-09-13 and only one of them fails:
+**Cause: `nntp.torbox.app` serves articles only up to about 90 days old.**
+Measured 2026-09-14 by resolving every article of eight grabbed NZBs against the
+same server, same credentials:
 
-* **TorBox's own usenet path works.** One NZB pulled from Usenet-Crawler was
-  submitted straight to `POST /v1/api/usenet/createusenetdownload` with
-  `curl -F file=@…`. It was accepted (`usenetdownload_id` returned) and polled
-  to `download_state=completed` within a minute. TorBox has the article store
-  and the account can use it.
-* **SABnzbd's NNTP path does not.** The same server answers correctly --
-  `200 Welcome to TorBox`, `AUTHINFO USER` → `381 Need more.`,
-  `AUTHINFO PASS` → `281 Authentication accepted.`, `GROUP alt.binaries.test`
-  → `211 …` -- so credentials, TLS and reachability are all fine. Every
-  *article* is missing: `STAT <id>` → `430 No such article`, and SABnzbd logs
-  the same thing one line per article as
-  `Article … unavailable on all servers, discarding`.
+| Release age | Articles resolved |
+| --- | --- |
+| 1, 34, 60, 86 days | 5/5 or 6/6, every attempt |
+| 101 days | 0/5 |
+| 138 days | 0/6 |
 
-**Diagnose:** separate the two paths before touching any configuration.
+The newsgroup always exists (`GROUP` returns `211`) and authentication is fine
+(`200 Welcome to TorBox` → `381` → `281 Authentication accepted.`), which is why
+this reads as a configuration problem for so long. The *articles* are gone:
+`STAT <id>` → `430 No such article`.
+
+The impact is not marginal, because a backlog is mostly old releases. Sonarr's
+usenet grabs: 81 of 85 were older than 90 days, and SABnzbd imported 1 of 91
+while the torrent path imported 109 of 202. Radarr: 42 of 58 older than 90 days,
+8 of 58 imported, and every one of those 8 was 30 days old or newer.
+
+**TorBox's API has no such limit**, which is what separates the two paths.
+TorBox's usenet is an API that runs a usenet client against a real backbone, not
+an NNTP service you read from: the exact 138-day-old NZB SABnzbd cannot fetch
+was submitted to `POST /v1/api/usenet/createusenetdownload` and completed at
+836 MB across 4 files. The two halves are not the same store, and no setting on
+either side closes the gap -- there is no age filter in Prowlarr, in an indexer
+entry, or in either arr.
+
+**The fix is to stop using SABnzbd for usenet.** Both arrs use their native
+`UsenetBlackhole` download client instead, and `usenet-blackhole.timer` moves
+the releases through TorBox's API:
+
+* the arr writes `<Release.Title>.nzb` into
+  `/data/usenet/blackhole/nzb` and polls `/data/usenet/blackhole/complete`;
+* `scripts/usenet-blackhole.sh` submits each NZB to TorBox, polls it, downloads
+  the finished zip, and renames the release into the watch folder under its
+  release name — the name the arr parses to decide what it just got;
+* the arr imports it and deletes the folder itself.
+
+Decypharr still handles torrents. SABnzbd still runs, with nothing pointed at
+it.
+
+**Operating it:**
 
 ```bash
-# 1. NNTP connectivity and auth (should all succeed)
-#    banner -> 200, USER -> 381, PASS -> 281, GROUP -> 211
-# 2. An article from the failing NZB (this is where it breaks)
-#    STAT <message-id> -> 430 No such article
-# 3. The same NZB through TorBox directly
-TB=$(grep -E '^TORBOX_API_KEY=' .env | cut -d= -f2-)
-curl -s -X POST -H "Authorization: Bearer $TB" \
-  -F "file=@/tmp/probe.nzb" -F "name=probe" -F "as_queued=false" \
-  https://api.torbox.app/v1/api/usenet/createusenetdownload
-# then poll /v1/api/usenet/mylist and look at download_state
+./scripts/usenet-blackhole.sh              # dry run: what it would submit
+./scripts/usenet-blackhole.sh --apply -v   # submit, poll, fetch, per-job lines
+tail -30 logs/usenet-blackhole.log         # what the timer has been doing
+cat logs/usenet-blackhole-failed.log       # releases that failed or timed out
+cat logs/usenet-blackhole-state.json       # what is in flight
 ```
 
-Credentials live in `~/.config/…`-style config on the NAS, not in `.env`:
-SABnzbd's `[[TorBox]]` block in `/config/sabnzbd.ini` holds `username` (the
-account's `auth_id` UUID) and a 22-character `password`. Both were confirmed
-correct against the account's `auth_id` from `GET /v1/api/user/me?settings=true`.
+A release that never completes is invisible to the arr — a blackhole client
+reports no queue, so the arr sees only what appears in the watch folder. That is
+what `logs/usenet-blackhole-failed.log` exists for: anything TorBox reports
+failed, or that is still going after `--timeout-hours` (24 by default), is
+written there and dropped from the state file.
 
-**Fix:** there is nothing to fix here from this side. The account is Pro, usenet
-is included, the server accepts the login, and TorBox's own downloader completes
-the same NZB. That combination points at backbone coverage or retention for the
-content Usenet-Crawler indexes -- a question for TorBox support, with the
-`usenetdownload_id` from the probe as the evidence.
+**Do not "fix" a stall by deleting the state file.** It is what stops a restart
+asking TorBox to download the same release twice; without it the arr sees two
+folders for one episode and imports one of them as a duplicate. A release that
+fails is already removed from it automatically.
 
-**Do not read this as "usenet is broken, turn it off".** The path is correctly
-wired end to end and will work the moment the backbone serves the articles.
-Until then it costs one connection attempt per grabbed release and nothing else
--- but it also means the download-client priorities (SABnzbd at -100 on both
-arrs, i.e. preferred) are sending releases into a path that cannot complete
-them, and every usenet grab ends in a failure the arr has to clean up.
+**If nothing arrives at all, check in this order:** is the timer armed
+(`systemctl --user list-timers usenet-blackhole.timer`); is `TORBOX_API_KEY` set
+in `.env`; does the dry run list the NZBs the arr has written; does
+`logs/usenet-blackhole.log` show the last pass erroring. A pass that cannot
+write its state file exits non-zero and says so rather than continuing, because
+releases already submitted would otherwise be sent again.
+
+**Not the fix:** waiting. The 403 rate-limit section below describes a transient
+failure that clears on its own; this one was stable across every release tested,
+for every age past roughly 90 days, over the whole measurement window.
 
 ## TorBox: All Download Links Return 403 (error code 1010)
 

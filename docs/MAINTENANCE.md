@@ -281,6 +281,63 @@ answers `429` and Sonarr disables that indexer for the rest of the run.
 
 ---
 
+## Usenet Blackhole (systemd timer, every 2 minutes)
+
+Both arrs use their native `UsenetBlackhole` download client for usenet, not
+SABnzbd. The arr writes `<Release.Title>.nzb` into a folder and polls another
+one; `scripts/usenet-blackhole.sh` is what moves a release between them, by
+submitting it to TorBox's API and fetching the finished zip back. The reason is
+in `docs/TROUBLESHOOTING.md` — SABnzbd's NNTP server serves articles only up to
+about 90 days old, and a backlog is mostly older than that. Decypharr still
+handles torrents, and SABnzbd still runs with nothing pointed at it.
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp scripts/usenet-blackhole.service scripts/usenet-blackhole.timer ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now usenet-blackhole.timer
+systemctl --user list-timers usenet-blackhole.timer     # confirm it is armed
+```
+
+Two minutes, not an hour: the arr imports a release only after it appears in the
+watch folder *and* its contents have been stable for the arr's 30-second grace
+period, so the poll interval is the floor on how long a finished download sits
+before the arr notices. A pass with nothing in flight is a handful of API calls.
+
+| Path | What it is |
+| --- | --- |
+| `${MEDIA_ROOT}/usenet/blackhole/nzb` | the arr writes NZBs here |
+| `${MEDIA_ROOT}/usenet/blackhole/complete` | the arr imports from here; it deletes the folder after importing |
+| `${MEDIA_ROOT}/usenet/blackhole/staging` | ours alone; a release is downloaded here and renamed into place |
+| `logs/usenet-blackhole.log` | what each pass did |
+| `logs/usenet-blackhole-failed.log` | releases TorBox failed, or that passed `--timeout-hours` |
+| `logs/usenet-blackhole-state.json` | what is in flight. **Do not delete it** |
+
+Staging is deliberately a sibling of the watch folder and not a `.incoming-`
+directory inside it. Sonarr does not skip dot-directories when scanning a watch
+folder — `DiskProviderBase.GetDirectories` skips only `FileAttributes.System`,
+and the regex in `DiskScanService.FilterPaths` that would filter them needs a
+trailing separator that `PathExtensions.GetRelativePath` has already trimmed —
+so a staging directory in there is reported as a finished download, and its
+half-written files are what gets imported.
+
+Both arrs point at the `/data/...` form of those paths, because the handshake
+happens from inside their containers where `${MEDIA_ROOT}` is mounted at
+`/data`. The arr configuration is:
+
+| Setting | Value |
+| --- | --- |
+| implementation | `UsenetBlackhole` (`protocol: usenet`) |
+| `nzbFolder` | `/data/usenet/blackhole/nzb` |
+| `watchFolder` | `/data/usenet/blackhole/complete` |
+
+A blackhole client reports no queue to the arr, so a release that never
+completes is invisible from the arr's side. That is what the failed log is for:
+`queue-cleanup.sh` cannot see a stuck usenet release, because there is nothing
+in the arr's queue to see.
+
+---
+
 ## Health Checks
 
 All services have Docker healthchecks. Check status:

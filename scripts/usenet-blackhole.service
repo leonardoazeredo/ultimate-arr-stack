@@ -1,0 +1,26 @@
+[Unit]
+Description=Move NZBs between the arrs and TorBox (UsenetBlackhole client)
+Documentation=file:/volume1/docker/arr-stack/scripts/usenet-blackhole.sh
+
+# Both arrs are configured with a UsenetBlackhole download client instead of
+# SABnzbd, because SABnzbd's server (nntp.torbox.app) serves articles only up
+# to about 90 days old -- measured 2026-09-14 -- while TorBox's API fetched the
+# same releases regardless of age. The arr writes an .nzb into its nzbFolder
+# and polls its watchFolder; this is what moves the file between them.
+
+[Service]
+Type=oneshot
+
+# TORBOX_API_KEY, MEDIA_ROOT. Read through lib/env-file.sh rather than exported.
+EnvironmentFile=/volume1/docker/arr-stack/.env
+
+# The log directory is created inside ExecStart, in the same shell that opens
+# the redirect. An `ExecStartPre=/bin/mkdir` plus StandardOutput=append:<dir>
+# cannot work: systemd applies the unit's StandardOutput to every process it
+# spawns, ExecStartPre included, so mkdir dies with "Failed to set up standard
+# output: No such file or directory" before it can create the directory the
+# redirect points into. Observed as status=209/STDOUT on queue-cleanup.service.
+#
+# `exec` so the script is the process systemd tracks and its exit status is the
+# unit's. `>>` rather than systemd's append, for the same reason.
+ExecStart=/bin/bash -c 'mkdir -p /volume1/docker/arr-stack/logs && exec /bin/bash /volume1/docker/arr-stack/scripts/usenet-blackhole.sh --apply >> /volume1/docker/arr-stack/logs/usenet-blackhole.log 2>&1'

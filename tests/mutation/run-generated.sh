@@ -90,15 +90,16 @@ TARGETS=(
   "scripts/lib/env-file.sh:tests/lib-env-file.bats:^env-file: "
   "scripts/queue-cleanup.sh:tests/queue-cleanup.bats:^queue-cleanup: "
   "scripts/backlog-search.sh:tests/backlog-search.bats:^backlog-search: "
+  "scripts/usenet-blackhole.sh:tests/usenet-blackhole.bats:^usenet-blackhole: "
   # Both fixers share tests/fix-arr-paths.bats and both anchor on `^fix-`
   # rather than on their own half of it, so the one cross-script test in that
   # file (neither reaches a destructive operation) is part of both oracles
   # instead of belonging to neither.
   "scripts/fix-radarr-paths.sh:tests/fix-arr-paths.bats:^fix-"
   "scripts/fix-sonarr-folders.sh:tests/fix-arr-paths.bats:^fix-"
-  # The Python halves of the three fixers. universalmutator's own python.rules
-  # applies here, picked by extension in mutator.sh; the oracle is pytest,
-  # reached through the one bats test that runs it.
+  # The Python halves of the fixers, plus the usenet watcher. universalmutator's
+  # own python.rules applies here, picked by extension in mutator.sh; the oracle
+  # is pytest, reached through the one bats test that runs it.
   #
   # The regex names a single test rather than the file's `^python: ` prefix,
   # which is the one place this table deliberately narrows instead of widening.
@@ -109,6 +110,7 @@ TARGETS=(
   "scripts/lib/queue_cleanup.py:tests/python-suite.bats:^python: the extracted modules pass"
   "scripts/lib/fix_radarr_paths.py:tests/python-suite.bats:^python: the extracted modules pass"
   "scripts/lib/fix_sonarr_folders.py:tests/python-suite.bats:^python: the extracted modules pass"
+  "scripts/lib/usenet_blackhole.py:tests/python-suite.bats:^python: the extracted modules pass"
   # The four duc files share one oracle because they are one protocol: the cgi
   # produces a request marker, the poller consumes it, scan.sh holds the lock
   # both of them branch on. A mutant in any of them is scored against all of it.

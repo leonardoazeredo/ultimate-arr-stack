@@ -130,12 +130,12 @@ wait_for_service() {
 #   $2 = port              — 8989 or 7878
 #   $3 = api_key           — API key for the service
 #   $4 = root_path         — /data/media/tv or /data/media/movies
-#   $5 = category          — download category: "tv" or "movies"
+#   $5 = category          — accepted and unused; see the note in the body
 #   $6 = naming_check      — field to check: "renameEpisodes" or "renameMovies"
 #   $7 = metadata_fields   — JSON array of metadata field objects
 #   $8 = naming_payload    — full JSON payload for naming config
 #
-# Requires globals: NAS_IP, DRY_RUN, SABNZBD_RUNNING, SABNZBD_API_KEY
+# Requires globals: NAS_IP, DRY_RUN, SABNZBD_RUNNING
 # The `$flag` booleans below are compared as STRINGS, never run as commands.
 # `if $DRY_RUN; then` executes the variable's value - unquoted, so it word-splits
 # too - which is a command-execution path bought in exchange for nothing over a
@@ -145,7 +145,11 @@ configure_arr_service() {
     local port="$2"
     local api_key="$3"
     local root_path="$4"
-    local category="$5"
+    # Positional argument 5, kept so the call sites and the $6-$8 that follow it
+    # do not have to shift. Nothing reads it any more: it existed to name the
+    # SABnzbd category and its per-arr priority fields, and the blackhole client
+    # has neither -- it has two folder paths.
+    local _category="$5"
     local naming_check="$6"
     local metadata_fields="$7"
     local naming_payload="$8"
@@ -162,21 +166,9 @@ configure_arr_service() {
 
     if ! wait_for_service "$name" "${BASE}/api/v3/health"; then return; fi
 
-    # Derive category field names from category
-    local cat_field priority_recent priority_older
-    if [[ "$category" == "tv" ]]; then
-        cat_field="tvCategory"
-        priority_recent="recentTvPriority"
-        priority_older="olderTvPriority"
-    else
-        cat_field="movieCategory"
-        priority_recent="recentMoviePriority"
-        priority_older="olderMoviePriority"
-    fi
-
     if [[ "$DRY_RUN" == true ]]; then
         dry "Add root folder ${root_path}"
-        if [[ "$SABNZBD_RUNNING" == true ]]; then dry "Add SABnzbd download client (category: ${category})"; fi
+        if [[ "$SABNZBD_RUNNING" == true ]]; then dry "Add usenet blackhole download client"; fi
         dry "Enable NFO metadata (Kodi/Emby)"
         dry "Set TRaSH naming scheme"
         dry "Add Reject ISO custom format"
@@ -198,43 +190,55 @@ configure_arr_service() {
         fi
     fi
 
-    # --- Download client: SABnzbd (if running) ---
-    # The client list is fetched here, inside the branch that reads it. It used
-    # to be fetched once above by the qBittorrent block that owned the first
+    # --- Download client: the usenet blackhole (if usenet is wanted) ---
+    # This used to add a `Sabnzbd` client pointed at 172.20.0.3:8080. It is not a
+    # working usenet path here: SABnzbd reads `nntp.torbox.app`, which serves
+    # articles only up to about 90 days old, so a backlog grab is a guaranteed
+    # failure (measured 2026-09-14 -- see docs/TROUBLESHOOTING.md). The arr's own
+    # UsenetBlackhole client plus usenet-blackhole.timer moves releases through
+    # TorBox's API instead, which has no age limit.
+    #
+    # Re-running this script is the specific way the old client could come back:
+    # it only skips a client it already finds.
+    #
+    # The gate is still SABnzbd: it is this stack's marker for "this deployment
+    # wants usenet", and the blackhole itself needs no service and no credential.
+    #
+    # The client list is fetched here, inside the branch that reads it. It
+    # used to be fetched once above by the qBittorrent block that owned the first
     # reader -- and when that block was deleted on 2026-09-12 this one kept
     # referencing a variable nothing assigned any more. Under `set -u` the
     # expansion failed, the branch took its else arm, and the "already
     # configured" skip below became unreachable: every run re-POSTed the client.
-    if [[ "$SABNZBD_RUNNING" == true && -n "$SABNZBD_API_KEY" ]]; then
+    if [[ "$SABNZBD_RUNNING" == true ]]; then
         local clients
         clients=$(api_get "${BASE}/api/v3/downloadclient" "$AUTH") || true
-        if json_extract "$clients" "sys.exit(0 if any(c.get('name','').lower() == 'sabnzbd' for c in data) else 1)"; then
-            skip "${name}: SABnzbd download client"
+        if json_extract "$clients" "sys.exit(0 if any(c.get('implementation','') == 'UsenetBlackhole' for c in data) else 1)"; then
+            skip "${name}: usenet blackhole download client"
         else
-            local sab_payload
-            sab_payload=$(cat <<SAB_JSON
+            local blackhole_payload
+            # `/data/...` and not the host path: the handshake is a filesystem
+            # one, and the arr does it from inside its container, where
+            # ${MEDIA_ROOT} is mounted at /data.
+            blackhole_payload=$(cat <<BLACKHOLE_JSON
 {
     "enable": true,
     "protocol": "usenet",
     "priority": 1,
-    "name": "SABnzbd",
-    "implementation": "Sabnzbd",
-    "configContract": "SabnzbdSettings",
+    "name": "Usenet Blackhole",
+    "implementation": "UsenetBlackhole",
+    "configContract": "UsenetBlackholeSettings",
     "fields": [
-        {"name": "host", "value": "localhost"},
-        {"name": "port", "value": 8080},
-        {"name": "apiKey", "value": "${SABNZBD_API_KEY}"},
-        {"name": "${cat_field}", "value": "${category}"},
-        {"name": "${priority_recent}", "value": -100},
-        {"name": "${priority_older}", "value": -100}
+        {"name": "nzbFolder", "value": "/data/usenet/blackhole/nzb"},
+        {"name": "watchFolder", "value": "/data/usenet/blackhole/complete"}
     ]
 }
-SAB_JSON
+BLACKHOLE_JSON
 )
-            if api_post "${BASE}/api/v3/downloadclient" "application/json" "$sab_payload" "$AUTH" >/dev/null 2>&1; then
-                ok "${name}: added SABnzbd download client"
+            if api_post "${BASE}/api/v3/downloadclient" "application/json" "$blackhole_payload" "$AUTH" >/dev/null 2>&1; then
+                ok "${name}: added usenet blackhole download client"
             else
-                fail "${name}: add SABnzbd download client"
+                fail "${name}: add usenet blackhole download client"
             fi
         fi
     fi

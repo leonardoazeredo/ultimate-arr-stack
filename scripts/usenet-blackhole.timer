@@ -1,0 +1,23 @@
+[Unit]
+Description=Poll TorBox for blackhole usenet releases, every 2 minutes
+
+[Timer]
+# Monotonic timers only, and deliberately not OnBootSec.
+#
+# Same trap queue-cleanup.timer was caught by: OnBootSec measures from the last
+# boot, and on a NAS that has been up for weeks that is always in the past, so
+# `enable --now` would start a pass in the same second the schedule was
+# registered. OnActiveSec measures from activation, so it is the stated delay
+# on a fresh enable and on a timer restart alike.
+OnActiveSec=2min
+OnUnitActiveSec=2min
+Unit=usenet-blackhole.service
+
+# Two minutes, not an hour: the arr imports a release only after it appears in
+# the watch folder AND its contents have been stable for a 30-second grace
+# period, so the poll interval is the floor on how long a finished download
+# sits before Sonarr notices it. A pass is a handful of API calls when nothing
+# is in flight, and one zip download when something is.
+
+[Install]
+WantedBy=timers.target
