@@ -80,8 +80,37 @@ from xml.etree import ElementTree
 TORBOX_API = "https://api.torbox.app/v1/api"
 
 # TorBox's own state strings (GET /usenet/mylist -> download_state).
+#
+# Completion is an exact match; failure is a PREFIX, and that difference is not
+# cosmetic. TorBox does not return a bare "failed": it returns
+#
+#   failed (Aborted, cannot be completed - https://sabnzbd.org/not-complete)
+#
+# with the reason in parentheses. Matching the failure set exactly -- which is
+# what this did until 2026-09-14 -- let fifteen failed releases sit as
+# "in progress" until the 24-hour timeout, get logged as timeouts rather than
+# as the missing-article failures they were, and never be surfaced to the arr
+# at all. They were found by counting the states on the account, not by
+# anything in this stack noticing.
 DONE_STATES = {"completed", "cached"}
-FAILED_STATES = {"failed", "error"}
+FAILED_STATES = ("failed", "error")
+
+
+def failure_reason(state_name):
+    """The reason out of a TorBox failure string, or None if it is not one.
+
+    `failed (Aborted, cannot be completed - ...)` becomes `Aborted, cannot be
+    completed`. The parenthetical is what an operator needs: it separates
+    missing articles from a provider outage, and those want different answers.
+    """
+    lowered = (state_name or "").lower()
+    if not lowered.startswith(FAILED_STATES):
+        return None
+    if "(" in lowered and ")" in lowered:
+        inner = lowered.split("(", 1)[1].rsplit(")", 1)[0].strip()
+        if inner:
+            return inner
+    return lowered
 
 # Every API call is bounded. A watcher that hangs on one request stops fetching
 # everything behind it, and the arr has no other way to notice.
@@ -384,8 +413,12 @@ def poll(torbox, state, timeout_hours, failed_log, now=None, out=print):
         if state_name in DONE_STATES:
             results.append((key, job["name"], "complete"))
             continue
-        if state_name in FAILED_STATES:
-            record_failure(failed_log, job["name"], f"torbox reported {state_name}")
+        reason = failure_reason(state_name)
+        if reason is not None:
+            # The reason travels into the log: "missing articles" and "the
+            # provider broke" both end the job here, and only one of them means
+            # the release is worth another attempt later.
+            record_failure(failed_log, job["name"], f"torbox reported: {reason}")
             del state["jobs"][key]
             results.append((key, job["name"], "failed"))
             continue

@@ -70,3 +70,32 @@ mutation usenet-blackhole-fetch-output-interleaved \
   --test "the extracted modules pass their pytest suite" \
   --why "each fetch collects its own lines and the caller prints them whole. Handing the shared stream to three threads instead puts one release's progress inside another's, which is how a log stops being readable at exactly the moment -- several concurrent failures -- when someone needs it" \
   --apply 'sed -i "s@out=lines.append)@out=print)@" "$F"'
+
+# --- reading TorBox's failure states ----------------------------------------
+#
+# Found live on 2026-09-14 by counting the states on the account rather than by
+# anything in this stack complaining: 19 completed, 15 aborted, 1 processing,
+# and all sixteen in-flight jobs reported as "in progress". TorBox puts the
+# reason in parentheses -- `failed (Aborted, cannot be completed - ...)` -- and
+# the classifier matched the failure set exactly.
+
+mutation usenet-blackhole-failed-state-exact-match \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "matching the failure set exactly is the original bug. TorBox never returns a bare 'failed', so the branch was unreachable, fifteen releases sat as in-progress until the 24-hour timeout, and the arr was told nothing at all -- a blackhole failure is invisible to the arr by design, so this was the only thing that could have reported it" \
+  --apply 'sed -i "s@^    if not lowered.startswith(FAILED_STATES):\$@    if lowered not in (\"failed\", \"error\"):@" "$F"'
+
+mutation usenet-blackhole-failure-reason-dropped \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "the parenthetical is the whole value of the message: 'missing articles' and 'the provider broke' both end the job, and only one is worth another attempt later. Logging the raw state instead keeps the answer buried in a URL that ends in not-complete" \
+  --apply 'sed -i "s@^        inner = lowered.split(\"(\", 1)\[1\].rsplit(\")\", 1)\[0\].strip()\$@        inner = \"\"@" "$F"'
+
+mutation usenet-blackhole-failure-substring-match \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "a substring match anywhere in the state reads a healthy state as a failure. The prefix is what TorBox varies the tail of, and nothing else" \
+  --apply 'sed -i "s@^    if not lowered.startswith(FAILED_STATES):\$@    if not any(f in lowered for f in FAILED_STATES):@" "$F"'

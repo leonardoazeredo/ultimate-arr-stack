@@ -600,6 +600,71 @@ def test_a_failed_job_is_logged_and_dropped(tmp_path):
     assert "Doomed-GRP" in open(log).read()
 
 
+def test_a_torbox_failure_with_a_reason_is_still_a_failure():
+    # The live string, not a tidy one. TorBox puts the reason in parentheses,
+    # so `download_state in {"failed", "error"}` never matched it and fifteen
+    # releases sat as "in progress" until the 24-hour timeout -- logged as
+    # timeouts, never surfaced to the arr. Found on 2026-09-14 by counting the
+    # states on the account: 19 completed, 15 aborted, 1 processing.
+    state = {"jobs": {"k": job(name="Doomed-GRP")}}
+    api = FakeTorBox(list_result=[{
+        "id": 7,
+        "download_state": "failed (Aborted, cannot be completed - "
+                          "https://sabnzbd.org/not-complete)",
+    }])
+    assert [s for _, _, s in m.poll(api, state, 24, "/dev/null")] == ["failed"]
+    assert state["jobs"] == {}
+
+
+def test_the_failure_reason_survives_into_the_log(tmp_path):
+    # "missing articles" and "the provider broke" both end the job here, and
+    # only one of them is worth retrying later. The parenthetical is the whole
+    # difference, so it has to reach the log.
+    log = str(tmp_path / "failed.log")
+    state = {"jobs": {"k": job(name="Doomed-GRP")}}
+    api = FakeTorBox(list_result=[{
+        "id": 7,
+        "download_state": "failed (Aborted, cannot be completed - "
+                          "https://sabnzbd.org/not-complete)",
+    }])
+    m.poll(api, state, 24, log)
+    logged = open(log).read()
+    # The exact line, and not a prefix of it. Asserting only that
+    # "aborted, cannot be completed" appears passes just as well when the whole
+    # raw state string is logged -- the parenthetical is in there either way --
+    # so the mutation that dropped the extraction survived until this pinned
+    # what the line starts with.
+    assert "torbox reported: aborted, cannot be completed - " \
+           "https://sabnzbd.org/not-complete" in logged
+    assert "torbox reported: failed" not in logged
+
+
+def test_each_failure_prefix_is_recognised():
+    for state_name, expected in (
+        ("failed", "failed"),
+        ("failed (anything)", "anything"),
+        ("error", "error"),
+        ("error (disk full)", "disk full"),
+        ("Failed (Mixed Case)", "mixed case"),
+    ):
+        assert m.failure_reason(state_name) == expected, state_name
+
+
+def test_a_non_failure_state_has_no_reason():
+    # The negation the prefix rule needs: a substring match anywhere would
+    # call "not-failed" a failure, and "processing" must stay in progress.
+    for state_name in ("completed", "cached", "processing", "downloading",
+                       "queued", "", None, "unfailed (nope)"):
+        assert m.failure_reason(state_name) is None, state_name
+
+
+def test_a_failed_state_before_the_done_states_would_be_wrong():
+    # Order matters: DONE is checked first. If that were reversed a state
+    # carrying both words would be read as complete and the release kept.
+    assert m.failure_reason("completed") is None
+    assert m.failure_reason("cached") is None
+
+
 def test_a_job_still_downloading_is_left_alone():
     state = {"jobs": {"k": job(torbox_id=7)}}
     api = FakeTorBox(list_result=[{"id": 7, "download_state": "downloading"}])
