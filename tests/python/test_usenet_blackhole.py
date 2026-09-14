@@ -94,14 +94,125 @@ def make_zip(path, members):
             archive.writestr(name, data)
 
 
+def config_output(config):
+    """The `output = "..."` destination out of a curl config written to stdin."""
+    line = [l for l in config.splitlines() if l.startswith("output = ")][0]
+    return line.split('"')[1]
+
+
 def serve_zip(monkeypatch, archive):
-    """Make the curl call in `fetch` a no-op copy of a prepared zip."""
+    """Make the curl download in `fetch` a no-op copy of a prepared zip.
+
+    The destination is read out of the curl config on stdin, not off argv: the
+    download moved there because TorBox's link carries the account token in its
+    own query string.
+    """
     def fake_run(argv, **kwargs):
         import shutil
-        shutil.copy(str(archive), argv[argv.index("-o") + 1])
+        shutil.copy(str(archive), config_output(kwargs.get("input", "")))
         return type("R", (), {"returncode": 0, "stderr": ""})()
 
     monkeypatch.setattr(m.subprocess, "run", fake_run)
+
+
+# --- the HTTP layer --------------------------------------------------------
+
+def fake_curl(monkeypatch, stdout, returncode=0, stderr=""):
+    """Stand in for subprocess.run and capture what curl was invoked with."""
+    seen = {}
+
+    def run(argv, **kwargs):
+        seen["argv"] = argv
+        seen["input"] = kwargs.get("input", "")
+        return type("R", (), {"returncode": returncode, "stdout": stdout,
+                              "stderr": stderr})()
+
+    monkeypatch.setattr(m.subprocess, "run", run)
+    return seen
+
+
+def test_a_2xx_body_comes_back_without_the_status_line(monkeypatch):
+    # -w appends the code on its own line; leaving it in the body would break
+    # every json.loads downstream.
+    fake_curl(monkeypatch, '{"success":true}\n200')
+    assert m._run_curl(['url = "http://x"']) == '{"success":true}'
+
+
+def test_a_multi_line_body_survives(monkeypatch):
+    fake_curl(monkeypatch, '{\n  "a": 1\n}\n200')
+    assert m._run_curl(['url = "http://x"']) == '{\n  "a": 1\n}'
+
+
+def test_a_non_2xx_raises_with_the_apis_own_message(monkeypatch):
+    # This is the whole reason curl -f is gone. TorBox answered a real 422 with
+    # `{"detail":[{"type":"missing","loc":["query","token"],...}]}` and `-f`
+    # reduced it to `curl: (22) The requested URL returned error: 422`, which
+    # says nothing about what was missing.
+    body = ('{"detail":[{"type":"missing","loc":["query","token"],'
+            '"msg":"Field required","input":null}]}')
+    fake_curl(monkeypatch, body + "\n422")
+    with pytest.raises(m.TorBoxError) as caught:
+        m._run_curl(['url = "http://x"'])
+    assert "422" in str(caught.value)
+    assert "token" in str(caught.value)
+
+
+def test_curl_is_not_invoked_with_f(monkeypatch):
+    # `-f` is what discarded the body, so its return is a regression.
+    seen = fake_curl(monkeypatch, "{}\n200")
+    m._run_curl(['url = "http://x"'])
+    assert "-f" not in seen["argv"]
+
+
+def test_a_failed_curl_still_reports_its_stderr(monkeypatch):
+    fake_curl(monkeypatch, "", returncode=6, stderr="Could not resolve host")
+    with pytest.raises(m.TorBoxError) as caught:
+        m._run_curl(['url = "http://x"'])
+    assert "Could not resolve host" in str(caught.value)
+
+
+def test_request_zip_link_sends_the_token_in_the_query(monkeypatch):
+    # The endpoint requires it. With only the Authorization header it answers
+    # 422, which is how a working watcher once fetched nothing at all.
+    api = m.TorBox("secret-token")
+    seen = {}
+
+    def fake_get(path):
+        seen["path"] = path
+        return {"success": True, "data": "https://store.example/z.zip"}
+
+    monkeypatch.setattr(api, "_get", fake_get)
+    assert api.request_zip_link(2449161) == "https://store.example/z.zip"
+    assert "token=secret-token" in seen["path"]
+    assert "usenet_id=2449161" in seen["path"]
+    assert "zip_link=true" in seen["path"]
+
+
+def test_fetch_keeps_the_download_link_off_argv(tmp_path, monkeypatch):
+    # The link TorBox hands back carries the account token in its own query
+    # string, so an argv copy would be readable through /proc/<pid>/cmdline.
+    watch = tmp_path / "watch"
+    watch.mkdir()
+    staging = tmp_path / "staging"
+    archive = tmp_path / "p.zip"
+    make_zip(str(archive), {"Rel-GRP/ep.mkv": b"v"})
+
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        import shutil
+        seen["argv"] = argv
+        seen["input"] = kwargs.get("input", "")
+        shutil.copy(str(archive), config_output(kwargs.get("input", "")))
+        return type("R", (), {"returncode": 0, "stderr": ""})()
+
+    monkeypatch.setattr(m.subprocess, "run", fake_run)
+    api = FakeTorBox(zip_link="https://store.example/zip/abc?token=SECRET")
+    m.fetch(api, "k" * 32, job(name="Rel-GRP"), str(watch), str(staging))
+
+    assert not any("SECRET" in arg for arg in seen["argv"])
+    # ...and it did arrive, on stdin, rather than being dropped entirely.
+    assert "SECRET" in seen["input"]
 
 
 # --- job identity ----------------------------------------------------------
@@ -326,7 +437,7 @@ def test_fetch_writes_nothing_into_the_watch_folder_until_the_end(tmp_path, monk
         import shutil
         # Sampled mid-fetch: this is the moment a partial import would happen.
         seen.append(sorted(os.listdir(watch)))
-        shutil.copy(str(archive), argv[argv.index("-o") + 1])
+        shutil.copy(str(archive), config_output(kwargs.get("input", "")))
         return type("R", (), {"returncode": 0, "stderr": ""})()
 
     monkeypatch.setattr(m.subprocess, "run", fake_run)

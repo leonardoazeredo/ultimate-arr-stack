@@ -110,15 +110,26 @@ def quoted(value):
 
 
 def _run_curl(lines, timeout=API_TIMEOUT):
+    """Return the response body, or raise TorBoxError carrying the API's answer.
+
+    Deliberately not `curl -f`: that returns exit 22 and throws the response
+    body away, and TorBox puts the reason in the body. A 422 here reads as
+    `curl: (22) The requested URL returned error: 422` with `-f`, and as
+    `{"detail":[{"type":"missing","loc":["query","token"],...}]}` without it.
+    The second one is the whole diagnosis.
+    """
     proc = subprocess.run(
-        ["curl", "-sS", "-f", "--max-time", str(timeout), "--config", "-"],
+        ["curl", "-sS", "--max-time", str(timeout), "-w", "\n%{http_code}", "--config", "-"],
         input="\n".join(lines) + "\n",
         capture_output=True,
         text=True,
     )
     if proc.returncode != 0:
         raise TorBoxError(f"curl exit {proc.returncode}: {proc.stderr.strip()[:200]}")
-    return proc.stdout
+    body, _, code = proc.stdout.rpartition("\n")
+    if not code.startswith("2"):
+        raise TorBoxError(f"HTTP {code}: {body.strip()[:240]}")
+    return body
 
 
 class TorBox:
@@ -168,7 +179,19 @@ class TorBox:
         return payload.get("data") or []
 
     def request_zip_link(self, usenet_id):
-        payload = self._get(f"/usenet/requestdl?usenet_id={usenet_id}&zip_link=true")
+        """Get a zip download link for a finished usenet download.
+
+        `token` goes in the query string as well as the Authorization header,
+        because this endpoint requires it: with the header alone it answers
+        `422 {"detail":[{"type":"missing","loc":["query","token"]}]}`. Nothing
+        else this module calls needs it, and the link TorBox hands back carries
+        the same token in its own URL, which is why `fetch` downloads through a
+        curl config on stdin rather than on argv.
+        """
+        payload = self._get(
+            f"/usenet/requestdl?token={self.api_key}"
+            f"&usenet_id={usenet_id}&zip_link=true"
+        )
         if not payload.get("success"):
             raise TorBoxError(f"zip link refused: {payload.get('detail') or payload}")
         data = payload.get("data")
@@ -394,8 +417,13 @@ def fetch(torbox, key, job, watch_dir, staging_dir, out=print):
 
     zip_path = os.path.join(staging, "payload.zip")
     try:
+        # Through a curl config on stdin, so the link stays off argv. TorBox's
+        # download URLs carry the account token in their own query string, and
+        # an argv copy is readable by anything on the box through
+        # /proc/<pid>/cmdline -- the same leak the shell wrapper used to have.
         subprocess.run(
-            ["curl", "-sS", "-f", "-L", "--max-time", "3600", "-o", zip_path, link],
+            ["curl", "-sS", "-f", "-L", "--max-time", "3600", "--config", "-"],
+            input=f'url = "{quoted(link)}"\noutput = "{quoted(zip_path)}"\n',
             check=True,
             capture_output=True,
             text=True,
