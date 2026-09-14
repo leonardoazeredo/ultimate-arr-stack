@@ -215,6 +215,247 @@ def test_fetch_keeps_the_download_link_off_argv(tmp_path, monkeypatch):
     assert "SECRET" in seen["input"]
 
 
+# --- RAR unpacking ---------------------------------------------------------
+
+def touch(directory, *names):
+    for name in names:
+        with open(os.path.join(str(directory), name), "wb") as handle:
+            handle.write(b"x")
+
+
+def test_rar_volume_names_are_recognised():
+    for name in ("x.rar", "x.RAR", "x.part03.rar", "x.r00", "x.R99", "x.s00"):
+        assert m.is_rar_volume(name), name
+    for name in ("x.mkv", "x.nfo", "x.r00.txt", "sample.mkv", "x.rar.txt"):
+        assert not m.is_rar_volume(name), name
+
+
+def test_a_plain_release_is_left_alone(tmp_path):
+    # A release posted as loose files must not be touched.
+    touch(tmp_path, "release.mkv", "release.nfo")
+    assert m.unpack_rar(str(tmp_path)) is False
+
+
+def test_the_first_volume_is_the_entry_point(tmp_path):
+    # `x.rar` opens the set; `x.r00` does it only when there is no `.rar`.
+    touch(tmp_path, "x.r00", "x.r01", "x.rar")
+    assert os.path.basename(m.find_rar_entry(str(tmp_path))) == "x.rar"
+    os.remove(os.path.join(str(tmp_path), "x.rar"))
+    assert os.path.basename(m.find_rar_entry(str(tmp_path))) == "x.r00"
+    os.remove(os.path.join(str(tmp_path), "x.r00"))
+    os.remove(os.path.join(str(tmp_path), "x.r01"))
+    assert m.find_rar_entry(str(tmp_path)) is None
+
+
+def test_part01_wins_over_part02(tmp_path):
+    touch(tmp_path, "x.part02.rar", "x.part01.rar")
+    assert os.path.basename(m.find_rar_entry(str(tmp_path))) == "x.part01.rar"
+
+
+def archive_dest(argv):
+    """The extraction directory out of an unrar or 7z argv.
+
+    They spell it differently: unrar takes it as the trailing positional and
+    uses `-o+` for overwrite, while 7z has no positional at all and writes it
+    into `-o<dir>`. Reading `-o+` as a directory named `+` is how this helper
+    first broke both of the callers below.
+    """
+    if os.path.basename(argv[0]).startswith("unrar"):
+        return argv[-1]
+    for arg in argv:
+        if arg.startswith("-o") and len(arg) > 2:
+            return arg[2:]
+    return argv[-1]
+
+
+def unpack_stub(monkeypatch, tool="unrar", returncode=0, stderr=""):
+    """Pretend to be unrar: write the video, and record the argv."""
+    seen = {}
+    monkeypatch.setattr(m.shutil, "which", lambda name: "/usr/bin/" + name if name == tool else None)
+
+    def run(argv, **kwargs):
+        seen["argv"] = argv
+        if returncode == 0:
+            with open(os.path.join(archive_dest(argv), "release.mkv"), "wb") as handle:
+                handle.write(b"video")
+        return type("R", (), {"returncode": returncode, "stdout": "", "stderr": stderr})()
+
+    monkeypatch.setattr(m.subprocess, "run", run)
+    return seen
+
+
+def serve_release(monkeypatch, archive, tool="unrar", returncode=0, stderr=""):
+    """One fake for both subprocesses `fetch` runs: curl, then the unpacker.
+
+    Two separate monkeypatches cannot both win -- the second replaces the first,
+    and whichever loses takes its half of the fetch with it.
+    """
+    seen = {}
+    monkeypatch.setattr(m.shutil, "which", lambda name: "/usr/bin/" + name if name == tool else None)
+
+    def run(argv, **kwargs):
+        seen.setdefault("argv", []).append(argv)
+        if argv[0].endswith("curl"):
+            import shutil
+            shutil.copy(str(archive), config_output(kwargs.get("input", "")))
+            return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        if returncode == 0:
+            with open(os.path.join(archive_dest(argv), "release.mkv"), "wb") as handle:
+                handle.write(b"video")
+        return type("R", (), {"returncode": returncode, "stdout": "", "stderr": stderr})()
+
+    monkeypatch.setattr(m.subprocess, "run", run)
+    return seen
+
+
+def test_unpacking_writes_the_video_and_removes_the_volumes(tmp_path, monkeypatch):
+    # What the arr has to end up with: a video, and none of the eighty-odd
+    # archive parts. Leftovers count towards the release size the arr reports.
+    touch(tmp_path, "x.rar", "x.r00", "x.r01", "x.r99", "x.nfo", "x.sfv")
+    seen = unpack_stub(monkeypatch)
+    assert m.unpack_rar(str(tmp_path)) is True
+    assert (tmp_path / "release.mkv").exists()
+    leftovers = sorted(os.listdir(str(tmp_path)))
+    # The video and the non-archive extras survive; every volume is gone.
+    assert leftovers == ["release.mkv", "x.nfo", "x.sfv"]
+    assert seen["argv"][0].endswith("unrar")
+
+
+def test_unpacking_falls_back_to_7z(tmp_path, monkeypatch):
+    # The NAS has both; a host with only p7zip should still work.
+    touch(tmp_path, "x.rar")
+    seen = unpack_stub(monkeypatch, tool="7z")
+    assert m.unpack_rar(str(tmp_path)) is True
+    assert seen["argv"][0].endswith("7z")
+    assert any(arg.startswith("-o") for arg in seen["argv"])
+
+
+def test_no_unpacker_is_a_permanent_failure(tmp_path, monkeypatch):
+    # Better to fail loudly than to hand the arr a release it will reject as a
+    # sample and delete.
+    touch(tmp_path, "x.rar")
+    monkeypatch.setattr(m.shutil, "which", lambda name: None)
+    with pytest.raises(m.PermanentError) as caught:
+        m.unpack_rar(str(tmp_path))
+    assert "unrar" in str(caught.value)
+
+
+def test_a_password_protected_set_is_a_permanent_failure(tmp_path, monkeypatch):
+    # unrar exits non-zero and prints the reason; that reason is what the
+    # operator needs, so it has to survive into the error.
+    touch(tmp_path, "x.rar")
+    unpack_stub(monkeypatch, returncode=3, stderr="ERROR: Enter password")
+    with pytest.raises(m.PermanentError) as caught:
+        m.unpack_rar(str(tmp_path))
+    assert "Enter password" in str(caught.value)
+
+
+def test_unpacking_runs_before_the_release_is_renamed(tmp_path, monkeypatch):
+    # The whole point: the arr must never see the archive parts. The rename is
+    # the moment it becomes visible, so the video has to exist by then.
+    watch = tmp_path / "watch"
+    watch.mkdir()
+    staging = tmp_path / "staging"
+    archive = tmp_path / "p.zip"
+    make_zip(str(archive), {"Rel-GRP/x.rar": b"part"})
+    serve_release(monkeypatch, archive)
+
+    m.fetch(FakeTorBox(), "k" * 32, job(name="Rel-GRP"), str(watch), str(staging))
+    released = sorted(os.listdir(str(watch / "Rel-GRP")))
+    assert released == ["release.mkv"]
+
+
+# --- terminal outcomes -----------------------------------------------------
+
+def test_a_successful_fetch_removes_the_nzb(tmp_path, monkeypatch):
+    # The arr never cleans its own nzb folder, so a file left there looks like a
+    # fresh grab on the next pass -- and the job is no longer in flight to stop
+    # it. Measured: a 4.6 GB release downloaded again in full because of this.
+    nzb_dir = tmp_path / "nzb"
+    nzb_dir.mkdir()
+    write_nzb(str(nzb_dir), "Rel-GRP.nzb")
+    watch = tmp_path / "watch"
+    watch.mkdir()
+    staging = tmp_path / "staging"
+    state_path = str(tmp_path / "state.json")
+    archive = tmp_path / "p.zip"
+    make_zip(str(archive), {"Rel-GRP/ep.mkv": b"v"})
+    serve_zip(monkeypatch, archive)
+
+    api = FakeTorBox(list_result=[{"id": 1, "download_state": "completed"}])
+    monkeypatch.setattr(m, "TorBox", lambda *a, **k: api)
+    m.run(str(nzb_dir), str(watch), str(staging), state_path,
+          str(tmp_path / "f.log"), "key", apply_changes=True, out=lambda *a: None)
+
+    assert os.listdir(str(nzb_dir)) == []
+    assert m.load_state(state_path)["jobs"] == {}
+
+
+def test_a_permanent_failure_drops_the_job_and_the_nzb(tmp_path, monkeypatch):
+    # A retry re-downloads the whole release, so an unusable one has to be
+    # recorded and let go -- and its NZB with it, or the next pass picks the
+    # same release up again.
+    nzb_dir = tmp_path / "nzb"
+    nzb_dir.mkdir()
+    write_nzb(str(nzb_dir), "Rel-GRP.nzb")
+    watch = tmp_path / "watch"
+    watch.mkdir()
+    staging = tmp_path / "staging"
+    state_path = str(tmp_path / "state.json")
+    failed_log = str(tmp_path / "failed.log")
+    archive = tmp_path / "p.zip"
+    make_zip(str(archive), {"Rel-GRP/x.rar": b"part"})
+    monkeypatch.setattr(m.shutil, "which", lambda name: None)  # no unpacker
+    serve_zip(monkeypatch, archive)
+
+    api = FakeTorBox(list_result=[{"id": 1, "download_state": "completed"}])
+    monkeypatch.setattr(m, "TorBox", lambda *a, **k: api)
+    m.run(str(nzb_dir), str(watch), str(staging), state_path,
+          failed_log, "key", apply_changes=True, out=lambda *a: None)
+
+    assert m.load_state(state_path)["jobs"] == {}
+    assert os.listdir(str(nzb_dir)) == []
+    assert "Rel-GRP" in open(failed_log).read()
+    assert not (watch / "Rel-GRP").exists()
+
+
+def test_a_timeout_removes_the_nzb_too(tmp_path, monkeypatch):
+    nzb_dir = tmp_path / "nzb"
+    nzb_dir.mkdir()
+    write_nzb(str(nzb_dir), "Rel-GRP.nzb")
+    watch = tmp_path / "watch"
+    watch.mkdir()
+    state_path = tmp_path / "state.json"
+    m.save_state(str(state_path), {"jobs": {m.job_key(str(nzb_dir / "Rel-GRP.nzb")):
+                                            job(name="Rel-GRP", age_hours=30)}})
+
+    api = FakeTorBox(list_result=[{"id": 7, "download_state": "downloading"}])
+    monkeypatch.setattr(m, "TorBox", lambda *a, **k: api)
+    m.run(str(nzb_dir), str(watch), str(tmp_path / "staging"), str(state_path),
+          str(tmp_path / "f.log"), "key", apply_changes=True, out=lambda *a: None)
+
+    assert os.listdir(str(nzb_dir)) == []
+
+
+def test_a_transient_fetch_failure_keeps_the_nzb_for_the_retry(tmp_path, monkeypatch):
+    # The opposite of the two above: a network failure must leave both the job
+    # and the NZB in place, or the release is lost with nothing logged.
+    nzb_dir = tmp_path / "nzb"
+    nzb_dir.mkdir()
+    write_nzb(str(nzb_dir), "Rel-GRP.nzb")
+    watch = tmp_path / "watch"
+    watch.mkdir()
+    state_path = str(tmp_path / "state.json")
+
+    api = FakeTorBox(list_result=[{"id": 1, "download_state": "completed"}], zip_link="")
+    monkeypatch.setattr(m, "TorBox", lambda *a, **k: api)
+    m.run(str(nzb_dir), str(watch), str(tmp_path / "staging"), state_path,
+          str(tmp_path / "f.log"), "key", apply_changes=True, out=lambda *a: None)
+
+    assert len(m.load_state(state_path)["jobs"]) == 1
+    assert os.listdir(str(nzb_dir)) == ["Rel-GRP.nzb"]
+
+
 # --- job identity ----------------------------------------------------------
 
 def test_job_key_is_the_content_not_the_path(tmp_path):

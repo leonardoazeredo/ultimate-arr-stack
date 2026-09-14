@@ -95,6 +95,16 @@ class TorBoxError(RuntimeError):
     pass
 
 
+class PermanentError(TorBoxError):
+    """The release itself is unusable, so a retry would fail the same way.
+
+    Worth its own class because the retry is not free: every attempt downloads
+    the whole release again. A password-protected RAR set or a release with no
+    video in it has to be failed and recorded, not retried every two minutes
+    until the 24-hour timeout.
+    """
+
+
 class StateError(RuntimeError):
     """The state file could not be written, so this pass cannot be trusted.
 
@@ -385,6 +395,112 @@ def poll(torbox, state, timeout_hours, failed_log, now=None, out=print):
     return results
 
 
+def is_rar_volume(name):
+    """True for `x.rar`, `x.part03.rar`, `x.r00`..`x.r99` and `x.s00`."""
+    lower = name.lower()
+    if lower.endswith(".rar"):
+        return True
+    _, _, ext = lower.rpartition(".")
+    return len(ext) == 3 and ext[0] in ("r", "s") and ext[1:].isdigit()
+
+
+def find_rar_entry(directory):
+    """The first volume of a RAR set in this directory, or None.
+
+    Multi-volume sets are opened through their first file: `x.rar` (or
+    `x.part01.rar`) when present, otherwise `x.r00`. Sorted, so `part01` wins
+    over `part02`.
+    """
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return None
+    files = [n for n in names if os.path.isfile(os.path.join(directory, n))]
+    for suffix in (".rar", ".r00"):
+        found = [n for n in files if n.lower().endswith(suffix)]
+        if found:
+            return os.path.join(directory, found[0])
+    return None
+
+
+def unpack_rar(directory, out=print):
+    """Unpack a RAR set in place and delete the volumes. Returns True if it did.
+
+    Usenet releases are normally posted as RAR volumes, and the video is inside
+    them: SABnzbd's unpack step is what turned those into a file the arr could
+    import. TorBox hands back exactly what was posted, so without this the
+    release arrives as eighty-odd `.rNN` files plus an un-rarred `Sample/`,
+    Sonarr finds only the sample, rejects the release as a sample, and deletes
+    the whole folder -- measured 2026-09-14 on the first real release through
+    this path.
+    """
+    entry = find_rar_entry(directory)
+    if entry is None:
+        return False
+
+    unrar = shutil.which("unrar")
+    seven = shutil.which("7z") or shutil.which("7zr")
+    if unrar:
+        argv = [unrar, "x", "-o+", "-idq", entry, directory + os.sep]
+    elif seven:
+        argv = [seven, "x", "-y", "-bso0", "-bsp0", f"-o{directory}", entry]
+    else:
+        raise PermanentError(f"no unrar or 7z to unpack {os.path.basename(entry)}")
+
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True)
+    except OSError as err:
+        raise PermanentError(f"could not run {argv[0]}: {err}") from err
+    if proc.returncode != 0:
+        # A password-protected or truncated set lands here, and both are safe to
+        # call permanent: the same release will fail the same way.
+        detail = (proc.stderr or proc.stdout).strip().splitlines()
+        raise PermanentError(
+            f"{os.path.basename(argv[0])} exit {proc.returncode}: "
+            f"{detail[-1][:160] if detail else 'no output'}"
+        )
+
+    removed = 0
+    try:
+        names = os.listdir(directory)
+    except OSError as err:
+        # The unpack itself worked, so this is not worth failing the release
+        # over; the volumes left behind are only extra bytes in the release
+        # directory.
+        out(f"    ! could not list {directory} to remove the volumes: {err}")
+        return True
+    for name in names:
+        if not is_rar_volume(name):
+            continue
+        path = os.path.join(directory, name)
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+                removed += 1
+        except OSError as err:
+            # Leftovers are not fatal, but they are worth a line: they are what
+            # the arr would otherwise count towards the release size.
+            out(f"    ! could not remove {name}: {err}")
+    out(f"    unpacked {os.path.basename(entry)} ({removed} volume(s) removed)")
+    return True
+
+
+def discard_nzb(nzb_dir, name):
+    """Delete a finished job's NZB, so it is never submitted again.
+
+    The arr never cleans its own nzb folder -- for a blackhole it is an outbox,
+    not a queue the arr tracks -- so a file left there is indistinguishable from
+    a fresh grab on the next pass. The job is no longer in flight by then, so it
+    would be submitted and downloaded a second time, and again every two
+    minutes: measured 2026-09-14, a 4.6 GB release re-downloaded in full on the
+    pass after the one that delivered it.
+    """
+    try:
+        os.remove(os.path.join(nzb_dir, name + ".nzb"))
+    except OSError:
+        pass
+
+
 def fetch(torbox, key, job, watch_dir, staging_dir, out=print):
     """Download the finished release into the watch folder.
 
@@ -428,14 +544,18 @@ def fetch(torbox, key, job, watch_dir, staging_dir, out=print):
             capture_output=True,
             text=True,
         )
-        with zipfile.ZipFile(zip_path) as archive:
+        try:
+            archive = zipfile.ZipFile(zip_path)
+        except zipfile.BadZipFile as err:
+            raise PermanentError(f"TorBox returned something that is not a zip: {err}") from err
+        with archive:
             # Zip entries from TorBox can carry path traversal; refuse rather
             # than write outside the staging directory.
             root = os.path.realpath(staging)
             for member in archive.namelist():
                 target = os.path.realpath(os.path.join(staging, member))
                 if not target.startswith(root + os.sep):
-                    raise TorBoxError(f"zip entry escapes the target: {member}")
+                    raise PermanentError(f"zip entry escapes the target: {member}")
             archive.extractall(staging)
         os.remove(zip_path)
 
@@ -447,6 +567,12 @@ def fetch(torbox, key, job, watch_dir, staging_dir, out=print):
             for entry in os.listdir(inner):
                 shutil.move(os.path.join(inner, entry), os.path.join(staging, entry))
             os.rmdir(inner)
+
+        # ...and the release itself is usually inside RAR volumes, which the arr
+        # cannot read. This is SABnzbd's unpack step, and it runs BEFORE the
+        # rename: an un-unpacked release that reaches the watch folder is
+        # rejected as a sample and deleted.
+        unpack_rar(staging, out=out)
 
         os.replace(staging, dest)
         out(f"    fetched: {name}")
@@ -524,10 +650,22 @@ def run(nzb_dir, watch_dir, staging_dir, state_path, failed_log, api_key,
                 if fetch(torbox, key, state["jobs"][key], watch_dir, staging_dir, out=out):
                     del state["jobs"][key]
                     fetched += 1
+                    discard_nzb(nzb_dir, name)
+            except PermanentError as err:
+                # Nothing will change on a retry, and a retry re-downloads the
+                # whole release. Record it, drop it, and clear the NZB so the
+                # next pass does not pick the same release up again.
+                record_failure(failed_log, name, f"unusable: {err}")
+                del state["jobs"][key]
+                discard_nzb(nzb_dir, name)
+                out(f"    ! {name}: {err}")
             except Exception as err:  # noqa: BLE001 - one bad release must not stop the sweep
-                out(f"    ! {name}: fetch failed: {err}")
-        elif status == "timeout":
-            out(f"    ! {name}: timed out")
+                out(f"    ! {name}: fetch failed, will retry: {err}")
+        elif status in ("failed", "timeout"):
+            # Both are terminal, and `poll` has already logged them.
+            discard_nzb(nzb_dir, name)
+            if status == "timeout":
+                out(f"    ! {name}: timed out")
         elif verbose:
             out(f"    ... {name}: {status}")
     save_state(state_path, state)
