@@ -458,6 +458,185 @@ def test_a_transient_fetch_failure_keeps_the_nzb_for_the_retry(tmp_path, monkeyp
     assert os.listdir(str(nzb_dir)) == ["Rel-GRP.nzb"]
 
 
+# --- the 429 backoff -------------------------------------------------------
+#
+# createusenetdownload is limited to 60 calls an hour, and a pass offers every
+# NZB it holds. Retrying a refused one two minutes later spends the next hour's
+# budget re-asking a question already answered: measured 2026-09-14, three
+# refusals recurring pass after pass with nothing submitted in between, against
+# 47 refusals to 37 acceptances overall.
+
+def pending_releases(tmp_path, count):
+    """`count` NZBs sitting in the outbox, none of them submitted yet.
+
+    Distinct from `several_jobs`, which marks its releases as already in
+    flight. `pending_nzbs` skips anything the state file knows about, so a
+    fixture built on that one presents an empty outbox and every assertion
+    below would pass against a watcher that never submitted anything.
+    """
+    nzb_dir = tmp_path / "nzb"
+    nzb_dir.mkdir()
+    watch = tmp_path / "watch"
+    watch.mkdir()
+    state_path = str(tmp_path / "state.json")
+    for i in range(count):
+        name = "Wait-%d-GRP" % i
+        write_nzb(str(nzb_dir), name + ".nzb",
+                  VALID_NZB.replace(b"Some.Release-GRP", name.encode()))
+    m.save_state(state_path, {"jobs": {}})
+    return nzb_dir, watch, state_path
+
+
+def refusing_torbox(count=1, exc=None):
+    """A TorBox whose first `count` submissions raise, then succeed."""
+    class Refusing(FakeTorBox):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def submit_file(self, nzb_path, name):
+            self.calls += 1
+            if self.calls <= count:
+                raise (exc or m.RateLimited)("HTTP 429: {\"detail\":\"60 per 1 hour\"}")
+            return super().submit_file(nzb_path, name)
+
+    return Refusing()
+
+
+def test_run_curl_raises_rate_limited_on_429(monkeypatch):
+    # Its own type, because the answer is not "retry this one" but "stop
+    # asking" -- and the caller has to treat the next NZB the same way.
+    fake_curl(monkeypatch, '{"detail":"60 per 1 hour"}\n429')
+    with pytest.raises(m.RateLimited):
+        m._run_curl(['url = "http://x"'])
+def test_a_429_is_not_an_ordinary_torbox_error(monkeypatch):
+    # The subclass relationship matters both ways: existing handlers keep
+    # working, and the new one can catch only the rate limit.
+    assert issubclass(m.RateLimited, m.TorBoxError)
+    fake_curl(monkeypatch, "{}" + "\n" + "500")
+    with pytest.raises(m.TorBoxError) as caught:
+        m._run_curl(['url = "http://x"'])
+    assert not isinstance(caught.value, m.RateLimited)
+
+
+def test_a_429_stops_the_pass_instead_of_asking_for_the_next_release(tmp_path, monkeypatch):
+    # The whole point. Three NZBs pending, the first refused: one call, not
+    # three, because the budget is empty and the other two would be refused
+    # identically at the cost of two more calls.
+    nzb_dir, watch, state_path = pending_releases(tmp_path, 3)
+    api = refusing_torbox(count=1)
+    monkeypatch.setattr(m, "TorBox", lambda *a, **k: api)
+    m.run(str(nzb_dir), str(watch), str(tmp_path / "staging"), state_path,
+          str(tmp_path / "f.log"), "key", apply_changes=True, out=lambda *a: None)
+
+    assert api.calls == 1
+    assert m.in_backoff(m.load_state(state_path)) is not None
+
+
+def test_a_backoff_skips_submitting_entirely(tmp_path, monkeypatch):
+    nzb_dir, watch, state_path = pending_releases(tmp_path, 2)
+    state = m.load_state(state_path)
+    m.note_rate_limit(state)
+    m.save_state(state_path, state)
+
+    api = refusing_torbox(count=99)
+    monkeypatch.setattr(m, "TorBox", lambda *a, **k: api)
+    m.run(str(nzb_dir), str(watch), str(tmp_path / "staging"), state_path,
+          str(tmp_path / "f.log"), "key", apply_changes=True, out=lambda *a: None)
+
+    assert api.calls == 0, "a paused pass still asked TorBox to take an upload"
+    # ...and the releases are still there for when it lifts.
+    assert len(os.listdir(str(nzb_dir))) == 2
+
+
+def test_the_backoff_survives_into_the_next_pass(tmp_path, monkeypatch):
+    # Passes are two minutes apart and each one is a fresh process. A marker
+    # held only in memory would be forgotten before it did anything.
+    nzb_dir, watch, state_path = pending_releases(tmp_path, 2)
+    api = refusing_torbox(count=1)
+    monkeypatch.setattr(m, "TorBox", lambda *a, **k: api)
+    for _ in range(3):
+        m.run(str(nzb_dir), str(watch), str(tmp_path / "staging"), state_path,
+              str(tmp_path / "f.log"), "key", apply_changes=True, out=lambda *a: None)
+
+    assert api.calls == 1
+
+
+def test_polling_and_fetching_continue_during_a_backoff(tmp_path, monkeypatch):
+    # Only submissions pause. A download already in flight still has to be
+    # collected, or the backoff would cost more than the rate limit did.
+    nzb_dir, watch, state_path, listing = several_jobs(tmp_path, 1)
+    state = m.load_state(state_path)
+    m.note_rate_limit(state)
+    m.save_state(state_path, state)
+    archive = tmp_path / "p.zip"
+    make_zip(str(archive), {"Rel-0-GRP/ep.mkv": b"v"})
+    serve_zip(monkeypatch, archive)
+    monkeypatch.setattr(m, "TorBox", lambda *a, **k: FakeTorBox(list_result=listing))
+
+    lines = []
+    m.run(str(nzb_dir), str(watch), str(tmp_path / "staging"), state_path,
+          str(tmp_path / "f.log"), "key", apply_changes=True, out=lines.append)
+
+    assert (watch / "Rel-0-GRP" / "ep.mkv").exists()
+    assert any("submissions paused" in line for line in lines)
+    assert m.load_state(state_path)["jobs"] == {}
+
+
+def test_the_backoff_expires_and_submissions_resume(tmp_path, monkeypatch):
+    nzb_dir, watch, state_path = pending_releases(tmp_path, 2)
+    state = m.load_state(state_path)
+    state["rate_limited_until"] = (datetime.now(timezone.utc)
+                                   - timedelta(minutes=1)).isoformat()
+    m.save_state(state_path, state)
+
+    api = refusing_torbox(count=0)
+    monkeypatch.setattr(m, "TorBox", lambda *a, **k: api)
+    m.run(str(nzb_dir), str(watch), str(tmp_path / "staging"), state_path,
+          str(tmp_path / "f.log"), "key", apply_changes=True, out=lambda *a: None)
+
+    assert api.calls == 2
+    # The stale marker is dropped rather than left to be re-read forever.
+    assert "rate_limited_until" not in m.load_state(state_path)
+
+
+def test_a_non_429_failure_does_not_pause_submissions(tmp_path, monkeypatch):
+    # ACTIVE_LIMIT and friends are per-release refusals: the next NZB may well
+    # be accepted, so stopping the pass would lose work for no reason.
+    nzb_dir, watch, state_path = pending_releases(tmp_path, 3)
+    api = refusing_torbox(count=1, exc=m.TorBoxError)
+    monkeypatch.setattr(m, "TorBox", lambda *a, **k: api)
+    m.run(str(nzb_dir), str(watch), str(tmp_path / "staging"), state_path,
+          str(tmp_path / "f.log"), "key", apply_changes=True, out=lambda *a: None)
+
+    assert api.calls == 3
+    assert m.in_backoff(m.load_state(state_path)) is None
+
+
+def test_an_unparseable_backoff_does_not_wedge_the_watcher(tmp_path):
+    # A malformed field must not stop the unit. The worst case is one more
+    # refused call; refusing to run at all is the failure the state file is
+    # supposed to survive.
+    for bad in ("not a date", None, "", 12345):
+        assert m.in_backoff({"rate_limited_until": bad}) is None, bad
+
+
+def test_a_naive_stored_deadline_does_not_raise():
+    # A timestamp with no offset cannot be compared to an aware "now":
+    # subtracting one from the other raises TypeError, outside the try that
+    # guards parsing. Found by mutating the fixup line and watching nothing go
+    # red -- the unparseable-value test above exercises a different branch.
+    state = {"rate_limited_until": "2099-01-01T00:00:00"}
+    assert m.in_backoff(state, datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)) is not None
+
+
+def test_the_backoff_is_measured_from_now_not_from_the_stored_value():
+    state = {}
+    m.note_rate_limit(state, datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc))
+    assert m.in_backoff(state, datetime(2026, 9, 14, 12, 30, tzinfo=timezone.utc))
+    assert not m.in_backoff(state, datetime(2026, 9, 14, 13, 1, tzinfo=timezone.utc))
+
+
 # --- job identity ----------------------------------------------------------
 
 def test_job_key_is_the_content_not_the_path(tmp_path):

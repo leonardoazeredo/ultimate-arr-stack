@@ -99,3 +99,31 @@ mutation usenet-blackhole-failure-substring-match \
   --test "the extracted modules pass their pytest suite" \
   --why "a substring match anywhere in the state reads a healthy state as a failure. The prefix is what TorBox varies the tail of, and nothing else" \
   --apply 'sed -i "s@^    if not lowered.startswith(FAILED_STATES):\$@    if not any(f in lowered for f in FAILED_STATES):@" "$F"'
+
+# --- the 429 backoff --------------------------------------------------------
+#
+# `createusenetdownload` is limited to 60 calls an hour. Measured 2026-09-14:
+# 47 refusals to 37 acceptances, with three refusals recurring on pass after
+# pass because each one was retried two minutes later and spent another call
+# from the budget it was waiting on.
+
+mutation usenet-blackhole-429-does-not-stop-the-pass \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "continuing the loop after a 429 offers every remaining NZB to a budget that is already empty. Each one is refused and each refusal is another call, which is the defect this backoff exists to remove -- reconfirmed three passes in a row with nothing submitted in between" \
+  --apply 'sed -i "s@^            out(f\"    ! {release}: rate limited, pausing submissions: {err}\")\$@            out(f\"    ! {release}: rate limited\")\n            continue\n            break@g" "$F"'
+
+mutation usenet-blackhole-backoff-not-honoured \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "recording the deadline and then never checking it is the same as no backoff at all, with extra state. The marker is written from a pass that has already been refused, so nothing else in the run would notice" \
+  --apply 'sed -i "s@^    paused_until = in_backoff(state)\$@    paused_until = None@" "$F"'
+
+mutation usenet-blackhole-429-read-as-an-ordinary-error \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "a 429 that is not distinguished from a 500 is retried on the next pass like any other transient failure. That is the entire bug: the status is the one signal that says stop asking rather than try again" \
+  --apply 'sed -i "s@^        if code == \"429\":\$@        if False:@" "$F"'
