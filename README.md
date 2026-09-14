@@ -168,6 +168,7 @@ Guards here are **proved able to fail**, not assumed to work. [tests/mutation/](
 | [UPGRADING.md](docs/UPGRADING.md) / [MAINTENANCE.md](docs/MAINTENANCE.md) | Image bumps and routine upkeep |
 | [BACKUP.md](docs/BACKUP.md) / [RESTORE.md](docs/RESTORE.md) | Protecting and rebuilding config |
 | [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Symptom-first fixes |
+| [TORBOX-API.md](docs/TORBOX-API.md) | The provider API this stack depends on, and how it is used |
 | [HOME-ASSISTANT.md](docs/HOME-ASSISTANT.md) | Completion notifications |
 | [MIGRATION-arr-off-vpn.md](docs/MIGRATION-arr-off-vpn.md) | Why Sonarr and Radarr are deliberately outside the tunnel |
 | [EXIT-NODE-PROJECT-LOG.md](docs/EXIT-NODE-PROJECT-LOG.md) / [TEST-HARDENING-LOG.md](docs/TEST-HARDENING-LOG.md) | Audited project logs: what shipped, what was wrong, what is still open |
