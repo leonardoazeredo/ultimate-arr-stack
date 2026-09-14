@@ -786,8 +786,8 @@ def run(nzb_dir, watch_dir, staging_dir, state_path, failed_log, api_key,
         # simply waits. Saying so every pass is the point: otherwise a quiet
         # log reads as "nothing pending" rather than "deliberately holding".
         wait = paused_until - datetime.now(timezone.utc)
-        out(f"  submissions paused {wait.total_seconds() / 60:.0f}m more "
-            f"(rate limited at {paused_until.astimezone(timezone.utc).strftime('%H:%M')}Z)")
+        out(f"  submissions paused for {wait.total_seconds() / 60:.0f}m more "
+            f"(until {paused_until.astimezone(timezone.utc).strftime('%H:%M')}Z)")
         submitted = 0
     else:
         # Past the deadline, so the marker is stale. Dropping it here rather
