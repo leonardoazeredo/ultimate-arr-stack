@@ -637,6 +637,98 @@ def test_the_backoff_is_measured_from_now_not_from_the_stored_value():
     assert not m.in_backoff(state, datetime(2026, 9, 14, 13, 1, tzinfo=timezone.utc))
 
 
+# --- the ten active download slots ----------------------------------------
+#
+# The other half of the 429 problem. TorBox allows ten concurrent usenet
+# downloads and refuses the eleventh under an HTTP 500 -- the same status as
+# UNKNOWN_ERROR and a dozen others -- so the status alone cannot tell "this
+# release is bad" from "there is no room for any release".
+#
+# Measured 2026-09-14: one pass spent 51 refusals this way, each one a call
+# against the same 60-an-hour budget.
+
+ACTIVE_LIMIT_BODY = ('{"success":false,"error":"ACTIVE_LIMIT",'
+                     '"detail":"You have reached your active download limit of 10.",'
+                     '"data":{"active_limit":10,"current_active_downloads":10}}')
+
+
+def test_an_active_limit_refusal_gets_its_own_type(monkeypatch):
+    fake_curl(monkeypatch, ACTIVE_LIMIT_BODY + "\n500")
+    with pytest.raises(m.ActiveLimit):
+        m._run_curl(['url = "http://x"'])
+
+
+def test_another_500_stays_an_ordinary_error(monkeypatch):
+    # Without this the classifier is just "any 500 stops the pass", which would
+    # abandon a batch over one release the provider happened to stumble on.
+    fake_curl(monkeypatch, '{"success":false,"error":"UNKNOWN_ERROR"}\n500')
+    with pytest.raises(m.TorBoxError) as caught:
+        m._run_curl(['url = "http://x"'])
+    assert not isinstance(caught.value, m.ActiveLimit)
+    assert not isinstance(caught.value, m.RateLimited)
+
+
+def test_the_error_code_comes_from_the_body_not_the_status():
+    for body, expected in (
+        (ACTIVE_LIMIT_BODY, "ACTIVE_LIMIT"),
+        ('{"error":"DOWNLOAD_SERVER_ERROR"}', "DOWNLOAD_SERVER_ERROR"),
+        ("{}", None),
+        ("<html>nope</html>", None),
+        ("[1,2]", None),
+        ("", None),
+        (None, None),
+        ('{"error":123}', None),
+    ):
+        assert m.api_error_code(body) == expected, body
+
+
+def test_an_active_limit_stops_the_pass_instead_of_trying_the_rest(tmp_path, monkeypatch):
+    # Three waiting, the first refused for room: one call, not three. Each of
+    # the others would be refused identically at the cost of another call.
+    nzb_dir, watch, state_path = pending_releases(tmp_path, 3)
+    api = refusing_torbox(count=1, exc=m.ActiveLimit)
+    monkeypatch.setattr(m, "TorBox", lambda *a, **k: api)
+    m.run(str(nzb_dir), str(watch), str(tmp_path / "staging"), state_path,
+          str(tmp_path / "f.log"), "key", apply_changes=True, out=lambda *a: None)
+
+    assert api.calls == 1
+    # ...and the two that were not offered are still waiting.
+    assert len(os.listdir(str(nzb_dir))) == 3
+
+
+def test_an_active_limit_does_not_pause_the_next_pass(tmp_path, monkeypatch):
+    # Unlike a 429. A slot frees on its own, so the next pass has to be free to
+    # try -- otherwise the account would sit idle with room available.
+    #
+    # Every call is refused, not just the first. With `count=1` the second
+    # attempt would succeed, and a pass that wrongly continued past the
+    # refusal would still total three calls over three passes -- which is how
+    # the mutation that removed the break survived this test until it did.
+    nzb_dir, watch, state_path = pending_releases(tmp_path, 2)
+    api = refusing_torbox(count=99, exc=m.ActiveLimit)
+    monkeypatch.setattr(m, "TorBox", lambda *a, **k: api)
+    for _ in range(3):
+        m.run(str(nzb_dir), str(watch), str(tmp_path / "staging"), state_path,
+              str(tmp_path / "f.log"), "key", apply_changes=True, out=lambda *a: None)
+
+    assert m.in_backoff(m.load_state(state_path)) is None
+    assert api.calls == 3, "one probe per pass, and no more"
+    assert m.load_state(state_path)["jobs"] == {}
+
+
+def test_an_active_limit_says_so_in_the_log(tmp_path, monkeypatch):
+    # The line has to distinguish this from a per-release failure, because the
+    # operator's next move is different: wait, rather than look at the release.
+    nzb_dir, watch, state_path = pending_releases(tmp_path, 2)
+    api = refusing_torbox(count=1, exc=m.ActiveLimit)
+    monkeypatch.setattr(m, "TorBox", lambda *a, **k: api)
+    lines = []
+    m.run(str(nzb_dir), str(watch), str(tmp_path / "staging"), state_path,
+          str(tmp_path / "f.log"), "key", apply_changes=True, out=lines.append)
+
+    assert any("no free slots" in line for line in lines)
+
+
 # --- job identity ----------------------------------------------------------
 
 def test_job_key_is_the_content_not_the_path(tmp_path):

@@ -164,6 +164,20 @@ class RateLimited(TorBoxError):
     """
 
 
+class ActiveLimit(TorBoxError):
+    """The account is using all of its concurrent download slots.
+
+    The other half of the same problem as RateLimited, and the same answer.
+    TorBox allows ten concurrent usenet downloads and refuses the eleventh with
+    `{"error":"ACTIVE_LIMIT"}` under an HTTP 500. That status is shared with a
+    dozen unrelated failures, so a caller reading the status alone cannot tell
+    "this release is bad" from "there is no room for any release".
+
+    No backoff follows this one: a slot frees by itself, and the next pass two
+    minutes later is what finds out.
+    """
+
+
 class PermanentError(TorBoxError):
     """The release itself is unusable, so a retry would fail the same way.
 
@@ -188,6 +202,24 @@ def quoted(value):
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
+def api_error_code(body):
+    """TorBox's own error code out of a failure body, or None.
+
+    Exists because the HTTP status is too coarse to act on. ACTIVE_LIMIT
+    arrives under a 500, the same status as DOWNLOAD_SERVER_ERROR,
+    UNKNOWN_ERROR and a dozen others, and it is the only one of them that means
+    "stop offering, there is no room" rather than "this release was refused".
+    """
+    try:
+        payload = json.loads(body)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(payload, dict):
+        code = payload.get("error")
+        return code if isinstance(code, str) else None
+    return None
+
+
 def _run_curl(lines, timeout=API_TIMEOUT):
     """Return the response body, or raise TorBoxError carrying the API's answer.
 
@@ -208,11 +240,14 @@ def _run_curl(lines, timeout=API_TIMEOUT):
     body, _, code = proc.stdout.rpartition("\n")
     if not code.startswith("2"):
         message = f"HTTP {code}: {body.strip()[:240]}"
-        # 429 is the one status where retrying the same call is the wrong
-        # answer, so it gets its own type rather than being another string the
-        # caller has to pattern-match on.
+        # Two refusals mean "stop offering", and both are decided on the body
+        # rather than the status: 429 is the hourly budget, ACTIVE_LIMIT is the
+        # ten download slots. Everything else is a per-release failure that the
+        # caller should carry on past.
         if code == "429":
             raise RateLimited(message)
+        if api_error_code(body) == "ACTIVE_LIMIT":
+            raise ActiveLimit(message)
         raise TorBoxError(message)
     return body
 
@@ -449,6 +484,18 @@ def submit(torbox, nzb_dir, state, out=print):
             # outbox keeps them all until the window moves.
             note_rate_limit(state)
             out(f"    ! {release}: rate limited, pausing submissions: {err}")
+            break
+        except ActiveLimit as err:
+            # Ten downloads are already running, so every remaining NZB would
+            # be refused identically -- and each refusal is a call against the
+            # same 60-an-hour budget the 429 path exists to protect. Measured
+            # 2026-09-14: one pass spent 51 of them this way.
+            #
+            # No backoff, unlike RateLimited. A slot frees by itself, and a
+            # submission is the only way to find out; one probe per pass is the
+            # price of noticing, and it is a submission rather than a waste
+            # when a slot is free.
+            out(f"    ! {release}: no free slots, stopping this pass: {err}")
             break
         except TorBoxError as err:
             out(f"    ! {release}: submit failed: {err}")
