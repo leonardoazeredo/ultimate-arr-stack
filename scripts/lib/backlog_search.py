@@ -20,6 +20,14 @@ only once fewer than `limit` seasons remain -- bounded by definition by then.
 Work is per season, so one SeasonSearch covers a season instead of one request
 per episode: ~200 requests for this library instead of ~3,100.
 
+The bounded walk restarts at the head of an ordered list every run, so it also
+skips units a recent run already asked for -- without that, the same first
+`limit` seasons are searched every interval and the tail of the backlog is never
+reached. That is a livelock that reads as progress, because the same lines keep
+appearing in the log. Measured on the NAS 2026-09-14, before the skip existed:
+the 00:02 run searched series 3-5 seasons 1-6, and the 04:02 run would have
+searched exactly those again.
+
 Radarr is bulk with a cooldown, because the bounded-looking alternative does not
 work here. `MoviesSearch` for a single film processed 2-4 releases per call and
 grabbed nothing, even for a film with 22 approved and 43 download-allowed
@@ -43,7 +51,7 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 DEFAULT_LIMIT = 10
 
@@ -286,6 +294,43 @@ def process_radarr(api, apply_changes, verbose, state, out, cooldown_hours):
     return len(candidates)
 
 
+def unit_id(series_id, season):
+    """A stable identity for one unit of Sonarr work."""
+    return f"{series_id}:{season}"
+
+
+def recently_searched(history, kind, hours, now=None):
+    """Unit ids of `kind` searched within the last `hours`.
+
+    The bounded walk restarts from the head of an ordered list every run, so
+    without this it re-searches the same first `limit` seasons forever and never
+    reaches the tail -- a livelock that looks exactly like progress in the log
+    because the same lines keep appearing. Measured 2026-09-14: the 00:02 run
+    searched series 3-5 seasons 1-6, and nothing would have stopped the 04:02
+    run searching them again.
+
+    Radarr does not need this: its sweep is bulk, so it has no head to get
+    stuck on.
+    """
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=hours)
+    seen = set()
+    for entry in history.get("runs", []):
+        if entry.get("kind") != kind:
+            continue
+        try:
+            when = datetime.fromisoformat(entry["at"])
+        except (KeyError, ValueError):
+            continue
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        if when >= cutoff:
+            unit = entry.get("unit")
+            if unit:
+                seen.add(unit)
+    return seen
+
+
 def sonarr_units(wanted):
     """One unit of work is a (series, season) pair, not an episode."""
     units = []
@@ -298,7 +343,7 @@ def sonarr_units(wanted):
     return units
 
 
-def process_sonarr(api, apply_changes, verbose, limit, state, out):
+def process_sonarr(api, apply_changes, verbose, limit, state, out, cooldown_hours=6.0):
     """Search the episode backlog, bounded per run UNTIL it is small enough.
 
     `MissingEpisodeSearch` is the same trap as the films' bulk command and a
@@ -326,6 +371,19 @@ def process_sonarr(api, apply_changes, verbose, limit, state, out):
         out("  nothing to search")
         return 0
 
+    # Drop what a recent run already asked for. Without this the ordered walk
+    # restarts at the same head every run and the tail is never reached.
+    recent = recently_searched(state.get("history", {}), "sonarr-season", cooldown_hours)
+    fresh = [u for u in units if unit_id(u[0], u[1]) not in recent]
+    if fresh:
+        units = fresh
+    else:
+        out(
+            f"  all {len(units)} unit(s) were searched within {cooldown_hours}h; "
+            "nothing new to try yet"
+        )
+        return 0
+
     if len(units) <= limit:
         if not apply_changes:
             out(f"    would run MissingEpisodeSearch ({len(units)} season(s) left, fits in one run)")
@@ -350,6 +408,14 @@ def process_sonarr(api, apply_changes, verbose, limit, state, out):
 
     for series_id, season, count in selected:
         api.post_command("SeasonSearch", seriesId=series_id, seasonNumber=season)
+        state["runs"].append(
+            {
+                "at": datetime.now(timezone.utc).isoformat(),
+                "kind": "sonarr-season",
+                "unit": unit_id(series_id, season),
+                "episodes": count,
+            }
+        )
         out(f"    search queued: series {series_id} season {season} ({count} episode(s))")
     out(f"    {len(units) - limit} season(s) remain for a later run")
     return len(selected)
@@ -382,7 +448,9 @@ def run(apply_changes, verbose, limit, state_path=None, out=print, cooldown_hour
     if sonarr_key:
         api = ArrApi("Sonarr", "http://localhost:8989", sonarr_key)
         out("Sonarr:")
-        counts["sonarr"] = process_sonarr(api, apply_changes, verbose, limit, state, out)
+        counts["sonarr"] = process_sonarr(
+            api, apply_changes, verbose, limit, state, out, cooldown_hours
+        )
 
     if apply_changes and state_path:
         save_state(state_path, state["runs"], state.get("history", {}))

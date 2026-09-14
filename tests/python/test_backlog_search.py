@@ -345,3 +345,111 @@ def test_the_api_key_is_not_an_argv_element(monkeypatch):
         pass
     assert "SECRETKEY" not in " ".join(seen["argv"])
     assert "SECRETKEY" in seen["input"]
+
+
+# --- the walk must advance, not re-search its own head ---------------------
+#
+# The bug these cover, found on the NAS 2026-09-14: the ordered walk restarts at
+# the head of the list every run, and nothing excluded a unit that had been
+# searched without producing a grab -- so the same first `limit` seasons were
+# searched every four hours forever and the tail of a 207-season backlog was
+# never reached. It read as progress in the log, because the same lines kept
+# appearing.
+
+def seasons(n, series_id=3):
+    """n missing seasons for one series, as the fake API would return them."""
+    return {series_id: [episode(s, series_id, s) for s in range(1, n + 1)]}
+
+
+def test_the_walk_advances_past_seasons_it_already_searched():
+    # Run 1 searches seasons 1-2 of 8; run 2 must search 3-4, not 1-2 again.
+    # The backlog has to exceed the limit here, or the walk takes the bulk path
+    # and there is no per-season slice to check.
+    def run(history):
+        api = FakeApi(series=[{"id": 3}], episodes=seasons(8))
+        state = {"runs": [], "history": history}
+        m.process_sonarr(api, True, False, 2, state, Collector())
+        return api, state
+
+    _, state1 = run({"runs": []})
+    # The records the first run wrote are what the second run reads.
+    api2, _ = run({"runs": state1["runs"]})
+    assert [kwargs["seasonNumber"] for _, kwargs in api2.posts] == [3, 4]
+
+
+def test_a_season_searched_long_ago_becomes_eligible_again():
+    # The cooldown is a delay, not a permanent exclusion: a season that never
+    # produced a grab has to be retried eventually.
+    api = FakeApi(series=[{"id": 3}], episodes=seasons(2))
+    old = {"runs": [
+        {"at": (datetime.now(timezone.utc) - timedelta(hours=30)).isoformat(),
+         "kind": "sonarr-season", "unit": "3:1"},
+        {"at": (datetime.now(timezone.utc) - timedelta(hours=30)).isoformat(),
+         "kind": "sonarr-season", "unit": "3:2"},
+    ]}
+    state = {"runs": [], "history": old}
+    m.process_sonarr(api, True, False, 5, state, Collector())
+    assert api.posts == [("MissingEpisodeSearch", {})]
+
+
+def test_a_recently_searched_season_is_skipped():
+    # Season 1 already tried; the walk must start at 2 rather than re-issue 1.
+    # 6 seasons against a limit of 2 keeps it on the per-season path.
+    api = FakeApi(series=[{"id": 3}], episodes=seasons(6))
+    recent = {"runs": [
+        {"at": datetime.now(timezone.utc).isoformat(),
+         "kind": "sonarr-season", "unit": "3:1"},
+    ]}
+    state = {"runs": [], "history": recent}
+    m.process_sonarr(api, True, False, 2, state, Collector())
+    assert [kwargs["seasonNumber"] for _, kwargs in api.posts] == [2, 3]
+
+
+def test_searches_are_recorded_with_a_stable_unit_id():
+    # The unit id is what the next run matches on, so it has to be stable and
+    # to identify the season, not just the series.
+    api = FakeApi(series=[{"id": 7}], episodes=seasons(2, series_id=7))
+    state = {"runs": [], "history": {"runs": []}}
+    m.process_sonarr(api, True, False, 1, state, Collector())
+    assert [r["unit"] for r in state["runs"]] == ["7:1"]
+    assert state["runs"][0]["kind"] == "sonarr-season"
+
+
+def test_nothing_to_do_when_every_unit_was_searched_recently():
+    # The whole backlog already tried inside the cooldown: say so, and queue
+    # nothing, rather than re-issuing the same searches.
+    api = FakeApi(series=[{"id": 3}], episodes=seasons(2))
+    recent = {"runs": [
+        {"at": datetime.now(timezone.utc).isoformat(),
+         "kind": "sonarr-season", "unit": u} for u in ("3:1", "3:2")
+    ]}
+    state = {"runs": [], "history": recent}
+    out = Collector()
+    assert m.process_sonarr(api, True, False, 5, state, out) == 0
+    assert api.posts == []
+    assert "nothing new to try yet" in out.text()
+
+
+def test_the_radarr_cooldown_does_not_treat_sonarr_units_as_its_own():
+    # Both kinds land in one history list; matching on the wrong kind would let
+    # episode searches satisfy the film cooldown.
+    history = {"runs": [{"at": datetime.now(timezone.utc).isoformat(),
+                         "kind": "sonarr-season", "unit": "3:1"}]}
+    assert m.hours_since_last(history, "radarr-bulk") is None
+
+
+def test_the_all_tried_message_when_the_backlog_exceeds_the_limit():
+    # The other half of the exhausted case: a backlog BIGGER than the limit
+    # where every unit has already been tried. The bulk command must not fire
+    # (the backlog does not fit), and the run must say so rather than silently
+    # doing nothing or re-issuing the same searches.
+    api = FakeApi(series=[{"id": 3}], episodes=seasons(6))
+    recent = {"runs": [
+        {"at": datetime.now(timezone.utc).isoformat(),
+         "kind": "sonarr-season", "unit": f"3:{s}"} for s in range(1, 7)
+    ]}
+    state = {"runs": [], "history": recent}
+    out = Collector()
+    assert m.process_sonarr(api, True, False, 2, state, out) == 0
+    assert api.posts == []
+    assert "nothing new to try yet" in out.text()

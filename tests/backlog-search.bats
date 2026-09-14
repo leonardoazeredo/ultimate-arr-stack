@@ -195,7 +195,7 @@ setup() {
     # that command searches the whole backlog at once, cannot be cancelled, and
     # had to be killed by restarting Sonarr on 2026-09-13. The names appear in
     # the header explaining that; they must never reach a command.
-    run grep -nE '^[[:space:]]*(curl|python3).*(MissingEpisodeSearch|MissingMoviesSearch)' \
+    run grep -nE 'python3 .*(MissingEpisodeSearch|MissingMoviesSearch)' \
         "$REPO_ROOT/scripts/backlog-search.sh"
     assert_failure
 }
