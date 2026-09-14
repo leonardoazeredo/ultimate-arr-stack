@@ -439,8 +439,8 @@ mutation debrid-stale-item-still-blocklisted \
   --file scripts/lib/queue_cleanup.py \
   --bats tests/python-suite.bats \
   --test "the extracted modules pass their pytest suite" \
-  --why "blocklisting a stale debrid item on its first removal forbids the one release the provider is known to have cached, so the replacement is a different release that fails the same way -- the loop this exemption exists to end (test_a_stale_debrid_item_is_not_blocklisted). Anchored on the first-strike condition itself, which is what the exemption has meant since the second-strike rule landed; it used to read the old stale-and-debrid line, which the rewrite made unmatchable" \
-  --apply 'sed -i "s@^    if reason_type == \"stale\" and is_debrid_client(record):\$@    if False:@" "$F"'
+  --why "blocklisting a stale debrid item on its first removal forbids the one release the provider is known to have cached, so the replacement is a different release that fails the same way -- the loop this exemption exists to end (test_a_stale_debrid_item_is_not_blocklisted). Anchored on the first-strike condition, which has now been rewritten twice: it read the old stale-and-debrid line, then a single-comparison line, and both were unmatchable the moment the condition changed shape. This one follows the condition rather than the shape, so adding another reason to the same tuple leaves it working -- and if the line is restructured again, grep the corpus for it first" \
+  --apply 'sed -i "s@^    if reason_type in (\"stale\", \"client_error\") and is_debrid_client(record):\$@    if False:@" "$F"'
 
 # --- the refused imports and the removal memory, 2026-09-13 ----------------
 #

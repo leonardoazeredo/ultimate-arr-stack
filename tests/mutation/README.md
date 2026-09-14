@@ -472,6 +472,21 @@ Linux, which is where CI and pi1 run it. Write new entries with `perl -pi -e` or
 as they are, since rewriting them buys portability the corpus does not need and
 costs a re-verification of every one.
 
+**Consequence worth holding on to: editing a line can silently kill the entry
+that anchors on it, and the local suite will not tell you.** On a Mac the
+inertness check skips, so the first report is CI going red on a file you did not
+touch. This has happened twice now — once when a block was deleted, once when a
+condition was widened from `== "stale"` to `in ("stale", "client_error")`. So
+before editing a line in any file under `TARGETS`, grep the corpus for it:
+
+```bash
+grep -rn 'reason_type == ' tests/mutation/corpus/
+```
+
+`debrid-stale-item-still-blocklisted` has had its anchor rewritten twice for
+this. Prefer a pattern that follows the meaning rather than the exact text: one
+anchored on the whole condition breaks whenever a term is added to it.
+
 `--apply` is a shell command in its own right, and two shells parse it before
 perl or sed ever sees it: the value is single-quoted for the shell that sources
 the corpus, and `run-mutations.sh` then hands the string to `bash -c`. So a `$`
