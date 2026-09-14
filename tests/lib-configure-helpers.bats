@@ -454,6 +454,10 @@ radarr() {
     route "GET /api/v3/downloadclient" '[]'
     SABNZBD_RUNNING=true run sonarr
     assert_curl '"implementation": "UsenetBlackhole"'
+    # The protocol is what routes a release here at all. Set it to torrent and
+    # the arr never hands the client a usenet grab: the path looks configured
+    # and silently does nothing.
+    assert_curl '"protocol": "usenet"'
     assert_curl '"name": "nzbFolder", "value": "/data/usenet/blackhole/nzb"'
     assert_curl '"name": "watchFolder", "value": "/data/usenet/blackhole/complete"'
 }
