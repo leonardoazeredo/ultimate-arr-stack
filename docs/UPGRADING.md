@@ -457,7 +457,7 @@ echo "Migration complete"
 - Startup order fixes — Gluetun now waits for Pi-hole to be healthy before connecting
 - Improved healthchecks — FlareSolverr actually tests Chrome, catches crashes
 - Backup script improvements — smart space checking, 7-day rotation
-- SABnzbd added — Usenet downloads via VPN (remove from compose if not wanted); configure in [App Configuration Guide](APP-CONFIG.md#42-sabnzbd-usenet-downloads)
+- SABnzbd added — Usenet downloads via VPN (remove from compose if not wanted); configure in [App Configuration Guide](APP-CONFIG.md#42-usenet-torbox-blackhole)
 
 **New features (optional, requires setup):**
 

@@ -60,7 +60,7 @@ Decide how you'll access your media stack:
   DrunkenSlug's registration is currently closed and NZBFinder's free tier has no working API
   access — see [Prowlarr setup](APP-CONFIG.md#45-prowlarr-indexer-manager) for details.
 
-> **Why Usenet?** More reliable than public torrents (no fakes), faster downloads, SSL-encrypted (no VPN needed). See [SABnzbd setup](APP-CONFIG.md#42-sabnzbd-usenet-downloads).
+> **Why Usenet?** More reliable than public torrents (no fakes), faster downloads, SSL-encrypted (no VPN needed). See [Usenet setup](APP-CONFIG.md#42-usenet-torbox-blackhole).
 
 **For + remote access (Cloudflared path):**
 - **Domain name** (~$10/year) - [Cloudflare Registrar](https://www.cloudflare.com/products/registrar/) recommended

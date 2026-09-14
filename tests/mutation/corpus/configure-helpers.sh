@@ -48,19 +48,27 @@ mutation wait-unbounded-per-attempt \
 # entry below is one section of it losing the check that makes the script's
 # "safe to re-run" claim true.
 
-mutation arr-category-field-always-tv \
-  --file scripts/lib/configure-helpers.sh \
-  --bats tests/lib-configure-helpers.bats \
-  --test "configure-helpers: the same call for Radarr derives movie field names instead" \
-  --why "hardcodes the tv field names, so Radarr's download client is created with a tvCategory field Radarr does not have. The client saves, and then never picks anything up, because the category it was told to use is on a field the API ignored" \
-  --apply 'sed -i "s@^        cat_field=\"movieCategory\"\$@        cat_field=\"tvCategory\"@" "$F"'
+# Two entries replaced on 2026-09-14. They mutated the `cat_field` derivation
+# and the SABnzbd API-key condition, both of which went with the Sabnzbd
+# download client when usenet moved to the blackhole. They were still listed
+# here, so the corpus checker on CI reported them as inert -- and the local
+# suite could not: the inertness check is GNU-sed-based and skips on BSD sed
+# (tests/mutation/README.md), which is what this Mac has. Worth remembering
+# before deleting a block any corpus entry points into.
 
-mutation arr-sab-added-without-a-key \
+mutation arr-blackhole-watch-folder-is-sabnzbds \
   --file scripts/lib/configure-helpers.sh \
   --bats tests/lib-configure-helpers.bats \
-  --test "configure-helpers: SABnzbd is added only when it is running and has a key" \
-  --why "drops the API-key half of the condition, so a running SABnzbd whose key could not be discovered gets a download client created with an empty apiKey. It authenticates against nothing and every grab fails later, far from here" \
-  --apply 'sed -i "s@if \[\[ \"\$SABNZBD_RUNNING\" == true && -n \"\$SABNZBD_API_KEY\" \]\]; then@if [[ \"\$SABNZBD_RUNNING\" == true ]]; then@" "$F"'
+  --test "configure-helpers: the usenet client is the arr's own blackhole" \
+  --why "leaves the watch folder at /data/usenet/complete, where SABnzbd used to put finished downloads. The client saves, the arr writes its NZBs to the blackhole folder as before, and the timer moves the finished release into a folder the arr is not watching -- so nothing is ever imported and every grab looks stuck with no error anywhere" \
+  --apply 'sed -i "s@/data/usenet/blackhole/complete@/data/usenet/complete@" "$F"'
+
+mutation arr-blackhole-skip-matched-on-name \
+  --file scripts/lib/configure-helpers.sh \
+  --bats tests/lib-configure-helpers.bats \
+  --test "configure-helpers: an existing blackhole client is left alone" \
+  --why "matches the existing client on its display name instead of its implementation, so renaming it in the UI makes the script decide it is missing and POST a second copy on every run -- two clients for one protocol, and the arr picks between them arbitrarily" \
+  --apply 'sed -i "s@c.get(\(.\)implementation\(.\),@c.get(\1name\2,@" "$F"'
 
 mutation arr-metadata-put-to-a-fixed-id \
   --file scripts/lib/configure-helpers.sh \

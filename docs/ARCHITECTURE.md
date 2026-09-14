@@ -8,29 +8,29 @@ When someone requests a movie or TV show, here's what happens:
 
 ```
 ┌─────────────┐     ┌──────────────┐     ┌───────────┐     ┌─────────────┐     ┌──────────┐
-│   Seerr     │────▶│ Sonarr/Radarr│────▶│ Prowlarr  │────▶│  SABnzbd    │────▶│ Jellyfin │
+│   Seerr     │────▶│ Sonarr/Radarr│────▶│ Prowlarr  │────▶│  TorBox    │────▶│ Jellyfin │
 │ (request)   │     │ (manage)     │     │ (indexers)│     │  Decypharr  │     │ (watch)  │
 │             │     │              │     │           │     │ (download)  │     │          │
 └─────────────┘     └──────────────┘     └───────────┘     └─────────────┘     └──────────┘
                                               │                   │                  │
                                               └───────────────────┘                  │
-                            Prowlarr + SABnzbd: VPN (Gluetun)     Decypharr + Jellyfin: direct
+                            Prowlarr: VPN (Gluetun)     TorBox (both paths) + Jellyfin: direct
 ```
 
-> **Prowlarr and SABnzbd** run through the VPN. **Decypharr** does not: it hands the release to TorBox, which fetches the torrent on its own servers and serves the finished file back over HTTPS, so no peer traffic leaves this host. Seerr, Sonarr, Radarr, Jellyfin and Decypharr run on the bridge — Sonarr/Radarr only contact metadata providers and internal services, so they need no VPN.
+> **Prowlarr** runs through the VPN. **Decypharr and the usenet blackhole** do not: each hands the release to TorBox, which fetches it on its own servers and serves the finished file back over HTTPS, so no peer traffic leaves this host. Seerr, Sonarr, Radarr, Jellyfin and Decypharr run on the bridge — Sonarr/Radarr only contact metadata providers and internal services, so they need no VPN.
 
 1. **Seerr** - User requests a show or movie
 2. **Sonarr/Radarr** - Searches for releases, sends to download client
 3. **Prowlarr** - Provides indexers (torrent + Usenet) to Sonarr/Radarr
 4. **Decypharr** - Hands torrent releases to TorBox and pulls the finished file back over HTTPS (not through the VPN)
-5. **SABnzbd** - Downloads from Usenet (through VPN)
+5. **usenet-blackhole** - Writes each grabbed `.nzb` to TorBox's usenet API, then moves the finished release into the arr's watch folder. Over HTTPS, not through the VPN, for the same reason as Decypharr.
 6. **Jellyfin** - Streams the completed files
 
-> **Why two download clients?** The torrent path runs through TorBox: Decypharr gives it the release and downloads the result over HTTPS, so nothing joins a swarm from this host. Usenet costs ~$5/month but is faster, more reliable, and has no ratio requirements, and it stays on SABnzbd behind the VPN. Most users configure both - Sonarr/Radarr take whichever release scores better, and each client covers what the other cannot find.
+> **Why two download clients?** Both paths run through TorBox, and neither joins a swarm nor opens a usenet connection from this host. Decypharr speaks TorBox's debrid API for torrents; the usenet path is the arrs' own Blackhole client plus a timer that carries each NZB through TorBox's usenet API. Most users configure both - Sonarr/Radarr take whichever release scores better, and each covers what the other cannot find. See [Usenet](APP-CONFIG.md#42-usenet-torbox-blackhole) for why SABnzbd is no longer the usenet client.
 
 ## VPN Protection
 
-**Why VPN?** Your ISP can see which indexers you query and which Usenet provider you pull from. The VPN encrypts this so they only see "encrypted traffic to VPN server". There is no local torrent client left to tunnel: TorBox handles the torrent, and only the finished file crosses the wire, over HTTPS.
+**Why VPN?** Your ISP can see which indexers you query. The VPN encrypts this so they only see "encrypted traffic to VPN server". Neither download path needs it: TorBox fetches both the torrent and the usenet release on its own servers, and only the finished file crosses the wire, over HTTPS.
 
 **Why not everything through VPN?** Streaming from Jellyfin doesn't need protection (you're watching your own files) and VPN would slow it down.
 
@@ -56,7 +56,7 @@ LAN only ◄────────────────────│  Pi-
                               └─────────────────────────────────────────┘
 ```
 
-> **Note:** Indexer scraping and Usenet downloads go through the VPN to hide them from your ISP. Decypharr stays on the bridge because TorBox, not this host, handles the torrent - only the finished file comes back, over HTTPS. Streaming services don't need VPN protection. Remote access uses Cloudflare Tunnel (not VPN) - see [Access Levels](#access-levels).
+> **Note:** Indexer scraping goes through the VPN to hide it from your ISP. Decypharr stays on the bridge because TorBox, not this host, handles the torrent - only the finished file comes back, over HTTPS. The usenet blackhole runs on the NAS itself for the same reason. Streaming services don't need VPN protection. Remote access uses Cloudflare Tunnel (not VPN) - see [Access Levels](#access-levels).
 
 ## Service Connections
 
@@ -69,6 +69,7 @@ Sonarr → SABnzbd                     Prowlarr → Sonarr
   └── gluetun:8080                      └── 172.20.0.10:8989
 Radarr → SABnzbd                     Prowlarr → Radarr
   └── gluetun:8080                      └── 172.20.0.11:7878
+(usenet no longer crosses this boundary - the arrs use the local blackhole client)
 
 Bridge → bridge (use name):          Behind-VPN → behind-VPN (localhost):
 ─────────────────────────────        ──────────────────────────

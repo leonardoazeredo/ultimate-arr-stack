@@ -372,7 +372,7 @@ arr_setup() {
 
     route "GET /api/v3/health" "" 200
     route "GET /api/v3/rootfolder"       '[{"path":"/data/media/tv"}]'
-    route "GET /api/v3/downloadclient"   '[{"name":"SABnzbd"}]'
+    route "GET /api/v3/downloadclient"   '[{"name":"Usenet Blackhole","implementation":"UsenetBlackhole"}]'
     route "GET /api/v3/metadata"         '[{"id":3,"implementation":"XbmcMetadata","enable":true}]'
     route "GET /api/v3/config/naming"    '{"renameEpisodes":true}'
     route "GET /api/v3/customformat"     '[{"id":9,"name":"Reject ISO"}]'
@@ -444,39 +444,67 @@ radarr() {
     out_has "COUNTS 0 3 1"
 }
 
-@test "configure-helpers: the SABnzbd client carries tv's field names for Sonarr" {
+@test "configure-helpers: the usenet client is the arr's own blackhole" {
+    # This used to be a `Sabnzbd` client pointed at 172.20.0.3:8080, which is not
+    # a working usenet path here: SABnzbd reads nntp.torbox.app, which serves
+    # articles only up to about 90 days old, so every backlog grab fails. The
+    # blackhole hands the NZB to usenet-blackhole.timer instead, which submits it
+    # to TorBox's API. See docs/TROUBLESHOOTING.md.
     arr_setup
     route "GET /api/v3/downloadclient" '[]'
-    SABNZBD_RUNNING=true SABNZBD_API_KEY=sabkey run sonarr
-    assert_curl '"name": "tvCategory", "value": "tv"'
-    assert_curl '"name": "recentTvPriority"'
-    assert_curl '"name": "olderTvPriority"'
-    assert_curl '"name": "apiKey", "value": "sabkey"'
+    SABNZBD_RUNNING=true run sonarr
+    assert_curl '"implementation": "UsenetBlackhole"'
+    # The protocol is what routes a release here at all. Set it to torrent and
+    # the arr never hands the client a usenet grab: the path looks configured
+    # and silently does nothing.
+    assert_curl '"protocol": "usenet"'
+    assert_curl '"name": "nzbFolder", "value": "/data/usenet/blackhole/nzb"'
+    assert_curl '"name": "watchFolder", "value": "/data/usenet/blackhole/complete"'
 }
 
-@test "configure-helpers: the same call for Radarr derives movie field names instead" {
+@test "configure-helpers: the usenet client carries no SABnzbd settings" {
+    # The failing shape this guards: a client that still names a host, a port or
+    # an API key, left behind by a half-finished migration. `SabnzbdSettings`
+    # with a dead host is worse than no client at all, because the arr keeps
+    # handing it releases.
     arr_setup
     route "GET /api/v3/downloadclient" '[]'
-    SABNZBD_RUNNING=true SABNZBD_API_KEY=sabkey run radarr
-    assert_curl '"name": "movieCategory", "value": "movies"'
-    assert_curl '"name": "recentMoviePriority"'
+    SABNZBD_RUNNING=true run sonarr
+    refute_curl "SabnzbdSettings"
+    refute_curl "172.20.0.3"
+    refute_curl '"name": "apiKey"'
+}
+
+@test "configure-helpers: the same blackhole payload is posted for Radarr" {
+    arr_setup
+    route "GET /api/v3/downloadclient" '[]'
+    SABNZBD_RUNNING=true run radarr
+    assert_curl '"implementation": "UsenetBlackhole"'
+    # The two clients are identical: the blackhole has no per-arr category or
+    # priority fields, which is what used to make these two payloads different.
     refute_curl "tvCategory"
+    refute_curl "movieCategory"
 }
 
-@test "configure-helpers: SABnzbd is added only when it is running and has a key" {
+@test "configure-helpers: an existing blackhole client is left alone" {
+    # The skip is matched on implementation, not on a display name, so renaming
+    # the client in the UI does not make every run re-POST it.
+    arr_setup
+    route "GET /api/v3/downloadclient" '[{"name":"Usenet Blackhole (renamed)","implementation":"UsenetBlackhole"}]'
+    SABNZBD_RUNNING=true run sonarr
+    out_has "usenet blackhole download client (already configured)"
+    refute_curl '"implementation": "UsenetBlackhole"'
+}
+
+@test "configure-helpers: the usenet client is added only when usenet is wanted" {
     arr_setup
     route "GET /api/v3/downloadclient" '[]'
     run sonarr
-    refute_curl "SabnzbdSettings"
+    refute_curl "UsenetBlackhole"
 
     : > "$CURL_LOG"
-    SABNZBD_RUNNING=true SABNZBD_API_KEY="" run sonarr
-    refute_curl "SabnzbdSettings"
-
-    : > "$CURL_LOG"
-    SABNZBD_RUNNING=true SABNZBD_API_KEY=sabkey run sonarr
-    assert_curl "SabnzbdSettings"
-    assert_curl '"name": "apiKey", "value": "sabkey"'
+    SABNZBD_RUNNING=true run sonarr
+    assert_curl "UsenetBlackhole"
 }
 
 @test "configure-helpers: disabled NFO metadata is enabled at its own id" {
@@ -603,18 +631,18 @@ radarr() {
 
 @test "configure-helpers: a dry run reads nothing past the health check and writes nothing" {
     arr_setup
-    DRY_RUN=true SABNZBD_RUNNING=true SABNZBD_API_KEY=sabkey run sonarr
+    DRY_RUN=true SABNZBD_RUNNING=true run sonarr
     out_has "Would: Add root folder /data/media/tv"
-    out_has "Would: Add SABnzbd download client (category: tv)"
+    out_has "Would: Add usenet blackhole download client"
     out_has "Would: Add delay profile (Usenet 0, Torrent 30)"
     refute_curl "-X POST"
     refute_curl "-X PUT"
     refute_curl "/api/v3/rootfolder"
 }
 
-@test "configure-helpers: a dry run omits the two SABnzbd steps when it is not running" {
+@test "configure-helpers: a dry run omits the two usenet steps when it is not running" {
     arr_setup
     DRY_RUN=true run sonarr
-    out_lacks "Would: Add SABnzbd"
+    out_lacks "Would: Add usenet blackhole"
     out_lacks "Would: Add delay profile"
 }

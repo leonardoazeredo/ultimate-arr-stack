@@ -43,7 +43,7 @@
 | Service | IP | Port | Notes |
 |---------|-----|------|-------|
 | **Gluetun** | **172.20.0.3** | — | VPN gateway |
-| ↳ SABnzbd | (via Gluetun) | 8082 | Usenet downloads |
+| ↳ SABnzbd | (via Gluetun) | 8082 | Optional — usenet runs through TorBox instead ([why](APP-CONFIG.md#42-usenet-torbox-blackhole)) |
 | ↳ Prowlarr | (via Gluetun) | 9696 | Indexer manager |
 | Sonarr | 172.20.0.10 | 8989 | TV shows (own IP — not via VPN) |
 | Radarr | 172.20.0.11 | 7878 | Movies (own IP — not via VPN) |
@@ -90,7 +90,7 @@ natively on `arr-stack-router`, not on the NAS — see
 
 ### Service Connection Guide
 
-**VPN-protected services** (SABnzbd, Prowlarr, FlareSolverr, vpn-socks5) share Gluetun's network via `network_mode: service:gluetun` — these carry the traffic that must stay hidden (indexer scraping + Usenet).
+**VPN-protected services** (SABnzbd, Prowlarr, FlareSolverr, vpn-socks5) share Gluetun's network via `network_mode: service:gluetun` — these carry the traffic that must stay hidden (indexer scraping). Usenet downloads no longer cross this boundary: TorBox fetches them on its own servers, and a NAS-side timer moves the finished file into the arr's watch folder.
 
 **Bridge services** (Sonarr, Radarr, Jellyfin, Seerr, Bazarr, Decypharr, …) run on the `arr-core` bridge with their own IPs. Sonarr (172.20.0.10) and Radarr (172.20.0.11) are *not* behind the VPN: they only contact metadata providers (TVDB/TMDB) and internal services, so they need no VPN — and staying on the bridge keeps them reachable when a gluetun/VPN reconnect happens. Decypharr is on the bridge for the same reason: the torrent runs on TorBox's servers, and only the finished file comes back over HTTPS.
 
