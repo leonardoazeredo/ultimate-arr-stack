@@ -203,6 +203,63 @@ single-video release the zip is a second copy of the payload written to the same
 disk before being unpacked — for a 5 GB episode, 5 GB of staging for nothing.
 `append_name` is also available and unused.
 
+## The official SDKs, and why this stack does not use one
+
+TorBox publishes SDKs in six languages, under the
+[TorBox-App](https://github.com/TorBox-App) organisation and linked from
+<https://torbox.app/integrations>:
+
+| SDK | Language | Last pushed |
+|---|---|---|
+| `torbox-sdk-py` | Python | 2025-04-26 |
+| `torbox-sdk-go` | Go | 2025-04-26 |
+| `torbox-sdk-js` | TypeScript | 2025-04-26 |
+| `torbox-sdk-java` | Java | 2025-04-26 |
+| `torbox-sdk-dotnet` | C# | 2025-04-26 |
+| `torbox-sdk-php` | PHP | 2025-04-26 |
+
+They are generated clients, MIT-licensed, and the Python one is on PyPI as
+`TorBox` at 0.1.0a1, published 2024-11-23.
+
+**It would have caught one of our bugs.** `request_download_link1` builds the
+call with `.add_query("token", token)`, so the requirement that `requestdl`'s
+token travel as a query parameter — the one that cost a failed fetch and a
+rewritten HTTP layer — is encoded in it. That is a real argument for a generated
+client over a hand-rolled one: the vendor's own view of the surface lives in the
+code rather than in prose someone has to read.
+
+**It cannot express what the audit above recommends.** The Python SDK's
+`CreateUsenetDownloadRequest` models two fields:
+
+```python
+self.file = file
+self.link = link
+```
+
+No `name`, no `password`, no `post_processing`, no `as_queued`, no
+`add_only_if_cached` — despite the method's own docstring documenting the
+post-processing values in full. The generator's output has drifted behind the
+collection it was generated from, and the fields it is missing are exactly the
+ones this stack is not using well.
+
+**And the watcher could not install it anyway.** `usenet-blackhole` runs as a
+systemd user unit on the NAS against the system `python3`, with no pip and no
+package manager. The Python SDK pulls `pydantic`, `click`, `requests` and
+`typing-extensions`. Adopting it means containerising the watcher, which is the
+pattern this repo uses for anything with dependencies
+(`tests/toolkit/pytest.sh`, the e2e runner, `alpine/git`). That is worth doing
+on its own merits, but not for a client whose HTTP layer is 93 lines of `curl`
+plus stdlib.
+
+**Decision: keep the hand-rolled client, read the SDKs when auditing.** A
+generated client is worth consulting for a detail the collection buries — the
+`requestdl` token requirement is a good example — but not worth a runtime
+dependency that is a year and a half behind the API and cannot be installed on
+the host that runs it.
+
+The calculation changes if the SDKs catch up. Worth re-checking when
+`CreateUsenetDownloadRequest` grows a `post_processing` field.
+
 ## What Decypharr covers
 
 The torrent half of the API is exercised by Decypharr's own Go client, not by
