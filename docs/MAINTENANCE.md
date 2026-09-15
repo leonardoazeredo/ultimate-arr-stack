@@ -310,7 +310,7 @@ before the arr notices. A pass with nothing in flight is a handful of API calls.
 | `${MEDIA_ROOT}/usenet/blackhole/complete` | the arr imports from here; it deletes the folder after importing |
 | `${MEDIA_ROOT}/usenet/blackhole/staging` | ours alone; a release is downloaded here and renamed into place |
 | `logs/usenet-blackhole.log` | what each pass did |
-| `logs/usenet-blackhole-failed.log` | releases TorBox failed, or that passed `--timeout-hours` |
+| `logs/usenet-blackhole-failed.log` | releases TorBox failed, that stalled past `--stall-hours`, or that passed `--timeout-hours` |
 | `logs/usenet-blackhole-state.json` | what is in flight. **Do not delete it** |
 
 Staging is deliberately a sibling of the watch folder and not a `.incoming-`

@@ -722,8 +722,11 @@ cat logs/usenet-blackhole-state.json       # what is in flight
 A release that never completes is invisible to the arr — a blackhole client
 reports no queue, so the arr sees only what appears in the watch folder. That is
 what `logs/usenet-blackhole-failed.log` exists for: anything TorBox reports
-failed, or that is still going after `--timeout-hours` (24 by default), is
-written there and dropped from the state file.
+failed, that has reported no progress for `--stall-hours` (4 by default), or
+that is still going after `--timeout-hours` (24 by default), is written there
+and dropped from the state file. The stall rule stops a job that has stopped
+moving from holding one of the account's ten concurrent slots for the full
+timeout; the timeout stays the bound for a large release that is still moving.
 
 **Do not "fix" a stall by deleting the state file.** It is what stops a restart
 asking TorBox to download the same release twice; without it the arr sees two

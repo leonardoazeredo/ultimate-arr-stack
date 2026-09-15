@@ -56,13 +56,16 @@ TRUNCATED_NZB = VALID_NZB[: len(VALID_NZB) // 2]
 class FakeTorBox:
     """Records calls; returns canned state. Never touches the network."""
 
-    def __init__(self, submitted=None, list_result=None, zip_link="https://example.invalid/p.zip"):
+    def __init__(self, submitted=None, list_result=None, zip_link="https://example.invalid/p.zip",
+                 delete_error=None):
         self._submitted = submitted or {}
         self._list = list_result or []
         self._zip_link = zip_link
+        self._delete_error = delete_error
         self.submits = []
         self.list_calls = 0
         self.zip_requests = []
+        self.deletes = []
 
     def submit_file(self, nzb_path, name):
         self.submits.append((os.path.basename(nzb_path), name))
@@ -75,6 +78,12 @@ class FakeTorBox:
     def request_zip_link(self, usenet_id):
         self.zip_requests.append(usenet_id)
         return self._zip_link
+
+    def delete_usenet(self, usenet_id):
+        self.deletes.append(usenet_id)
+        if self._delete_error is not None:
+            raise self._delete_error
+        return True
 
 
 def write_nzb(directory, name, body=VALID_NZB):
@@ -188,6 +197,37 @@ def test_request_zip_link_sends_the_token_in_the_query(monkeypatch):
     assert "token=secret-token" in seen["path"]
     assert "usenet_id=2449161" in seen["path"]
     assert "zip_link=true" in seen["path"]
+
+
+def test_delete_usenet_posts_the_delete_through_the_curl_config(monkeypatch):
+    # controlusenetdownload is the one call that frees a slot, so its shape is
+    # load-bearing: a JSON body naming the id and the operation, the key in the
+    # Authorization header, and both on stdin rather than in curl's argv.
+    api = m.TorBox("secret-token")
+    seen = fake_curl(monkeypatch, '{"success":true}\n200')
+    assert api.delete_usenet(2449161) is True
+
+    config = seen["input"]
+    assert "https://api.torbox.app/v1/api/usenet/controlusenetdownload" in config
+    assert 'request = "POST"' in config
+    assert 'header = "Authorization: Bearer secret-token"' in config
+    # curl's config escaping and JSON's string escaping agree on \" and \\, so
+    # the quoted value reads back as the body curl would send.
+    line = [l for l in config.splitlines() if l.startswith("data = ")][0]
+    assert json.loads(json.loads(line.split(" = ", 1)[1])) == {
+        "usenet_id": 2449161, "operation": "delete"}
+    assert not any("secret-token" in arg for arg in seen["argv"])
+
+
+def test_a_refused_delete_raises_the_ordinary_torbox_error(monkeypatch):
+    # The caller catches this and carries on, so it has to be a TorBoxError
+    # rather than something narrower that the caller would miss.
+    api = m.TorBox("k")
+    fake_curl(monkeypatch, '{"success":false,'
+                           '"detail":"USENET_DOWNLOAD_NOT_FOUND"}\n500')
+    with pytest.raises(m.TorBoxError) as caught:
+        api.delete_usenet(7)
+    assert "USENET_DOWNLOAD_NOT_FOUND" in str(caught.value)
 
 
 def test_fetch_keeps_the_download_link_off_argv(tmp_path, monkeypatch):
@@ -437,6 +477,38 @@ def test_a_timeout_removes_the_nzb_too(tmp_path, monkeypatch):
           str(tmp_path / "f.log"), "key", apply_changes=True, out=lambda *a: None)
 
     assert os.listdir(str(nzb_dir)) == []
+
+
+def test_a_stall_removes_the_nzb_too(tmp_path, monkeypatch):
+    # The whole point of the stall rule. A stalled job is terminal, so its NZB
+    # has to leave the outbox with it -- otherwise the very next pass, two
+    # minutes later, finds the same file, submits the same dead release and
+    # hands it another slot. That is the retry storm this change exists to
+    # remove, and leaving "stalled" out of the terminal set reproduces it.
+    nzb_dir = tmp_path / "nzb"
+    nzb_dir.mkdir()
+    write_nzb(str(nzb_dir), "Rel-GRP.nzb")
+    watch = tmp_path / "watch"
+    watch.mkdir()
+    state_path = tmp_path / "state.json"
+    stuck_since = datetime.now(timezone.utc) - timedelta(hours=6)
+    m.save_state(str(state_path), {"jobs": {m.job_key(str(nzb_dir / "Rel-GRP.nzb")): {
+        "name": "Rel-GRP",
+        "torbox_id": 7,
+        "hash": "h",
+        "submitted_at": stuck_since.isoformat(),
+        "last_progress": 0.0,
+        "progress_changed_at": stuck_since.isoformat(),
+    }}})
+
+    api = FakeTorBox(list_result=[{"id": 7, "download_state": "downloading",
+                                   "progress": 0.0}])
+    monkeypatch.setattr(m, "TorBox", lambda *a, **k: api)
+    m.run(str(nzb_dir), str(watch), str(tmp_path / "staging"), str(state_path),
+          str(tmp_path / "f.log"), "key", apply_changes=True, out=lambda *a: None)
+
+    assert os.listdir(str(nzb_dir)) == []
+    assert m.load_state(state_path)["jobs"] == {}
 
 
 def test_a_transient_fetch_failure_keeps_the_nzb_for_the_retry(tmp_path, monkeypatch):
@@ -978,6 +1050,218 @@ def test_an_unwritable_failure_log_does_not_crash_the_pass(tmp_path):
     assert statuses == ["failed"]
 
 
+# --- the stall rule ---------------------------------------------------------
+#
+# Phase 2 item 3 of PLAN-USENET-RECOVERY.md. Measured 2026-09-15: the oldest
+# in-flight job was 21.2h old with nothing to show, and --timeout-hours is 24,
+# so it held one of the account's ten concurrent slots for the full day before
+# anything noticed. `progress` is a numeric field on every record `mylist`
+# returns; a value that has not moved for --stall-hours is the signal that it
+# never will, and the timeout stays the bound for a release that keeps moving.
+
+STALL_START = NOW - timedelta(hours=9)
+
+
+def job_with_progress(name="Stuck-GRP", submitted_at=STALL_START, torbox_id=7,
+                      last_progress=None, changed_at=None):
+    """A state entry shaped the way submit() writes one."""
+    return {
+        "name": name,
+        "torbox_id": torbox_id,
+        "hash": "h",
+        "submitted_at": submitted_at.isoformat(),
+        "last_progress": last_progress,
+        "progress_changed_at": (changed_at or submitted_at).isoformat(),
+    }
+
+
+def test_submit_starts_the_stall_clock_at_submission(tmp_path):
+    # Without these two fields a freshly submitted job has no baseline: the
+    # first poll after a restart would have nothing to compare against, and a
+    # job could read as stalled from the moment it started.
+    nzb_dir = tmp_path / "nzb"
+    nzb_dir.mkdir()
+    write_nzb(str(nzb_dir), "Rel-GRP.nzb")
+
+    class OneJob:
+        def submit_file(self, nzb_path, name):
+            return {"usenetdownload_id": 7, "hash": "h"}
+
+    state = {"jobs": {}}
+    assert m.submit(OneJob(), str(nzb_dir), state) == 1
+    entry = list(state["jobs"].values())[0]
+    assert entry["last_progress"] is None
+    assert entry["progress_changed_at"] == entry["submitted_at"]
+
+
+def test_progress_that_has_not_moved_past_stall_hours_is_failed(tmp_path):
+    log = str(tmp_path / "failed.log")
+    state = {"jobs": {"k": job_with_progress()}}
+    api = FakeTorBox(list_result=[{"id": 7, "download_state": "downloading",
+                                   "progress": 0.0}])
+    # The first poll records the value; there is nothing to compare against yet.
+    assert [s for _, _, s in m.poll(api, state, 24, log, now=STALL_START)] == \
+        ["in_progress"]
+    # Five hours later it has not moved, and the job is going nowhere.
+    statuses = [s for _, _, s in m.poll(api, state, 24, log,
+                                        now=STALL_START + timedelta(hours=5))]
+    assert statuses == ["stalled"]
+    assert state["jobs"] == {}
+    # The detail carries all three: the value it is stuck at, the state TorBox
+    # still reports, and how long it has been there.
+    assert "progress stuck at 0.0 in downloading for 5.0h" in open(log).read()
+
+
+def test_progress_that_keeps_moving_is_never_stalled():
+    # The counter-case, and the plan's own stated intent: the 24h bound stays
+    # for genuinely large releases that are still moving, so a job whose value
+    # changes between polls must survive a gap far longer than --stall-hours.
+    state = {"jobs": {"k": job_with_progress()}}
+    for hours, value in ((0, 0.10), (5, 0.35), (9, 0.60)):
+        api = FakeTorBox(list_result=[{"id": 7, "download_state": "downloading",
+                                       "progress": value}])
+        assert [s for _, _, s in
+                m.poll(api, state, 24, "/dev/null",
+                       now=STALL_START + timedelta(hours=hours))] == ["in_progress"]
+    assert "k" in state["jobs"]
+
+
+def test_a_job_that_has_not_stalled_long_enough_stays_in_progress():
+    # Four hours is the default, not "any quiet poll". One pass is two minutes,
+    # so a rule that fired on the first unchanged value would fail every job on
+    # its second pass.
+    state = {"jobs": {"k": job_with_progress()}}
+    api = FakeTorBox(list_result=[{"id": 7, "download_state": "downloading",
+                                   "progress": 0.0}])
+    m.poll(api, state, 24, "/dev/null", now=STALL_START)
+    assert [s for _, _, s in m.poll(api, state, 24, "/dev/null",
+                                    now=STALL_START + timedelta(hours=2))] == \
+        ["in_progress"]
+    assert "k" in state["jobs"]
+
+
+def test_a_record_with_no_progress_field_is_not_read_as_unchanged(tmp_path):
+    # A missing field is not "0% forever". A schema change or an older record
+    # would otherwise fail every live job at once -- the same trap the
+    # paginated-list handling avoids. Skip the stall check, and let the timeout
+    # stay the only bound.
+    log = str(tmp_path / "failed.log")
+    state = {"jobs": {"k": job_with_progress()}}
+    api = FakeTorBox(list_result=[{"id": 7, "download_state": "downloading"}])
+    assert [s for _, _, s in m.poll(api, state, 24, log, now=STALL_START)] == \
+        ["in_progress"]
+    assert [s for _, _, s in
+            m.poll(api, state, 24, log,
+                   now=STALL_START + timedelta(hours=5))] == ["in_progress"]
+    assert "k" in state["jobs"]
+    assert not os.path.exists(log)
+
+
+def test_the_stall_bound_comes_from_the_caller():
+    # --stall-hours is the whole point of the flag; a hardcoded four would make
+    # the argument a decoration.
+    state = {"jobs": {"k": job_with_progress()}}
+    api = FakeTorBox(list_result=[{"id": 7, "download_state": "downloading",
+                                   "progress": 0.0}])
+    m.poll(api, state, 24, "/dev/null", now=STALL_START, stall_hours=1.0)
+    assert [s for _, _, s in
+            m.poll(api, state, 24, "/dev/null",
+                   now=STALL_START + timedelta(hours=2),
+                   stall_hours=1.0)] == ["stalled"]
+
+
+# --- freeing the slot at TorBox --------------------------------------------
+#
+# A stalled or timed-out job is terminal here but still ACTIVE there, so it goes
+# on holding one of the account's ten concurrent slots until something deletes
+# it. `controlusenetdownload` with `operation: "delete"` is the only thing that
+# frees the slot -- dropping the job from the state file just stops watching it
+# being spent, which is the opposite of what the stall rule's docstring claims
+# it does.
+
+def test_a_stalled_job_is_deleted_at_torbox(tmp_path):
+    log = str(tmp_path / "failed.log")
+    state = {"jobs": {"k": job_with_progress(name="Stuck-GRP", torbox_id=7)}}
+    api = FakeTorBox(list_result=[{"id": 7, "download_state": "downloading",
+                                   "progress": 0.0}])
+    # The first poll only records the value; there is nothing to compare to yet.
+    m.poll(api, state, 24, log, now=STALL_START)
+    statuses = [s for _, _, s in m.poll(api, state, 24, log,
+                                        now=STALL_START + timedelta(hours=5))]
+
+    assert statuses == ["stalled"]
+    assert api.deletes == [7]
+    assert state["jobs"] == {}
+
+
+def test_a_timed_out_job_is_deleted_at_torbox(tmp_path):
+    # The other branch where the job is still running. The watcher has given up
+    # after --timeout-hours but TorBox has not stopped, so the slot stays spent
+    # until the download is deleted.
+    log = str(tmp_path / "failed.log")
+    state = {"jobs": {"k": job(name="Stuck-GRP", torbox_id=7, age_hours=30)}}
+    api = FakeTorBox(list_result=[{"id": 7, "download_state": "downloading"}])
+    assert [s for _, _, s in m.poll(api, state, 24, log)] == ["timeout"]
+    assert api.deletes == [7]
+    assert state["jobs"] == {}
+
+
+def test_a_job_torbox_reports_failed_is_not_deleted(tmp_path):
+    # The third terminal branch, and the one that must not be deleted: TorBox
+    # has already stopped this job, so it is not holding a slot and the call
+    # would buy nothing.
+    log = str(tmp_path / "failed.log")
+    state = {"jobs": {"k": job(name="Doomed-GRP", torbox_id=7)}}
+    api = FakeTorBox(list_result=[{
+        "id": 7,
+        "download_state": "failed (Aborted, cannot be completed - "
+                          "https://sabnzbd.org/not-complete)",
+    }])
+    assert [s for _, _, s in m.poll(api, state, 24, log)] == ["failed"]
+    assert api.deletes == []
+
+
+def test_a_job_with_no_torbox_id_is_not_deleted():
+    # Nothing was ever submitted for it, so there is nothing at TorBox to
+    # delete. Reached through the helper because poll() classifies a job with
+    # no id as "unknown" long before it gets to a terminal branch.
+    api = FakeTorBox()
+    assert m.delete_at_torbox(api, {"name": "Rel-GRP"}) is False
+    assert api.deletes == []
+
+
+def test_a_delete_that_raises_is_logged_and_the_pass_carries_on(tmp_path):
+    # The delete is bookkeeping, so a TorBox that refuses it must not take the
+    # pass with it: the job leaves the state either way, and the job behind it
+    # still has to be classified. Same rule a failure report follows.
+    log = str(tmp_path / "failed.log")
+    state = {"jobs": {
+        "stuck": job_with_progress(name="Stuck-GRP", torbox_id=7),
+        "live": job_with_progress(name="Live-GRP", torbox_id=8),
+    }}
+    stuck = {"id": 7, "download_state": "downloading", "progress": 0.0}
+    first = FakeTorBox(list_result=[
+        stuck, {"id": 8, "download_state": "downloading", "progress": 0.5}])
+    m.poll(first, state, 24, log, now=STALL_START)
+
+    lines = []
+    second = FakeTorBox(
+        list_result=[stuck,
+                     {"id": 8, "download_state": "downloading", "progress": 0.9}],
+        delete_error=m.TorBoxError("HTTP 500: controlusenetdownload refused"),
+    )
+    statuses = [s for _, _, s in
+                m.poll(second, state, 24, log, now=STALL_START + timedelta(hours=5),
+                       out=lines.append)]
+
+    assert statuses == ["stalled", "in_progress"]
+    assert second.deletes == [7]
+    assert any("Stuck-GRP: could not delete from TorBox" in line for line in lines)
+    assert any("controlusenetdownload refused" in line for line in lines)
+    assert "stuck" not in state["jobs"]
+    assert "live" in state["jobs"]
+
+
 # --- fetch -----------------------------------------------------------------
 
 def test_fetch_lands_the_release_as_a_directory_named_after_it(tmp_path, monkeypatch):
@@ -1368,6 +1652,32 @@ def test_a_dry_run_writes_nothing(tmp_path, monkeypatch):
     assert not os.path.exists(staging)
 
 
+def test_a_dry_run_deletes_nothing_at_torbox(tmp_path, monkeypatch):
+    # poll() never runs in dry run -- run() returns before TorBox is even built
+    # -- so the delete cannot happen there. Pinned rather than left implicit: a
+    # stalled job in the state file is exactly what an operator points a dry run
+    # at while deciding whether to keep the stall bound where it is.
+    nzb_dir = tmp_path / "nzb"
+    nzb_dir.mkdir()
+    watch = tmp_path / "watch"
+    watch.mkdir()
+    state_path = str(tmp_path / "state.json")
+    m.save_state(state_path, {"jobs": {
+        "k": job_with_progress(name="Stuck-GRP", torbox_id=7)}})
+
+    api = FakeTorBox(list_result=[{"id": 7, "download_state": "downloading",
+                                   "progress": 0.0}])
+    monkeypatch.setattr(m, "TorBox", lambda *a, **k: api)
+
+    m.run(str(nzb_dir), str(watch), str(tmp_path / "staging"), state_path,
+          str(tmp_path / "f.log"), "key", apply_changes=False,
+          out=lambda *a: None)
+
+    assert api.deletes == []
+    assert api.list_calls == 0
+    assert "k" in m.load_state(state_path)["jobs"]
+
+
 def test_a_pass_submits_polls_and_fetches(tmp_path, monkeypatch):
     nzb_dir = tmp_path / "nzb"
     nzb_dir.mkdir()
@@ -1390,3 +1700,566 @@ def test_a_pass_submits_polls_and_fetches(tmp_path, monkeypatch):
     assert (watch / "Rel-GRP" / "ep.mkv").exists()
     # Job finished, so the state is empty again and nothing is re-submitted.
     assert m.load_state(state_path)["jobs"] == {}
+
+
+def test_main_carries_the_stall_bound_into_the_pass(tmp_path, monkeypatch):
+    # End to end through argparse. A flag that reaches the banner and python's
+    # argv but is never read back out of `args` would leave --stall-hours inert,
+    # and every other test here would still pass.
+    nzb_dir = tmp_path / "nzb"
+    nzb_dir.mkdir()
+    watch = tmp_path / "watch"
+    watch.mkdir()
+    state_path = tmp_path / "state.json"
+    failed_log = tmp_path / "f.log"
+    stuck_since = datetime.now(timezone.utc) - timedelta(hours=2)
+    m.save_state(str(state_path), {"jobs": {"k": {
+        "name": "Stuck-GRP",
+        "torbox_id": 7,
+        "hash": "h",
+        "submitted_at": stuck_since.isoformat(),
+        "last_progress": 0.0,
+        "progress_changed_at": stuck_since.isoformat(),
+    }}})
+    api = FakeTorBox(list_result=[{"id": 7, "download_state": "downloading",
+                                   "progress": 0.0}])
+    monkeypatch.setattr(m, "TorBox", lambda *a, **k: api)
+
+    rc = m.main([str(nzb_dir), str(watch), str(tmp_path / "staging"),
+                 str(state_path), str(failed_log), "--apply",
+                 "--api-key", "k", "--stall-hours", "1"])
+
+    assert rc == 0
+    # The detail, not the word "stalled": the word is the outcome the pass
+    # printed, while the log records why -- the value, the state and the hours.
+    assert "progress stuck at 0.0 in downloading for 2.0h" in failed_log.read_text()
+    assert m.load_state(str(state_path))["jobs"] == {}
+
+
+def test_a_zero_stall_bound_is_refused_at_the_argument(tmp_path, capsys):
+    # Zero is numeric, so nothing before this rejects it -- and it is the one
+    # value that makes the stall rule true on the first poll after a job is
+    # submitted (`stalled_hours > 0` the moment the clock starts), so one live
+    # pass would fail every in-flight job it has. argparse owns the refusal, so
+    # the pass never reaches a loop that could act on it.
+    with pytest.raises(SystemExit) as caught:
+        m.main([str(tmp_path), str(tmp_path), str(tmp_path),
+                str(tmp_path / "state.json"), str(tmp_path / "f.log"),
+                "--stall-hours", "0"])
+    assert caught.value.code != 0
+    assert "must be greater than 0" in capsys.readouterr().err
+
+
+def test_a_negative_stall_bound_is_refused_at_the_argument(tmp_path):
+    # The shell half already refuses "-1" as not-a-number, but `--stall-hours=-1`
+    # is only reachable through the shell's `=` form and the Python entry point
+    # can be called directly. A negative bound fails every job on its first
+    # unchanged poll, exactly as zero does.
+    with pytest.raises(SystemExit) as caught:
+        m.main([str(tmp_path), str(tmp_path), str(tmp_path),
+                str(tmp_path / "state.json"), str(tmp_path / "f.log"),
+                "--stall-hours=-1"])
+    assert caught.value.code != 0
+
+
+# --- telling the arrs what died ---------------------------------------------
+#
+# Phase 1 of PLAN-USENET-RECOVERY.md. The measured problem: the arr's queue
+# never holds a blackhole item -- 12 in flight, 0 in either queue, and
+# `queue-cleanup` reporting "Queue size: 0 items" hourly while 227 failures
+# accumulated across 100 distinct releases. So the arr cannot blocklist what it
+# cannot see, and the same dead release comes back on the next search.
+#
+# The risk this section exists to hold down is the opposite one: a wrong match
+# reports a DIFFERENT grab as failed, and the arr blocklists a release that was
+# fine. Every test below is one of the guards against that.
+
+SONARR = {"name": "Sonarr", "port": 8989, "key": "sk"}
+RADARR = {"name": "Radarr", "port": 7878, "key": "rk"}
+
+
+def grab(history_id, title, date="2026-09-15T06:57:04Z", event_type="grabbed"):
+    return {"id": history_id, "eventType": event_type, "sourceTitle": title,
+            "date": date}
+
+
+class FakeArrApi:
+    """Records the calls; returns canned history. Never touches the network."""
+
+    def __init__(self, histories=None, post_ok=True):
+        # Keyed by port, so a test can make one arr answer and the other not.
+        self.histories = histories or {}
+        self.post_ok = post_ok
+        self.gets = []
+        self.posts = []
+
+    def get_json(self, url):
+        self.gets.append(url)
+        for port, body in self.histories.items():
+            if f":{port}/" in url:
+                return body
+        return None
+
+    def post(self, url):
+        self.posts.append(url)
+        return self.post_ok
+
+
+def reporter(api, services=None, ledger=None, now=None, out=None, dry_run=False):
+    return m.FailureReporter(api, services or [SONARR, RADARR],
+                             ledger=ledger if ledger is not None else {},
+                             now=now or NOW, out=out or (lambda *a: None),
+                             dry_run=dry_run)
+
+
+RELEASE = "the.sopranos.s04e08.1080p.bluray.x264-shortbrehd"
+
+
+def test_an_exact_title_match_resolves_to_the_grab():
+    api = FakeArrApi({8989: [grab(11921, RELEASE)]})
+    assert reporter(api).resolve(RELEASE) == (SONARR, 11921, RELEASE)
+
+
+def test_a_release_with_no_grab_in_either_arr_does_not_resolve():
+    # The measured case for a title that arrived through the blackhole from
+    # somewhere other than an arr grab, and the case for a name that has
+    # already aged out of the history window.
+    api = FakeArrApi({8989: [grab(1, "some.other.release-GRP")],
+                      7878: [grab(2, "yet.another-GRP")]})
+    assert reporter(api).resolve(RELEASE) is None
+    assert api.posts == []
+
+
+def test_the_newest_grab_wins_when_a_release_was_grabbed_more_than_once():
+    # The normal case here, and the whole reason the resolution takes a max:
+    # `the.sopranos.s04e08...` was grabbed three times in 24 hours (history ids
+    # 11545, 11763, 11921). Reporting the oldest would mark a grab that has
+    # already been superseded, and leave the live one unblocked.
+    api = FakeArrApi({8989: [
+        grab(11545, RELEASE, "2026-09-14T14:57:17Z"),
+        grab(11921, RELEASE, "2026-09-15T06:57:04Z"),
+        grab(11763, RELEASE, "2026-09-14T22:55:53Z"),
+    ]})
+    assert reporter(api).resolve(RELEASE)[1] == 11921
+
+
+def test_a_near_miss_title_is_not_a_match():
+    # The failure mode the dry run exists to catch. `S01E08` and `S01E09` are
+    # one character apart, and treating them as equal blocklists the wrong
+    # episode of a series that has 3,006 missing episodes to get through.
+    api = FakeArrApi({8989: [
+        grab(1, "The.Sopranos.S01E09.POLiSH.1080p.WEB.H264-CHOPiN"),
+        grab(2, "the.sopranos.s04e08.1080p.bluray.x264-shortbrehd.MKV"),
+    ]})
+    assert reporter(api).resolve(RELEASE) is None
+
+
+def test_case_is_not_folded_when_matching():
+    # The arr stores the indexer's own release name, and the NZB filename is
+    # that name plus `.nzb`. If they ever differ in case, the pair is what the
+    # operator reads in the dry run -- not something to paper over here.
+    api = FakeArrApi({8989: [grab(1, RELEASE.upper())]})
+    assert reporter(api).resolve(RELEASE) is None
+
+
+def test_the_date_window_is_sent_to_the_arr():
+    # A re-release years later carries the same release name, so an unbounded
+    # search would happily match last year's grab and fail it. The bound is
+    # enforced by the arr; this pins that the parameter is actually sent.
+    api = FakeArrApi({8989: []})
+    reporter(api, now=NOW).resolve(RELEASE)
+    assert "date=2026-09-07T12:00:00Z" in api.gets[0]
+
+
+def test_a_failed_grab_record_is_not_a_candidate():
+    # Only grabs resolve. A `downloadFailed` row carries the same sourceTitle
+    # and would otherwise be re-reported on every pass, forever.
+    api = FakeArrApi({8989: [grab(1, RELEASE, event_type="downloadFailed")]})
+    assert reporter(api).resolve(RELEASE) is None
+
+
+def test_an_unreachable_arr_is_logged_and_the_other_one_is_still_tried():
+    # A stack running only Sonarr, or a Sonarr that is down, must not stop
+    # Radarr being told. `None` is the answer ArrApi gives for both "could not
+    # connect" and "answered with something that is not JSON".
+    api = FakeArrApi({7878: [grab(216, "X-Men.Days.of.Future.Past.2014.BluRay."
+                                        "Remux.1080p.AVC.DTS-HD.MA.7.1-HiFi")]})
+    lines = []
+    r = reporter(api, out=lines.append)
+    match = r.resolve("X-Men.Days.of.Future.Past.2014.BluRay.Remux.1080p.AVC."
+                      "DTS-HD.MA.7.1-HiFi")
+    assert match == (RADARR, 216, "X-Men.Days.of.Future.Past.2014.BluRay.Remux."
+                                   "1080p.AVC.DTS-HD.MA.7.1-HiFi")
+    assert any("could not read history" in line for line in lines)
+
+
+def test_history_is_read_once_per_arr_per_pass():
+    # `/history/since` over the 7-day window is thousands of rows behind a 30s
+    # curl timeout -- measured ~11,600 rows over three weeks on Sonarr -- and
+    # resolve() runs once for every failure in the pass. Several failures in one
+    # pass is the ordinary case (227 accumulated across 100 releases in a day),
+    # and without the cache each of them paid for the same body again. One
+    # reporter is built per pass, so one GET per arr is the bound.
+    other = "the.sopranos.s04e09.1080p.bluray.x264-shortbrehd"
+    movie = ("X-Men.Days.of.Future.Past.2014.BluRay.Remux.1080p.AVC."
+             "DTS-HD.MA.7.1-HiFi")
+    api = FakeArrApi({8989: [grab(11921, RELEASE), grab(11922, other)],
+                      7878: [grab(216, movie)]})
+    r = reporter(api, services=[SONARR, RADARR])
+    # Two failures, one owned by each arr -- so both services are consulted and
+    # the count below cannot be satisfied by never asking one of them.
+    assert [r.report(RELEASE, "torbox"), r.report(movie, "torbox")] == \
+        ["reported", "reported"]
+    assert sum(1 for url in api.gets if ":8989/" in url) == 1
+    assert sum(1 for url in api.gets if ":7878/" in url) == 1
+
+
+def test_an_unreachable_arr_is_not_retried_within_the_pass():
+    # `None` is cached too, and this is why: an arr that is down cannot come
+    # back inside one pass, so retrying it per failure turns one dead arr into
+    # one connection timeout per dead release -- each of them behind the same
+    # 30s curl limit. The log still says so once per release, because each one
+    # genuinely went unreported.
+    other = "the.sopranos.s04e09.1080p.bluray.x264-shortbrehd"
+    api = FakeArrApi({7878: [grab(216, RELEASE), grab(217, other)]})
+    lines = []
+    r = reporter(api, services=[SONARR, RADARR], out=lines.append)
+    assert [r.report(RELEASE, "timeout"), r.report(other, "timeout")] == \
+        ["reported", "reported"]
+    assert sum(1 for url in api.gets if ":8989/" in url) == 1
+    assert len([line for line in lines if "could not read history" in line]) == 2
+
+
+def test_reporting_posts_the_failure_to_the_matching_arr_only():
+    api = FakeArrApi({8989: [grab(11921, RELEASE)]})
+    r = reporter(api)
+    assert r.report(RELEASE, "torbox", "aborted, cannot be completed") == "reported"
+    assert api.posts == ["http://localhost:8989/api/v3/history/failed/11921"
+                         "?apikey=sk"]
+
+
+def test_the_radarr_port_is_used_when_radarr_owns_the_release():
+    # Routing, specifically: the two arrs listen on different ports and a
+    # report sent to the wrong one 404s.
+    title = "X-Men.Days.of.Future.Past.2014.BluRay.Remux.1080p.AVC.DTS-HD.MA.7.1-HiFi"
+    api = FakeArrApi({7878: [grab(216, title)]})
+    reporter(api).report(title, "torbox", "aborted")
+    assert api.posts[0].startswith("http://localhost:7878/api/v3/history/failed/216")
+
+
+def test_a_reported_grab_is_not_reported_twice():
+    # The ledger. Without it, every terminal failure would be re-reported on
+    # each subsequent pass -- the arr would take a second blocklist entry for a
+    # release it had already blocked, and the log would be unreadable.
+    api = FakeArrApi({8989: [grab(11921, RELEASE)]})
+    ledger = {}
+    r = reporter(api, ledger=ledger)
+    assert r.report(RELEASE, "torbox", "aborted") == "reported"
+    assert r.report(RELEASE, "torbox", "aborted") == "already"
+    assert len(api.posts) == 1
+    assert list(ledger) == ["Sonarr:11921:torbox"]
+
+
+def test_a_refused_report_is_not_remembered():
+    # The arr never got the message, so the ledger must not claim it did --
+    # otherwise a transient 500 suppresses the report permanently and the
+    # release stays unblocked with nothing in the log saying so.
+    api = FakeArrApi({8989: [grab(11921, RELEASE)]}, post_ok=False)
+    ledger = {}
+    r = reporter(api, ledger=ledger)
+    assert r.report(RELEASE, "torbox", "aborted") == "failed"
+    assert ledger == {}
+    assert r.report(RELEASE, "torbox", "aborted") == "failed"
+    assert len(api.posts) == 2
+
+
+def test_a_timeout_and_a_torbox_failure_on_one_grab_are_two_reports():
+    # They are different facts about the same grab -- "we gave up waiting" and
+    # "the provider said it is dead" -- and collapsing them into one ledger key
+    # would silently drop the second.
+    api = FakeArrApi({8989: [grab(11921, RELEASE)]})
+    ledger = {}
+    r = reporter(api, ledger=ledger, now=NOW)
+    assert r.report(RELEASE, "timeout", "still downloading after 24.0h") == "reported"
+    assert r.report(RELEASE, "torbox", "aborted") == "reported"
+    assert len(ledger) == 2
+
+
+def test_a_stall_and_a_timeout_on_one_grab_are_two_reports():
+    # "stalled" is its own kind rather than a timeout under another name. A grab
+    # can be reported stalled and later time out for real, and one key would
+    # silently drop the second fact -- exactly the argument that already keeps
+    # torbox and timeout apart.
+    api = FakeArrApi({8989: [grab(11921, RELEASE)]})
+    ledger = {}
+    r = reporter(api, ledger=ledger, now=NOW)
+    assert r.report(RELEASE, "stalled",
+                    "progress stuck at 0.0 in downloading for 5.0h") == "reported"
+    assert r.report(RELEASE, "timeout", "still downloading after 24.0h") == "reported"
+    assert sorted(ledger) == ["Sonarr:11921:stalled", "Sonarr:11921:timeout"]
+
+
+def test_a_stalled_job_is_reported_with_its_own_kind(tmp_path):
+    # The wiring the ledger key depends on: poll() hands the reporter "stalled"
+    # as the reason type, not "torbox" or "timeout".
+    log = str(tmp_path / "failed.log")
+    api = FakeArrApi({8989: [grab(11921, RELEASE)]})
+    ledger = {}
+    stuck_since = NOW - timedelta(hours=9)
+    state = {"jobs": {"k": {
+        "name": RELEASE,
+        "torbox_id": 7,
+        "hash": "h",
+        "submitted_at": stuck_since.isoformat(),
+        "last_progress": 0.0,
+        "progress_changed_at": stuck_since.isoformat(),
+    }}}
+    torbox = FakeTorBox(list_result=[{"id": 7, "download_state": "downloading",
+                                      "progress": 0.0}])
+    statuses = [s for _, _, s in
+                m.poll(torbox, state, 24, log, now=NOW,
+                       report=reporter(api, ledger=ledger))]
+    assert statuses == ["stalled"]
+    assert list(ledger) == ["Sonarr:11921:stalled"]
+    assert api.posts == ["http://localhost:8989/api/v3/history/failed/11921"
+                         "?apikey=sk"]
+    assert "progress stuck at 0.0 in downloading for 9.0h" in open(log).read()
+
+
+def test_a_dry_run_logs_both_titles_and_calls_nothing():
+    # The rollout runs this for a day. Both strings have to be there verbatim,
+    # because the comparison the whole feature depends on is a character-for-
+    # character one, and "matched X" hides exactly the difference that matters.
+    title = "The.Sopranos.S01E08.POLiSH.1080p.WEB.H264-CHOPiN"
+    api = FakeArrApi({8989: [grab(598, title)]})
+    lines = []
+    assert reporter(api, out=lines.append, dry_run=True).report(
+        title, "torbox", "aborted") == "dry-run"
+    assert api.posts == []
+    joined = "\n".join(lines)
+    assert f"would report: {title}" in joined
+    assert f"arr title:  {title}" in joined
+    assert "Sonarr history 598 (aborted)" in joined
+
+
+def test_a_dry_run_does_not_need_a_ledger_entry_to_repeat_itself():
+    # Dry run deliberately writes nothing, so the same candidate appears on
+    # every pass -- which is what makes a day of pairs readable as a set.
+    api = FakeArrApi({8989: [grab(11921, RELEASE)]})
+    ledger = {}
+    r = reporter(api, ledger=ledger, dry_run=True)
+    assert r.report(RELEASE, "torbox", "aborted") == "dry-run"
+    assert r.report(RELEASE, "torbox", "aborted") == "dry-run"
+    assert ledger == {}
+
+
+def test_a_raising_reporter_does_not_stop_the_pass():
+    # "Reporting failure must never stop the blackhole." Whatever the reporter
+    # does -- a bug in the matching, an arr that answers with nonsense -- the
+    # pass has to reach the next job.
+    class Exploding:
+        def report(self, *a, **k):
+            raise RuntimeError("boom")
+
+    lines = []
+    assert m.report_failed(Exploding(), "Rel-GRP", "torbox", "aborted",
+                           out=lines.append) is None
+    assert any("boom" in line for line in lines)
+
+
+def test_no_reporter_means_nothing_happens_and_nothing_raises():
+    assert m.report_failed(None, "Rel-GRP", "torbox", "aborted") is None
+
+
+def test_a_posted_report_is_persisted_before_the_pass_continues():
+    # The ledger has to be on disk from the moment the arr accepts the report.
+    # A crash after the POST and before the next save_state would otherwise
+    # re-report the same grab on the next pass.
+    written = []
+    api = FakeArrApi({8989: [grab(11921, RELEASE)]})
+    m.report_failed(reporter(api), RELEASE, "torbox", "aborted",
+                    on_report=lambda: written.append(1))
+    assert written == [1]
+
+
+def test_a_failed_report_does_not_trigger_a_persist():
+    written = []
+    api = FakeArrApi({8989: [grab(11921, RELEASE)]}, post_ok=False)
+    m.report_failed(reporter(api), RELEASE, "torbox", "aborted",
+                    on_report=lambda: written.append(1))
+    assert written == []
+
+
+def test_the_ledger_prunes_what_has_outlived_the_history_window():
+    ledger = {
+        "Sonarr:1:torbox": {"at": "2026-09-14T12:00:00+00:00", "name": "keep"},
+        "Sonarr:2:torbox": {"at": "2026-08-01T12:00:00+00:00", "name": "drop"},
+        "Sonarr:3:torbox": {"at": "not a timestamp", "name": "drop-too"},
+        "Sonarr:4:torbox": {"name": "no timestamp at all"},
+    }
+    kept = m.prune_ledger(ledger, NOW)
+    assert list(kept) == ["Sonarr:1:torbox"]
+
+
+def test_only_the_arrs_with_keys_are_asked():
+    assert m.arr_services({"SONARR_API_KEY": "s"}) == [
+        {"name": "Sonarr", "port": 8989, "key": "s"}]
+    assert m.arr_services({"RADARR_API_KEY": "r"}) == [
+        {"name": "Radarr", "port": 7878, "key": "r"}]
+    assert m.arr_services({}) == []
+
+
+def test_the_arr_key_travels_in_the_curl_config_not_on_argv(monkeypatch):
+    # Same rule as the TorBox key, and for the same reason: the blackhole runs
+    # from systemd every two minutes, so an argv copy is a key on display twice
+    # a minute, forever.
+    seen = {}
+
+    def run(argv, **kwargs):
+        seen["argv"] = argv
+        seen["input"] = kwargs.get("input", "")
+        return type("R", (), {"returncode": 0, "stdout": "[]", "stderr": ""})()
+
+    monkeypatch.setattr(m.subprocess, "run", run)
+    m.ArrApi().get_json("http://localhost:8989/api/v3/history/since?apikey=SECRET")
+    assert not any("SECRET" in arg for arg in seen["argv"])
+    assert "SECRET" in seen["input"]
+
+
+def test_an_arr_that_answers_with_html_is_treated_as_no_answer(monkeypatch):
+    # A 200 carrying an error page from whatever sits in front of the arr.
+    # Raising here would abort the pass; the caller needs None.
+    def run(argv, **kwargs):
+        return type("R", (), {"returncode": 0, "stdout": "<html>404</html>",
+                              "stderr": ""})()
+
+    monkeypatch.setattr(m.subprocess, "run", run)
+    assert m.ArrApi().get_json("http://localhost:8989/x") is None
+
+
+def test_arr_post_treats_http_error_as_failure(monkeypatch):
+    # This POST is what tells the arr to blocklist a dead release, and its exit
+    # status is the whole answer. curl exits 0 on a 4xx/5xx unless -f is given,
+    # so a 401 from a stale key -- or a 500 -- would come back as success and
+    # FailureReporter would write the ledger entry anyway: the release stays
+    # unblocked and is never reported again.
+    seen = {}
+
+    def run(argv, **kwargs):
+        seen["argv"] = argv
+        # curl's exit code for HTTP >= 400. Without -f curl has nothing to
+        # report, so it exits 0 -- which is the defect this test exists for.
+        code = 22 if "-f" in argv else 0
+        return type("R", (), {"returncode": code, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(m.subprocess, "run", run)
+    ok = m.ArrApi().post("http://localhost:8989/api/v3/history/failed/11921")
+    assert ok is False
+    assert "-f" in seen["argv"]
+
+
+def test_reporting_is_off_unless_the_flag_says_otherwise(tmp_path, monkeypatch):
+    # Ships inert. A pass that never resolves a single match is the safe
+    # default, and the reported line says which mode the pass ran in -- a quiet
+    # log must not be readable as "there was nothing to report".
+    lines = []
+    touched = []
+    monkeypatch.setattr(m, "TorBox", lambda *a, **k: FakeTorBox())
+    monkeypatch.setattr(m, "ArrApi",
+                        lambda *a, **k: touched.append(1) or FakeArrApi())
+    m.run(str(tmp_path / "nzb"), str(tmp_path / "w"), str(tmp_path / "s"),
+          str(tmp_path / "state.json"), str(tmp_path / "f.log"), "key",
+          apply_changes=True, out=lines.append,
+          arr_keys={"SONARR_API_KEY": "sk", "RADARR_API_KEY": "rk"})
+    assert touched == []
+    assert not any("failure reporting" in line for line in lines)
+
+
+def test_the_pass_resolves_and_posts_when_reporting_is_on(tmp_path, monkeypatch):
+    nzb_dir = tmp_path / "nzb"
+    nzb_dir.mkdir()
+    write_nzb(str(nzb_dir), f"{RELEASE}.nzb")
+    watch = tmp_path / "watch"
+    watch.mkdir()
+    state_path = str(tmp_path / "state.json")
+
+    arr = FakeArrApi({8989: [grab(11921, RELEASE)]})
+    torbox = FakeTorBox(list_result=[{
+        "id": 1,
+        "download_state": "failed (Aborted, cannot be completed - "
+                          "https://sabnzbd.org/not-complete)",
+    }])
+    monkeypatch.setattr(m, "TorBox", lambda *a, **k: torbox)
+    monkeypatch.setattr(m, "ArrApi", lambda *a, **k: arr)
+
+    lines = []
+    m.run(str(nzb_dir), str(watch), str(tmp_path / "staging"), state_path,
+          str(tmp_path / "f.log"), "key", apply_changes=True,
+          out=lines.append,
+          arr_keys={"SONARR_API_KEY": "sk", "RADARR_API_KEY": "rk"},
+          report_failures=True)
+
+    assert arr.posts == ["http://localhost:8989/api/v3/history/failed/11921"
+                         "?apikey=sk"]
+    # And the ledger is on disk, not only in memory.
+    assert list(m.load_state(state_path)["reported"]) == ["Sonarr:11921:torbox"]
+    assert any("failure reporting: on (Sonarr, Radarr)" in l for l in lines)
+
+
+def test_the_timeout_branch_reports_the_release_it_gave_up_on(tmp_path, monkeypatch):
+    # The 24-hour bound is the other terminal outcome, and it is the one the
+    # live stack was actually losing releases to: the oldest in-flight job was
+    # 21.2h old against a 24h cap. Reporting only TorBox's own failures would
+    # leave every timed-out release unblocked.
+    nzb_dir = tmp_path / "nzb"
+    nzb_dir.mkdir()
+    write_nzb(str(nzb_dir), f"{RELEASE}.nzb")
+    watch = tmp_path / "watch"
+    watch.mkdir()
+    state_path = str(tmp_path / "state.json")
+    m.save_state(state_path, {"jobs": {
+        m.job_key(str(nzb_dir / f"{RELEASE}.nzb")): job(name=RELEASE, age_hours=30)}})
+
+    arr = FakeArrApi({8989: [grab(11921, RELEASE)]})
+    torbox = FakeTorBox(list_result=[{"id": 7, "download_state": "downloading"}])
+    monkeypatch.setattr(m, "TorBox", lambda *a, **k: torbox)
+    monkeypatch.setattr(m, "ArrApi", lambda *a, **k: arr)
+
+    m.run(str(nzb_dir), str(watch), str(tmp_path / "staging"), state_path,
+          str(tmp_path / "f.log"), "key", apply_changes=True,
+          out=lambda *a: None,
+          arr_keys={"SONARR_API_KEY": "sk"}, report_failures=True)
+
+    assert arr.posts == ["http://localhost:8989/api/v3/history/failed/11921"
+                         "?apikey=sk"]
+    # ...and the ledger records it as a timeout, not as TorBox's verdict.
+    assert list(m.load_state(state_path)["reported"]) == ["Sonarr:11921:timeout"]
+
+
+def test_an_unusable_release_at_fetch_time_is_not_reported(tmp_path, monkeypatch):
+    # A password-protected or truncated RAR set is permanent, but it is not
+    # TorBox's verdict and it does not come through `poll` -- so it does not
+    # resolve to a grab here. Worth pinning: reporting it would mean matching a
+    # release the arr may still import by hand if the bytes are good.
+    nzb_dir = tmp_path / "nzb"
+    nzb_dir.mkdir()
+    write_nzb(str(nzb_dir), f"{RELEASE}.nzb")
+    watch = tmp_path / "watch"
+    watch.mkdir()
+    state_path = str(tmp_path / "state.json")
+    archive = tmp_path / "p.zip"
+    make_zip(str(archive), {f"{RELEASE}/x.rar": b"part"})
+    monkeypatch.setattr(m.shutil, "which", lambda name: None)  # no unpacker
+    serve_zip(monkeypatch, archive)
+
+    arr = FakeArrApi({8989: [grab(11921, RELEASE)]})
+    torbox = FakeTorBox(list_result=[{"id": 1, "download_state": "completed"}])
+    monkeypatch.setattr(m, "TorBox", lambda *a, **k: torbox)
+    monkeypatch.setattr(m, "ArrApi", lambda *a, **k: arr)
+
+    m.run(str(nzb_dir), str(watch), str(tmp_path / "staging"), state_path,
+          str(tmp_path / "f.log"), "key", apply_changes=True,
+          out=lambda *a: None,
+          arr_keys={"SONARR_API_KEY": "sk"}, report_failures=True)
+
+    assert arr.posts == []

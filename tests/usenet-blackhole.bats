@@ -41,11 +41,13 @@ stub_python() {
 #!/bin/bash
 printf '%s\n' "$@" > "$ARGV_FILE"
 printf '%s' "${TORBOX_API_KEY:-}" > "$KEYFILE"
+printf 'sonarr=%s radarr=%s' "${SONARR_API_KEY:-}" "${RADARR_API_KEY:-}" > "$ARRKEYFILE"
 STUB
     chmod +x "$WORK/bin/python3"
     ARGV_FILE="$WORK/argv"
     KEYFILE="$WORK/key"
-    export ARGV_FILE KEYFILE
+    ARRKEYFILE="$WORK/arrkeys"
+    export ARGV_FILE KEYFILE ARRKEYFILE
 }
 
 # --- help ------------------------------------------------------------------
@@ -114,6 +116,81 @@ STUB
     run "$RUN" --timeout-hours 1.2.3
     assert_failure
     assert_output --partial "must be a number"
+}
+
+@test "usenet-blackhole: the banner carries the 4-hour stall rule by default" {
+    # The stall rule is what stops a job that never moves holding one of the ten
+    # slots for the full timeout, so the bound it settled on is worth confirming
+    # the same way the timeout is.
+    run "$RUN"
+    assert_success
+    assert_output --partial "Stall rule: no progress for 4h fails the job"
+}
+
+@test "usenet-blackhole: --stall-hours reaches the banner" {
+    run "$RUN" --stall-hours 6
+    assert_success
+    assert_output --partial "Stall rule: no progress for 6h fails the job"
+}
+
+@test "usenet-blackhole: --stall-hours=6 is accepted as one argument" {
+    run "$RUN" --stall-hours=6
+    assert_success
+    assert_output --partial "Stall rule: no progress for 6h fails the job"
+}
+
+@test "usenet-blackhole: a trailing --stall-hours is refused, not silently defaulted" {
+    # Falling through to 4 reads as "6 was accepted" when nothing was, and the
+    # difference is how long a dead release keeps one of ten slots.
+    run "$RUN" --stall-hours
+    assert_failure
+    assert_output --partial "--stall-hours needs a number"
+}
+
+@test "usenet-blackhole: a non-numeric --stall-hours is refused" {
+    run "$RUN" --stall-hours soon
+    assert_failure
+    assert_output --partial "must be a number"
+}
+
+@test "usenet-blackhole: a two-dot --stall-hours is refused" {
+    # The same trap as --timeout-hours: `1.2.3` passes a naive digit-and-dot
+    # check and reaches python's float() as a ValueError, which exits 1 with a
+    # traceback instead of a message about the argument.
+    run "$RUN" --stall-hours 1.2.3
+    assert_failure
+    assert_output --partial "must be a number"
+}
+
+@test "usenet-blackhole: a zero --stall-hours is refused, in any spelling" {
+    # Zero is numeric, so the pattern check above lets it through -- and it is
+    # the one value that makes the stall rule true on the first poll after a job
+    # is submitted (`stalled_hours > 0` the moment the clock starts), so one
+    # pass would fail every in-flight job it has. All four spellings are that
+    # same bound. Negatives never reach this check: "-" is not in the pattern's
+    # allowed set, which the -1 case below pins.
+    for value in 0 0.0 .0 00; do
+        run "$RUN" --stall-hours "$value"
+        assert_failure 2
+        assert_output --partial "ERROR: --stall-hours must be greater than 0, got '$value'"
+    done
+    run "$RUN" --stall-hours -1
+    assert_failure 2
+    assert_output --partial "ERROR: --stall-hours must be a number, got '-1'"
+}
+
+@test "usenet-blackhole: --stall-hours reaches python" {
+    # The banner is only half of it: a value that never reaches the watcher
+    # would leave the banner announcing a bound nothing enforces.
+    printf 'MEDIA_ROOT=%s/data\nTORBOX_API_KEY=testtorboxkey\n' "$WORK" > "$ENV"
+    stub_python
+    run env "PATH=$WORK/bin:$PATH" "$RUN" --apply --stall-hours 6
+    assert_success
+    # -A 1 so the number is read out of the argv pair, not from anywhere else
+    # in the file -- the flag and its value both have to be there.
+    run grep -A 1 -x -- "--stall-hours" "$ARGV_FILE"
+    assert_success
+    assert_output --partial "6"
 }
 
 @test "usenet-blackhole: an unknown argument is refused" {
@@ -195,6 +272,56 @@ STUB
     assert_success
     run grep -qx -- "--verbose" "$ARGV_FILE"
     assert_success
+}
+
+@test "usenet-blackhole: failure reporting is off unless asked for" {
+    # The whole safety story for Phase 1 rests on the default. Reporting is the
+    # thing that can blocklist a release that was fine, so a pass that did not
+    # ask for it must not resolve a single match -- and the banner has to say
+    # which mode it ran in, because "nothing was reported" and "there was
+    # nothing to report" have to be told apart by whoever reads the log.
+    printf 'MEDIA_ROOT=%s/data\nTORBOX_API_KEY=testtorboxkey\n' "$WORK" > "$ENV"
+    stub_python
+    run env "PATH=$WORK/bin:$PATH" "$RUN"
+    assert_success
+    assert_output --partial "Failure reporting: off"
+    run grep -qx -- "--report-failures" "$ARGV_FILE"
+    assert_failure
+    run grep -qx -- "--report-dry-run" "$ARGV_FILE"
+    assert_failure
+}
+
+@test "usenet-blackhole: --report-failures and --report-dry-run reach python" {
+    # A guard that never passes the flag would make both a no-op on a timer
+    # nobody reads -- and the dry run is the only thing standing between a
+    # wrong title match and a blocklisted release, so it has to actually work.
+    printf 'MEDIA_ROOT=%s/data\nTORBOX_API_KEY=testtorboxkey\n' "$WORK" > "$ENV"
+    stub_python
+    run env "PATH=$WORK/bin:$PATH" "$RUN" --apply --report-failures
+    assert_success
+    assert_output --partial "Failure reporting: ON"
+    run grep -qx -- "--report-failures" "$ARGV_FILE"
+    assert_success
+
+    run env "PATH=$WORK/bin:$PATH" "$RUN" --apply --report-dry-run
+    assert_success
+    assert_output --partial "Failure reporting: DRY RUN"
+    run grep -qx -- "--report-dry-run" "$ARGV_FILE"
+    assert_success
+}
+
+@test "usenet-blackhole: the arr keys travel in the environment too" {
+    # Same rule as the TorBox key, same reason, and the same half-a-fix trap:
+    # absent from argv only counts if it also arrives.
+    printf 'MEDIA_ROOT=%s/data\nTORBOX_API_KEY=testtorboxkey\nSONARR_API_KEY=testsonarrkey\nRADARR_API_KEY=testradarrkey\n' "$WORK" > "$ENV"
+    stub_python
+    run env "PATH=$WORK/bin:$PATH" "$RUN" --apply --report-failures
+    assert_success
+    run grep -q "testsonarrkey\|testradarrkey" "$ARGV_FILE"
+    assert_failure
+    run cat "$ARRKEYFILE"
+    assert_output --partial "sonarr=testsonarrkey"
+    assert_output --partial "radarr=testradarrkey"
 }
 
 # --- the paths -------------------------------------------------------------
