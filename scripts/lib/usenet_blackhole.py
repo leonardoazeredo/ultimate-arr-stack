@@ -96,8 +96,8 @@ Usage:
   usenet_blackhole.py <nzb-dir> <watch-dir> <staging-dir> <state-path>
                       <failed-log>
                       [--api-key K] [--apply] [--timeout-hours N]
-                      [--stall-hours N] [--verbose] [--report-failures]
-                      [--report-dry-run]
+                      [--stall-hours N] [--max-inflight N] [--verbose]
+                      [--report-failures] [--report-dry-run]
 """
 
 import argparse
@@ -827,10 +827,33 @@ def pending_nzbs(nzb_dir, state):
     return out
 
 
-def submit(torbox, nzb_dir, state, out=print):
-    """Upload every new NZB. Returns the number submitted."""
+def submit(torbox, nzb_dir, state, out=print, max_inflight=0):
+    """Upload new NZBs, stopping at the in-flight ceiling. Returns the count.
+
+    `max_inflight` is the operator's ceiling on jobs in flight, and 0 means no
+    ceiling. It exists to sit below TorBox's own ten slots: measured over the
+    retained window, nine of the ten were held by jobs 3-21h old while only 4
+    of 50 submissions were ever fetched, so the question is whether fewer
+    concurrent jobs complete more of themselves -- at 6 against 10 -- before
+    any value is kept. A ceiling set too low trades wasted slots for idle ones,
+    which is why this is a flag to measure with rather than a constant.
+    """
     submitted = 0
     for key, name, path in pending_nzbs(nzb_dir, state):
+        # Counted, not `len(state["jobs"])`. A job stays in the state file
+        # until its fetch succeeds, and a finished one no longer holds a TorBox
+        # slot -- so counting it would lower the effective ceiling for good on a
+        # release whose fetch keeps failing, which is also never timed out.
+        # Recomputed per iteration so jobs submitted earlier in this same pass
+        # have no flag yet and count too.
+        inflight = sum(1 for j in state["jobs"].values() if not j.get("complete"))
+        # Ahead of the call, not after it: each create is a call against the
+        # 60-an-hour budget, and a pass already at its ceiling has nothing to
+        # ask -- the refusal would be bought with a call that bought nothing.
+        if max_inflight > 0 and inflight >= max_inflight:
+            out(f"    in-flight cap reached "
+                f"({inflight}/{max_inflight}), stopping this pass")
+            break
         release = os.path.splitext(name)[0]
         try:
             data = torbox.submit_file(path, release)
@@ -945,6 +968,13 @@ def poll(torbox, state, timeout_hours, failed_log, now=None, out=print,
             continue
         state_name = (record.get("download_state") or "").lower()
         if state_name in DONE_STATES:
+            # Flagged on the state entry, not merely returned in `results`. A
+            # completed job no longer holds a TorBox slot, but it stays in
+            # state["jobs"] until a fetch succeeds -- and if its fetch keeps
+            # failing it is never timed out either, so submit() would go on
+            # counting it against --max-inflight forever. Persisted by the
+            # save_state run() makes after poll and fetch.
+            job["complete"] = True
             results.append((key, job["name"], "complete"))
             continue
         reason = failure_reason(state_name)
@@ -1260,7 +1290,8 @@ def _fetch_one(torbox, key, job, watch_dir, staging_dir):
 
 def run(nzb_dir, watch_dir, staging_dir, state_path, failed_log, api_key,
         apply_changes=False, timeout_hours=24.0, stall_hours=4.0, verbose=False,
-        out=print, arr_keys=None, report_failures=False, report_dry_run=False):
+        out=print, arr_keys=None, report_failures=False, report_dry_run=False,
+        max_inflight=0):
     """One pass: submit new NZBs, poll in-flight jobs, fetch completed ones.
 
     `report_failures` is off by default and reported off in the summary, so a
@@ -1268,6 +1299,9 @@ def run(nzb_dir, watch_dir, staging_dir, state_path, failed_log, api_key,
     said something and chose not to. `report_dry_run` resolves the match and
     logs both titles without calling anything -- the mode the rollout runs for
     a day first.
+
+    `max_inflight` is the operator's ceiling on jobs in flight; 0 is no
+    ceiling, so the default pass behaves exactly as it did before the flag.
     """
     state = load_state(state_path)
 
@@ -1325,7 +1359,8 @@ def run(nzb_dir, watch_dir, staging_dir, state_path, failed_log, api_key,
         # Past the deadline, so the marker is stale. Dropping it here rather
         # than inside in_backoff keeps that a question with no side effects.
         state.pop("rate_limited_until", None)
-        submitted = submit(torbox, nzb_dir, state, out=out)
+        submitted = submit(torbox, nzb_dir, state, out=out,
+                           max_inflight=max_inflight)
     save_state(state_path, state)
 
     results = list(poll(torbox, state, timeout_hours, failed_log, out=out,
@@ -1409,6 +1444,25 @@ def positive_hours(value):
     return hours
 
 
+def non_negative_int(value):
+    """argparse type for --max-inflight: a whole number, and not negative.
+
+    Zero is the off switch and is accepted. A negative number is the one value
+    that would silently disable submitting altogether: `inflight >=
+    max_inflight` is true before the first offer, so every pass would break out
+    of the loop having offered nothing, the outbox would grow without bound,
+    and the log line would say the ceiling had been reached.
+    """
+    try:
+        count = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a whole number: {value!r}")
+    if count < 0:
+        raise argparse.ArgumentTypeError(
+            f"must not be negative, got {value!r}")
+    return count
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("nzb_dir")
@@ -1422,6 +1476,9 @@ def main(argv=None):
     parser.add_argument("--stall-hours", type=positive_hours, default=4.0,
                         help="fail a job whose reported progress has not moved "
                              "for this many hours (default: 4)")
+    parser.add_argument("--max-inflight", type=non_negative_int, default=0,
+                        help="stop submitting once this many jobs are in "
+                             "flight (default: 0, no ceiling)")
     parser.add_argument("--verbose", "-v", action="store_true")
     parser.add_argument("--report-failures", action="store_true",
                         help="tell the owning arr when a release fails for good")
@@ -1451,6 +1508,7 @@ def main(argv=None):
             arr_keys=arr_keys,
             report_failures=args.report_failures,
             report_dry_run=args.report_dry_run,
+            max_inflight=args.max_inflight,
         )
     except StateError as err:
         # One line, not a traceback: whoever reads the timer's log needs to know

@@ -923,12 +923,159 @@ def test_a_submit_failure_leaves_no_state_entry(tmp_path):
     assert state["jobs"] == {}
 
 
+# --- the in-flight ceiling --------------------------------------------------
+#
+# TorBox's ten slots are a limit, not a target. Measured over the retained
+# window: nine of the ten were held by jobs 3-21h old while only 4 of 50
+# submissions were ever fetched, so the operator needs a ceiling below ten to
+# find out whether fewer concurrent jobs complete more of themselves. It ships
+# off -- 0 is no ceiling -- and the value the measurement lands on is 6 against
+# 10, not a constant written here.
+
+def test_the_in_flight_cap_stops_the_pass_at_the_ceiling(tmp_path):
+    # One job already in flight, a ceiling of two, three waiting: exactly one
+    # more is offered. That the release submitted earlier in the same pass is
+    # what reaches the ceiling is the point -- state["jobs"] is read on every
+    # iteration, not snapshotted before the loop.
+    nzb_dir, _watch, state_path = pending_releases(tmp_path, 3)
+    state = m.load_state(state_path)
+    state["jobs"]["existing"] = job(name="Existing-GRP", torbox_id=1)
+    api = FakeTorBox()
+    lines = []
+
+    assert m.submit(api, str(nzb_dir), state, out=lines.append,
+                    max_inflight=2) == 1
+
+    assert len(api.submits) == 1
+    assert len(state["jobs"]) == 2
+    assert any("in-flight cap reached (2/2), stopping this pass" in line
+               for line in lines)
+
+
+def test_a_pass_already_at_the_cap_offers_nothing(tmp_path):
+    # The ceiling is checked before `submit_file`, not after. Every create is a
+    # call against the 60-an-hour budget, so the check's position is the whole
+    # value of it: zero calls here, rather than one paid for to be told what
+    # len(state["jobs"]) already said.
+    nzb_dir, _watch, state_path = pending_releases(tmp_path, 2)
+    state = m.load_state(state_path)
+    state["jobs"]["a"] = job(name="A-GRP", torbox_id=1)
+    state["jobs"]["b"] = job(name="B-GRP", torbox_id=2)
+    api = FakeTorBox()
+
+    assert m.submit(api, str(nzb_dir), state, max_inflight=2) == 0
+
+    assert api.submits == []
+    assert len(state["jobs"]) == 2
+
+
+def test_a_zero_cap_submits_everything_as_before(tmp_path):
+    # 0 is the off switch, and off has to mean exactly the old behaviour: every
+    # waiting NZB offered, in name order, with no ceiling anywhere in the path.
+    nzb_dir, _watch, state_path = pending_releases(tmp_path, 3)
+    state = m.load_state(state_path)
+    api = FakeTorBox()
+
+    assert m.submit(api, str(nzb_dir), state, max_inflight=0) == 3
+
+    assert len(api.submits) == 3
+    assert len(state["jobs"]) == 3
+
+
+def test_the_in_flight_cap_reaches_submit_through_the_pass(tmp_path, monkeypatch):
+    # End to end through run(). A ceiling that reaches submit() in a test but
+    # is never threaded through run() from argparse leaves the flag inert, and
+    # every other test here passes because they call submit() directly.
+    nzb_dir, watch, state_path = pending_releases(tmp_path, 3)
+    api = FakeTorBox()
+    monkeypatch.setattr(m, "TorBox", lambda *a, **k: api)
+
+    m.run(str(nzb_dir), str(watch), str(tmp_path / "staging"), state_path,
+          str(tmp_path / "f.log"), "key", apply_changes=True, max_inflight=2,
+          out=lambda *a: None)
+
+    assert len(api.submits) == 2
+
+
+def test_the_in_flight_cap_is_off_unless_a_flag_says_otherwise(tmp_path, monkeypatch):
+    # Default 0 means no ceiling, and the pass has to stay uncapped with ten
+    # jobs already in flight: a default of 10 would be a second, hidden limit
+    # -- the provider's again, under a flag that exists to go below it, and
+    # nothing in the banner or the log would say where it came from.
+    nzb_dir, watch, state_path = pending_releases(tmp_path, 1)
+    state = m.load_state(state_path)
+    for i in range(10):
+        state["jobs"]["existing-%d" % i] = job(name="Existing-%d-GRP" % i,
+                                               torbox_id=i + 1)
+    m.save_state(state_path, state)
+
+    api = FakeTorBox()
+    monkeypatch.setattr(m, "TorBox", lambda *a, **k: api)
+    rc = m.main([str(nzb_dir), str(watch), str(tmp_path / "staging"),
+                 str(state_path), str(tmp_path / "f.log"),
+                 "--apply", "--api-key", "k"])
+
+    assert rc == 0
+    assert len(api.submits) == 1
+
+
+def test_a_negative_in_flight_cap_is_refused_at_the_argument(tmp_path, capsys):
+    # `len(state["jobs"]) >= -1` is true before the first offer, so a negative
+    # ceiling would stop every pass having submitted nothing while the log said
+    # the cap had been reached -- the outbox grows without bound and the reason
+    # is a number nobody checked. argparse refuses it before the pass starts.
+    with pytest.raises(SystemExit) as caught:
+        m.main([str(tmp_path), str(tmp_path), str(tmp_path),
+                str(tmp_path / "state.json"), str(tmp_path / "f.log"),
+                "--max-inflight", "-1"])
+    assert caught.value.code != 0
+    assert "must not be negative" in capsys.readouterr().err
+
+
+def test_a_completed_job_does_not_count_against_the_ceiling(tmp_path):
+    # The cap counts jobs holding a TorBox slot, not rows in the state file. A
+    # job TorBox reports complete stays in state["jobs"] until its fetch
+    # succeeds, and one whose fetch keeps failing is never timed out either --
+    # so counting it would spend a place against the ceiling for good, and the
+    # pass would submit less and less as finished releases piled up unfetched.
+    # One flagged complete, one live, a ceiling of two: exactly one slot left.
+    nzb_dir, _watch, state_path = pending_releases(tmp_path, 2)
+    state = m.load_state(state_path)
+    finished = job(name="Finished-GRP", torbox_id=1)
+    finished["complete"] = True
+    state["jobs"]["finished"] = finished
+    state["jobs"]["live"] = job(name="Live-GRP", torbox_id=2)
+    api = FakeTorBox()
+    lines = []
+
+    assert m.submit(api, str(nzb_dir), state, out=lines.append,
+                    max_inflight=2) == 1
+
+    assert len(api.submits) == 1
+    # The log line counts the same way the check does: the live job plus the
+    # one just submitted, not the three rows now in the state file.
+    assert any("in-flight cap reached (2/2), stopping this pass" in line
+               for line in lines)
+
+
 # --- poll ------------------------------------------------------------------
 
 def test_a_completed_job_is_reported_complete():
     state = {"jobs": {"k": job(torbox_id=7)}}
     api = FakeTorBox(list_result=[{"id": 7, "download_state": "completed"}])
     assert [s for _, _, s in m.poll(api, state, 24, "/dev/null")] == ["complete"]
+
+
+def test_a_completed_job_is_flagged_so_it_leaves_the_in_flight_count():
+    # The flag submit() counts instead of the state row (see the in-flight
+    # ceiling tests). Written on the entry rather than only returned in
+    # `results`, because the entry is what outlives the poll: run() saves the
+    # state after poll and fetch, and a fetch that keeps failing leaves the job
+    # in there with nothing else marking it finished.
+    state = {"jobs": {"k": job(torbox_id=7)}}
+    api = FakeTorBox(list_result=[{"id": 7, "download_state": "completed"}])
+    m.poll(api, state, 24, "/dev/null")
+    assert state["jobs"]["k"]["complete"] is True
 
 
 def test_a_failed_job_is_logged_and_dropped(tmp_path):

@@ -32,7 +32,7 @@ mutation usenet-blackhole-help-prints-its-own-source \
   --bats tests/usenet-blackhole.bats \
   --test "^usenet-blackhole: --help stops at the comment block" \
   --why "the fixed-range sed that prints the header has to stop ON the last comment line; one line further and --help emits the SCRIPT_DIR assignment below it, shell source dressed as documentation. This is a hardcoded range, so it goes stale every time a line is added to the header -- which is exactly what happened when the --report-failures paragraph went in, and the test is what noticed" \
-  --apply 'perl -pi -e "s/\Qsed -n '"'"'3,46p'"'"'\E/sed -n '"'"'3,49p'"'"'/" "$F"'
+  --apply 'perl -pi -e "s/\Qsed -n '"'"'3,55p'"'"'\E/sed -n '"'"'3,58p'"'"'/" "$F"'
 
 # --- staging inside the arr's watch folder ---------------------------------
 
@@ -354,3 +354,45 @@ mutation usenet-blackhole-delete-failure-stops-the-pass \
   --test "the extracted modules pass their pytest suite" \
   --why "the delete is best-effort, the same rule a failure report follows. A TorBox that refuses one -- a 500, a job already gone -- must not take the pass down with it, or one un-deletable release stops every job behind it from being polled and fetched, and the job that could not be deleted is dropped from the state either way. Narrowing the catch past TorBoxError is how that rule gets lost" \
   --apply 'sed -i.bak "s@^    except Exception as err:  # noqa: BLE001 - the delete is best-effort\$@    except ValueError as err:  # noqa: BLE001 - the delete is best-effort@" "$F" && rm -f "$F.bak"'
+
+# --- the in-flight ceiling --------------------------------------------------
+#
+# TorBox's ten slots are a limit, not a target. Measured over the retained
+# window: nine of the ten were held by jobs 3-21h old while only 4 of 50
+# submissions were ever fetched. `--max-inflight N` stops submitting for the
+# pass once N jobs are in flight, and it ships off (0), because the point is to
+# measure the fetch rate at 6 against 10 before any value is kept -- a ceiling
+# set too low trades wasted slots for idle ones.
+#
+# Every entry here leaves the flag looking present and working while it is not.
+# The dangerous direction is the off-by-one and the ignored check: both look
+# like the ceiling doing its job, in a log line that says it was reached, while
+# the account goes back to ten jobs ageing out.
+
+mutation usenet-blackhole-inflight-cap-off-by-one \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "\`>\` admits one more job than the operator asked for: a ceiling of 2 submits while 2 are already in flight, so the pass runs at 3 and the measurement is taken at a bound nobody set. It is invisible from the outside because the log line only appears on the pass AFTER the ceiling is exceeded, so a capped run looks capped. The check is \`>=\` because the ceiling is a count that must not be passed" \
+  --apply 'sed -i.bak "s@max_inflight > 0 and inflight >= max_inflight:@max_inflight > 0 and inflight > max_inflight:@" "$F" && rm -f "$F.bak"'
+
+mutation usenet-blackhole-inflight-cap-ignored \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "the whole flag, made inert. The pass offers every waiting NZB to the provider's ten again -- the pile-up of jobs 3-21h old against 4 of 50 ever fetched that the ceiling exists to measure away -- and every create is a call against the 60-an-hour budget, spent on an account that is already full. The banner still announces the cap, so the operator reads a capped run and gets the uncapped one" \
+  --apply 'sed -i.bak "s@^        if max_inflight > 0 and inflight >= max_inflight:\$@        if False:@" "$F" && rm -f "$F.bak"'
+
+mutation usenet-blackhole-inflight-cap-counts-completed-jobs \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "counting rows in the state file rather than jobs holding a TorBox slot. A job TorBox reports complete stays in state[\"jobs\"] until its fetch succeeds, and one whose fetch keeps failing is never timed out either -- so every finished-but-unfetched release would spend a place against the ceiling for good, and the effective cap would fall pass by pass with nothing in the log to show why. The ceiling is about the provider's ten slots, and a completed job no longer holds one" \
+  --apply 'sed -i.bak "s@ if not j.get(\"complete\"))@)@" "$F" && rm -f "$F.bak"'
+
+mutation usenet-blackhole-inflight-cap-default-on \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "the ceiling has to ship off: it is a measurement, and a default of 10 makes the provider's limit look like a chosen value while removing the only comparison the measurement needs. A pass with ten jobs already in flight then stops offering the eleventh before the flag was ever used, and nothing in argparse or the banner says a default put it there" \
+  --apply 'sed -i.bak "s@type=non_negative_int, default=0,@type=non_negative_int, default=10,@" "$F" && rm -f "$F.bak"'

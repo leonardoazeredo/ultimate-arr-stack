@@ -98,6 +98,15 @@ re-asks, and each re-ask spends the same 60-per-hour budget. The ceiling on
 this path is therefore the provider's two limits, not the link speed — and the
 retry pattern makes the second one worse than it needs to be.
 
+`--max-inflight N` puts an operator-set ceiling below that ten, and it ships
+off (`0`). The provider's ten is a limit, not a target: measured over the
+retained window, nine of the ten slots were held by jobs 3-21h old while only 4
+of 50 submissions were ever fetched, so the question is whether six concurrent
+jobs complete more of themselves than ten do. Run it at 6 for a measured window
+and compare fetch rates before keeping any value: a ceiling set too low trades
+wasted slots for idle ones. Reaching the ceiling spends no
+`createusenetdownload` call, because the check runs before the upload.
+
 **Download links open for three hours.** Long enough to start, not long enough
 to store. The docs are explicit that CDN links are not permanent and that
 permalinks are the durable form:

@@ -16,6 +16,7 @@ set -euo pipefail
 #   ./scripts/usenet-blackhole.sh --apply -v         # with per-job progress
 #   ./scripts/usenet-blackhole.sh --apply --report-failures
 #   ./scripts/usenet-blackhole.sh --apply --report-dry-run
+#   ./scripts/usenet-blackhole.sh --apply --max-inflight 6
 #
 # --report-failures tells the owning arr when a release reaches a terminal
 # failure, via POST /api/v3/history/failed/{id}: the arr marks the grab failed,
@@ -31,6 +32,14 @@ set -euo pipefail
 # concurrent slots until --timeout-hours. A release that keeps moving is still
 # bounded by --timeout-hours, which stays the outer limit for genuinely large
 # downloads; a record with no progress field at all falls back to that bound.
+#
+# --max-inflight (default 0, off) stops submitting for the pass once that many
+# jobs are in flight, below TorBox's own ten. Measured over the retained window:
+# nine of the ten slots were held by jobs 3-21h old while only 4 of 50
+# submissions were ever fetched, so the question is whether fewer concurrent
+# jobs complete more of themselves. Measure the fetch rate at 6 against 10
+# before keeping a value -- a ceiling set too low trades wasted slots for idle
+# ones. Reaching it costs no TorBox call: the check runs before the upload.
 #
 # Scheduled by usenet-blackhole.timer, every 2 minutes. Running it by hand is
 # how you see what it would do first.
@@ -91,12 +100,21 @@ DEFAULT_TIMEOUT_HOURS=24
 # The timeout stays the bound for a release that keeps moving.
 DEFAULT_STALL_HOURS=4
 
+# The operator's ceiling on jobs in flight, below the ten concurrent slots
+# TorBox itself allows. Off by default, because the only ceiling measured so far
+# is the provider's: nine of its ten slots were held by jobs 3-21h old while 4
+# of 50 submissions were ever fetched, and whether a lower ceiling completes
+# more of them is the measurement this exists to make. Off is what ships; a
+# value is kept only after the fetch rate at 6 and at 10 have been compared.
+DEFAULT_MAX_INFLIGHT=0
+
 APPLY=false
 VERBOSE=false
 REPORT_FAILURES=false
 REPORT_DRY_RUN=false
 TIMEOUT_HOURS="$DEFAULT_TIMEOUT_HOURS"
 STALL_HOURS="$DEFAULT_STALL_HOURS"
+MAX_INFLIGHT="$DEFAULT_MAX_INFLIGHT"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -127,6 +145,15 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --stall-hours=*) STALL_HOURS="${1#*=}" ;;
+    --max-inflight)
+      if [[ $# -lt 2 ]]; then
+        echo "ERROR: --max-inflight needs a number" >&2
+        exit 2
+      fi
+      MAX_INFLIGHT="$2"
+      shift
+      ;;
+    --max-inflight=*) MAX_INFLIGHT="${1#*=}" ;;
     --help|-h)
       # The header block at the top of this file, printed verbatim. A fixed
       # range rather than `sed -n '2,/^$/p'`, which BSD sed rejects -- and it
@@ -135,10 +162,10 @@ while [[ $# -gt 0 ]]; do
       # until tests/usenet-blackhole.bats started asserting the output.
       #
       # The range moves whenever a line is added to the header. It was 3,27
-      # until the --report-failures paragraph above went in, and 3,40 until
-      # --stall-hours did; that test is what notices, so run it after editing
-      # the top of this file.
-      sed -n '3,46p' "$0" | sed 's/^# \{0,1\}//'
+      # until the --report-failures paragraph above went in, 3,40 until
+      # --stall-hours did, and 3,46 until --max-inflight did; that test is what
+      # notices, so run it after editing the top of this file.
+      sed -n '3,55p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
@@ -173,6 +200,26 @@ if ! awk -v hours="$STALL_HOURS" 'BEGIN { exit !(hours > 0) }'; then
   exit 2
 fi
 
+# Digits only, so the empty string, a negative and "1.5" are all refused here
+# rather than reaching python as a ValueError traceback or, worse, reaching the
+# cap check as a number it reads differently from what the operator typed. Zero
+# is valid and means off, which is why this is not the stall-hours check again.
+case "$MAX_INFLIGHT" in
+  ''|*[!0-9]*)
+    echo "ERROR: --max-inflight must be a whole number, got '$MAX_INFLIGHT'" >&2
+    exit 2
+    ;;
+esac
+
+# Base ten, said out loud. Bash reads a leading zero as octal, so "08" and "09"
+# are not numbers it can compare: the `-eq` below errors with "value too great
+# for base" and takes the else branch, leaving the banner to print the
+# operator's spelling ("08") while python reads the same string as 8 -- two
+# halves of one pass disagreeing about the cap. 10# forces the decimal value
+# both ways, and keeps an arithmetic error that errexit only tolerates here
+# because it sits in an `if` condition out of the timer's log.
+MAX_INFLIGHT=$((10#$MAX_INFLIGHT))
+
 log() { echo "[usenet-blackhole] $1"; }
 
 echo ""
@@ -188,6 +235,14 @@ fi
 # versus "is it not moving"), and a run that only looked at one of them would
 # read as covered by the other.
 echo "Stall rule: no progress for ${STALL_HOURS}h fails the job"
+# Printed in both modes, "off" included. The cap is the one bound whose absence
+# and whose presence at a value look identical in a pass that had nothing to
+# submit, and the difference is the whole point of running it at 6 for a while.
+if [[ "$MAX_INFLIGHT" -eq 0 ]]; then
+  echo "In-flight cap: off"
+else
+  echo "In-flight cap: $MAX_INFLIGHT"
+fi
 # Said out loud in both modes, because "reporting is on" and "reporting is off"
 # are otherwise indistinguishable from a log that had nothing to report -- and
 # the difference matters: a wrong match blocklists a release that was fine.
@@ -253,7 +308,8 @@ if ! TORBOX_API_KEY="$TORBOX_KEY" \
         "$NZB_DIR" "$WATCH_DIR" "$STAGING_DIR" "$STATE_PATH" "$FAILED_LOG" \
         ${PY_ARGS[@]+"${PY_ARGS[@]}"} \
         --timeout-hours "$TIMEOUT_HOURS" \
-        --stall-hours "$STALL_HOURS"; then
+        --stall-hours "$STALL_HOURS" \
+        --max-inflight "$MAX_INFLIGHT"; then
   echo "ERROR: the usenet blackhole pass exited non-zero." >&2
   exit 1
 fi
