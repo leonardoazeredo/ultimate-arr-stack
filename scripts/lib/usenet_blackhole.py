@@ -48,21 +48,56 @@ This module does the three steps in between: submit, poll, fetch.
 
   * `submit`  uploads each NZB to `createusenetdownload`, recording a stable
     identity so a restart never submits the same release twice.
-  * `poll`    asks `usenet/mylist` for each in-flight job.
+  * `poll`    asks `usenet/mylist` for each in-flight job, and fails one that
+    has stopped reporting progress as well as one that TorBox reports dead. A
+    job failed either of those two ways is still active at TorBox, so it is
+    deleted there as well -- that is what actually frees its slot.
   * `fetch`   requests a zip link once the job is complete, unpacks it into the
     watch folder, and drops the staging directory.
 
 Failure is explicit. A blackhole client reports no queue to the arr -- the arr
 only sees what appears in the watch folder -- so a release that never completes
-would otherwise sit invisible forever. Every job that TorBox reports failed, or
-that exceeds `--timeout-hours`, is appended to `logs/usenet-blackhole-failed.log`
-and removed from the state file, so the operator can see it and the arr can be
-told to try something else.
+would otherwise sit invisible forever. Every job that TorBox reports failed, that
+has reported no progress for `--stall-hours`, or that exceeds `--timeout-hours`
+is appended to `logs/usenet-blackhole-failed.log` and removed from the state
+file, so the operator can see it and the arr can be told to try something else.
+The stall rule is what stops such a job holding one of the account's ten
+concurrent slots for the full timeout; the timeout stays the bound for a large
+release that is still moving. Both of those outcomes leave the job running at
+TorBox, so both delete it there: removing it from the state file alone would
+only stop watching the slot being spent.
+
+Telling the arrs
+----------------
+A blackhole is a one-way street unless something walks back. The arr writes an
+NZB and then looks in the watch folder; this moves the file out of the outbox as
+soon as it submits it, so the arr's queue never holds the item. Measured
+2026-09-15: twelve in-flight jobs, none of them in either arr's queue, and
+`queue-cleanup` reporting "Queue size: 0 items" every hour while the blackhole
+logged 227 failures across 100 distinct releases. The arr could not blocklist
+what it could not see, so the same dead release came back on the next missing-
+episode search. `The.Sopranos.S01E08.POLiSH.1080p.WEB.H264-CHOPiN` was
+blocklisted six times on 2026-09-12 and grabbed again on the 14th and the 15th.
+
+`FailureReporter` closes that loop: when a job reaches a terminal failure it is
+resolved to the arr history record for the grab and reported with
+`POST /api/v3/history/failed/{id}`, which marks the grab failed, writes a
+blocklist entry keyed the way the arr keys its own, and triggers a replacement
+search. Reported history ids are remembered in the state file so a retry cannot
+report the same grab twice.
+
+Two things it will not do. It will not report a retryable provider answer --
+`RateLimited` and `ActiveLimit` are transient, and blocklisting a release that
+was never given a chance is worse than the retry storm. And it will not stop the
+pass: an unreachable arr, a missing match or a malformed response is logged and
+the pass carries on. Moving bytes is the job; telling the arr is bookkeeping.
 
 Usage:
   usenet_blackhole.py <nzb-dir> <watch-dir> <staging-dir> <state-path>
                       <failed-log>
-                      [--api-key K] [--apply] [--timeout-hours N] [--verbose]
+                      [--api-key K] [--apply] [--timeout-hours N]
+                      [--stall-hours N] [--verbose] [--report-failures]
+                      [--report-dry-run]
 """
 
 import argparse
@@ -298,6 +333,38 @@ class TorBox:
         payload = self._get("/usenet/mylist?bypass_cache=true&limit=1000")
         return payload.get("data") or []
 
+    def delete_usenet(self, usenet_id):
+        """Delete a download from the account, which is what frees its slot.
+
+        `controlusenetdownload` is the only call that stops a job running at
+        TorBox. Dropping one from the state file does not: a stalled or
+        timed-out job is still ACTIVE there, holding one of the account's ten
+        concurrent slots, which is the cost the stall rule exists to stop
+        paying. `operation: "delete"` removes it and its files.
+
+        Both the key and the JSON body travel through the curl config on stdin,
+        the same arrangement `submit_file` uses, so neither reaches argv. Raises
+        TorBoxError when TorBox refuses, the convention the other methods here
+        follow.
+        """
+        body = json.dumps({"usenet_id": usenet_id, "operation": "delete"})
+        out = _run_curl(
+            [
+                f'url = "{quoted(self.base + "/usenet/controlusenetdownload")}"',
+                f'header = "Authorization: Bearer {quoted(self.api_key)}"',
+                'header = "Content-Type: application/json"',
+                'request = "POST"',
+                f'data = "{quoted(body)}"',
+            ]
+        )
+        try:
+            payload = json.loads(out)
+        except json.JSONDecodeError as err:
+            raise TorBoxError(f"delete did not return JSON: {out[:160]!r}") from err
+        if not payload.get("success"):
+            raise TorBoxError(f"delete refused: {payload.get('detail') or payload}")
+        return True
+
     def request_zip_link(self, usenet_id):
         """Get a zip download link for a finished usenet download.
 
@@ -318,6 +385,296 @@ class TorBox:
         if isinstance(data, dict):
             return data.get("url") or data.get("download_link")
         return data
+
+
+# --- telling the arrs what died --------------------------------------------
+
+# How far back a history entry is allowed to be and still be the grab this
+# release came from.
+#
+# A week is generous for a submission-to-failure gap -- the test case that
+# prompted this ran the 24-hour timeout -- and bounded on purpose: the same
+# release name comes back from the indexer season after season, and an
+# unbounded search would happily match a grab from last year and fail it.
+HISTORY_WINDOW_DAYS = 7
+
+# How long a reported history id is remembered. This is the ledger that stops a
+# retry reporting the same grab twice; no reason for it to outlive the window
+# that produced it.
+REPORT_LEDGER_DAYS = 7
+
+# The arrs listen on the NAS's own loopback. This module runs on the host, not
+# in a container, which is the same arrangement queue_cleanup.py has.
+ARR_SERVICES = (
+    ("Sonarr", 8989, "SONARR_API_KEY"),
+    ("Radarr", 7878, "RADARR_API_KEY"),
+)
+
+
+def arr_services(keys):
+    """The arrs worth asking, given the keys that are actually present.
+
+    An absent key removes its arr from the list rather than failing: a stack
+    running only Sonarr should still report Sonarr's failures.
+    """
+    return [
+        {"name": name, "port": port, "key": keys.get(env)}
+        for name, port, env in ARR_SERVICES
+        if keys.get(env)
+    ]
+
+
+def _curl_config(url, method="GET"):
+    """A curl config file, so the arr key never reaches argv.
+
+    The same shape as queue_cleanup.py's, and for the same reason: `curl <url>`
+    puts `?apikey=...` in the process list, where any user on the box can read
+    it out of /proc/<pid>/cmdline. The blackhole runs from systemd every two
+    minutes, so that would be a key on display twice a minute, forever.
+    """
+    lines = [f'url = "{quoted(url)}"']
+    if method != "GET":
+        lines.append(f'request = "{quoted(method)}"')
+    return "\n".join(lines) + "\n"
+
+
+class ArrApi:
+    """HTTP to the arrs, behind a seam.
+
+    Split out so tests can substitute it the way `FakeTorBox` substitutes
+    TorBox: the matching logic and the ledger are what carry the risk here, and
+    none of it needs a socket.
+    """
+
+    def __init__(self, timeout=30):
+        self.timeout = timeout
+
+    def get_json(self, url):
+        """The parsed body, or None if the arr did not answer usefully.
+
+        None rather than an exception. "This arr could not be asked" and "this
+        arr has nothing matching" both end with nothing reported, and the
+        caller has to carry on either way -- so the only difference worth
+        keeping is the log line.
+        """
+        proc = subprocess.run(
+            ["curl", "-s", "-f", "--max-time", str(self.timeout), "--config", "-"],
+            input=_curl_config(url),
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            return None
+        try:
+            return json.loads(proc.stdout)
+        except ValueError:
+            # A 200 carrying an HTML error page from something in front of the
+            # arr, or an empty body. Same answer as an unreachable one.
+            return None
+
+    def post(self, url):
+        # -f for the same reason get_json carries it: without it curl exits 0
+        # on a 4xx/5xx, so a 401 from a stale key or a 500 would be read as a
+        # successful report. FailureReporter writes the ledger entry and returns
+        # "reported", and the grab the arr never accepted is suppressed forever.
+        proc = subprocess.run(
+            ["curl", "-s", "-f", "--max-time", str(self.timeout), "--config", "-"],
+            input=_curl_config(url, method="POST"),
+            capture_output=True,
+            text=True,
+        )
+        return proc.returncode == 0
+
+
+class FailureReporter:
+    """Resolve a dead release to the arr grab that produced it, and report it.
+
+    Three things stand between this and blocklisting a release that was fine,
+    and all three are here rather than in the caller:
+
+      * an exact title comparison. Not case-insensitive, not normalised -- the
+        arr stores the indexer's own release name as `sourceTitle`, and the NZB
+        filename this resolves from is that name plus `.nzb`. Fuzzy matching
+        would let `S01E08` resolve to `S01E09`, and the wrong episode gets
+        blocklisted.
+      * a date window, so a re-release years later cannot resolve to the
+        original grab.
+      * the newest match wins, because the arr writes a fresh history row on
+        every grab and only the latest one is the grab this failure belongs to.
+
+    Returns None whenever it cannot be certain, and the caller logs that.
+    """
+
+    def __init__(self, api, services, ledger=None, now=None, out=print,
+                 dry_run=False):
+        self.api = api
+        self.services = services
+        self.ledger = ledger if ledger is not None else {}
+        self.now = now or datetime.now(timezone.utc)
+        self.out = out
+        self.dry_run = dry_run
+        # One history body per arr, not one per failure. `/history/since` over
+        # the 7-day window is thousands of rows (measured ~11,600 over three
+        # weeks on Sonarr) behind a 30s curl timeout, and resolve() runs once
+        # for every failure in the pass -- five failures re-downloaded it five
+        # times to answer the same question. A reporter is built once per pass
+        # in run(), so this cache lives for exactly one pass and no longer.
+        # The None an unreachable arr returns is stored too: the answer cannot
+        # change within the pass, and retrying it per failure would turn one
+        # dead arr into one connection timeout per dead release.
+        self._history_cache = {}
+
+    def _history(self, service, since):
+        name = service["name"]
+        if name not in self._history_cache:
+            url = (f"http://localhost:{service['port']}/api/v3/history/since"
+                   f"?date={since.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+                   f"&apikey={service['key']}")
+            self._history_cache[name] = self.api.get_json(url)
+        return self._history_cache[name]
+
+    def resolve(self, release):
+        """(service, history_id, source_title) for this release, or None.
+
+        `release` is the NZB filename without its extension. The arr writes
+        `<Release.Title>.nzb`, and `.nzb` is the only thing this has to take
+        off -- an arr-side normalisation of the name is exactly the failure
+        mode the dry run exists to catch, so nothing is normalised here.
+        """
+        since = self.now - timedelta(days=HISTORY_WINDOW_DAYS)
+        for service in self.services:
+            records = self._history(service, since)
+            if records is None:
+                self.out(f"    ! {service['name']}: could not read history; "
+                         f"not reporting {release}")
+                continue
+            if not isinstance(records, list):
+                self.out(f"    ! {service['name']}: history/since returned "
+                         f"{type(records).__name__}, not a list")
+                continue
+            matches = []
+            for record in records:
+                if not isinstance(record, dict):
+                    continue
+                if record.get("eventType") != "grabbed":
+                    continue
+                if record.get("sourceTitle") != release:
+                    continue
+                matches.append(record)
+            if not matches:
+                continue
+            # Newest wins: several grabs of one release name are the normal
+            # case here, and the failure belongs to the most recent of them.
+            best = max(matches, key=lambda r: str(r.get("date") or ""))
+            history_id = best.get("id")
+            if history_id is None:
+                self.out(f"    ! {service['name']}: matched {release} with no id")
+                continue
+            return service, history_id, best.get("sourceTitle")
+        return None
+
+    def report(self, release, reason_type, reason=None):
+        """Resolve and report one terminal failure. Never raises.
+
+        Returns "reported", "dry-run", "already", "no-match" or "failed" so a
+        caller (and a test) can tell those apart without reading the log.
+
+        `reason_type` is TorBox's own failure ("torbox"), this watcher's
+        24-hour bound ("timeout"), or its stall rule ("stalled"), and it is part
+        of the ledger key rather than decoration. A job can time out and then be
+        reported again later with TorBox's real answer, and those are two
+        different facts about the same grab; collapsing them into one key would
+        silently drop the second.
+        """
+        match = self.resolve(release)
+        if match is None:
+            self.out(f"    ? {release}: no matching grab in either arr "
+                     f"(within {HISTORY_WINDOW_DAYS}d); nothing reported")
+            return "no-match"
+        service, history_id, source_title = match
+        key = f"{service['name']}:{history_id}:{reason_type}"
+        if key in self.ledger:
+            self.out(f"    ? {release}: already reported as history "
+                     f"{history_id} in {service['name']}")
+            return "already"
+        detail = reason or reason_type
+        if self.dry_run:
+            # Both strings, verbatim, on their own lines. The whole point of
+            # this mode is a character-for-character read of the pair, and a
+            # one-line "matched X" hides a difference the eye would catch.
+            self.out(f"    would report: {release}")
+            self.out(f"      arr title:  {source_title}")
+            self.out(f"      {service['name']} history {history_id} ({detail})")
+            return "dry-run"
+        url = (f"http://localhost:{service['port']}/api/v3/history/failed/"
+               f"{history_id}?apikey={service['key']}")
+        if not self.api.post(url):
+            # Deliberately not remembered in the ledger: the arr never got the
+            # message, so the next pass should try again rather than suppress a
+            # report that never happened.
+            self.out(f"    ! {release}: {service['name']} refused the failure "
+                     f"report for history {history_id}")
+            return "failed"
+        self.ledger[key] = {
+            "name": release,
+            "service": service["name"],
+            "reason": detail,
+            "at": self.now.isoformat(),
+        }
+        self.out(f"    reported failed: {release} -> {service['name']} "
+                 f"history {history_id}")
+        return "reported"
+
+
+def prune_ledger(ledger, now, retention_days=REPORT_LEDGER_DAYS):
+    """Drop reported ids nothing has touched for `retention_days`.
+
+    An unparseable timestamp is treated as expired, the same choice
+    queue_cleanup's prune_state makes: an entry that can never age out grows
+    the state file forever, and the cost of dropping it is one duplicate report
+    on a grab that is already past the history window anyway.
+    """
+    kept = {}
+    for key, entry in ledger.items():
+        try:
+            at = datetime.fromisoformat(str(entry.get("at", "")))
+            if at.tzinfo is None:
+                at = at.replace(tzinfo=timezone.utc)
+            fresh = (now - at).days < retention_days
+        except (AttributeError, TypeError, ValueError):
+            fresh = False
+        if fresh:
+            kept[key] = entry
+    return kept
+
+
+def report_failed(reporter, release, reason_type, reason, on_report=None,
+                  out=print):
+    """Hand one terminal failure to the reporter, and never let it stop a pass.
+
+    This is the whole of the "must not stop the blackhole" rule, in one place
+    rather than at each call site: whatever the reporter does -- an unreachable
+    arr, a malformed response, a bug in the matching -- the pass carries on.
+    Moving bytes is the job; telling the arr is bookkeeping.
+    """
+    if reporter is None:
+        return None
+    try:
+        outcome = reporter.report(release, reason_type, reason)
+    except Exception as err:  # noqa: BLE001 - see the docstring
+        out(f"    ! {release}: failure reporting raised {type(err).__name__}: {err}")
+        return None
+    if on_report is not None and outcome == "reported":
+        # Written now rather than at the end of the pass. If the process dies
+        # between here and the next save_state, a ledger that was not persisted
+        # reports the same grab a second time -- and the arr would then
+        # blocklist a release it had already blocked, which is harmless, or
+        # mark a second grab failed, which is not.
+        try:
+            on_report()
+        except StateError as err:
+            out(f"    ! {release}: {err}")
+    return outcome
 
 
 # --- state -----------------------------------------------------------------
@@ -500,23 +857,79 @@ def submit(torbox, nzb_dir, state, out=print):
         except TorBoxError as err:
             out(f"    ! {release}: submit failed: {err}")
             continue
+        submitted_at = datetime.now(timezone.utc).isoformat()
         state["jobs"][key] = {
             "name": release,
             "torbox_id": data.get("usenetdownload_id"),
             "hash": data.get("hash"),
-            "submitted_at": datetime.now(timezone.utc).isoformat(),
+            "submitted_at": submitted_at,
+            # Stall detection. `last_progress` starts unset so that poll()'s
+            # first pass reads it as "not yet observed" and stores the first
+            # real reading and its timestamp. The stall clock starts at that
+            # first-observed progress, not at submission; this initial
+            # `progress_changed_at` is only a fallback for the case where
+            # something reads the field before poll() overwrites it.
+            "last_progress": None,
+            "progress_changed_at": submitted_at,
         }
         submitted += 1
         out(f"    queued: {release} (id {data.get('usenetdownload_id')})")
     return submitted
 
 
-def poll(torbox, state, timeout_hours, failed_log, now=None, out=print):
+def delete_at_torbox(torbox, job, out=print):
+    """Delete one terminal job, and never let that stop the pass.
+
+    A stalled or timed-out job has left the state file but is still ACTIVE at
+    TorBox, where it goes on holding one of the account's ten concurrent slots
+    until something deletes it. Freeing that slot is the entire point of the
+    stall rule rather than a side effect of it.
+
+    Best-effort, for the same reason `report_failed` is: freeing a slot is
+    bookkeeping, and a TorBox that refuses the delete must not take the pass
+    down with it. The job is dropped from the state either way, and the next
+    job in the loop still has to be classified.
+
+    A job with no `torbox_id` is skipped: nothing was ever submitted for it, so
+    there is nothing at TorBox to delete.
+    """
+    usenet_id = job.get("torbox_id")
+    if usenet_id is None:
+        return False
+    try:
+        torbox.delete_usenet(usenet_id)
+    except Exception as err:  # noqa: BLE001 - the delete is best-effort
+        out(f"    ! {job['name']}: could not delete from TorBox: {err}")
+        return False
+    return True
+
+
+def poll(torbox, state, timeout_hours, failed_log, now=None, out=print,
+         report=None, on_report=None, stall_hours=4.0):
     """Classify in-flight jobs. Returns a list of (key, release, state).
 
     TorBox is the authority on completion; a job missing from its list is left
     alone rather than assumed failed, because the list is paginated and cached
     and a transient empty answer would otherwise fail every live job at once.
+
+    `report` is the failure reporter, or None when reporting is off. All three
+    terminal branches hand it the release on their way out, and all three do it
+    BEFORE the job is dropped: the report is the only thing that survives as a
+    record the arr can act on.
+
+    The stalled and timed-out branches also delete the job at TorBox, because
+    those are the two outcomes where it is still active and still costing a
+    slot. The failed branch does not: TorBox has already stopped that one.
+
+    `stall_hours` bounds one of those three. TorBox reports a numeric `progress`
+    on every `mylist` record, and a job whose value has not moved across that
+    many hours is going nowhere -- measured 2026-09-15, the oldest in-flight job
+    was 21.2h old with nothing to show, holding one of the account's ten
+    concurrent slots against a 24h timeout. A release that keeps moving is not
+    stalled, and `timeout_hours` stays its bound.
+
+    Nothing here runs in dry run: `run` returns before the client is built when
+    `apply_changes` is false, so it never reaches this function.
     """
     results = []
     by_id = {}
@@ -540,6 +953,7 @@ def poll(torbox, state, timeout_hours, failed_log, now=None, out=print):
             # provider broke" both end the job here, and only one of them means
             # the release is worth another attempt later.
             record_failure(failed_log, job["name"], f"torbox reported: {reason}")
+            report_failed(report, job["name"], "torbox", reason, on_report, out)
             del state["jobs"][key]
             results.append((key, job["name"], "failed"))
             continue
@@ -551,12 +965,50 @@ def poll(torbox, state, timeout_hours, failed_log, now=None, out=print):
         if started.tzinfo is None:
             started = started.replace(tzinfo=timezone.utc)
         age_hours = (now - started).total_seconds() / 3600.0
+
+        # Stall detection, ahead of the timeout: a job that has stopped moving
+        # is not going to finish, and it costs one of ten slots for every hour
+        # it is left alone. `progress` is a numeric field on every record TorBox
+        # returns; a record without one is skipped rather than read as
+        # "unchanged", so a schema change falls back to the timeout instead of
+        # failing every live job on the first pass after it.
+        progress = record.get("progress")
+        if progress is not None:
+            if job.get("last_progress") != progress:
+                job["last_progress"] = progress
+                job["progress_changed_at"] = now.isoformat()
+            else:
+                try:
+                    moved_at = datetime.fromisoformat(job["progress_changed_at"])
+                except (KeyError, TypeError, ValueError):
+                    # No usable timestamp is not evidence of a stall. Treat it
+                    # as "just moved" and let the next pass store one.
+                    moved_at = now
+                if moved_at.tzinfo is None:
+                    moved_at = moved_at.replace(tzinfo=timezone.utc)
+                stalled_hours = (now - moved_at).total_seconds() / 3600.0
+                if stalled_hours > stall_hours:
+                    detail = (f"progress stuck at {progress} in "
+                              f"{state_name or 'unknown'} for {stalled_hours:.1f}h")
+                    record_failure(failed_log, job["name"], detail)
+                    report_failed(report, job["name"], "stalled", detail,
+                                  on_report, out)
+                    # The job is still running at TorBox and still holding a
+                    # slot, so it has to be deleted there -- not merely
+                    # forgotten here. Best-effort: see delete_at_torbox.
+                    delete_at_torbox(torbox, job, out)
+                    del state["jobs"][key]
+                    results.append((key, job["name"], "stalled"))
+                    continue
+
         if age_hours > timeout_hours:
-            record_failure(
-                failed_log,
-                job["name"],
-                f"still {state_name or 'unknown'} after {age_hours:.1f}h",
-            )
+            bound = f"still {state_name or 'unknown'} after {age_hours:.1f}h"
+            record_failure(failed_log, job["name"], bound)
+            report_failed(report, job["name"], "timeout", bound, on_report, out)
+            # Same as the stall branch: past the timeout the watcher has given
+            # up, but TorBox has not stopped, so the slot stays taken until the
+            # download is deleted.
+            delete_at_torbox(torbox, job, out)
             del state["jobs"][key]
             results.append((key, job["name"], "timeout"))
             continue
@@ -807,8 +1259,16 @@ def _fetch_one(torbox, key, job, watch_dir, staging_dir):
 
 
 def run(nzb_dir, watch_dir, staging_dir, state_path, failed_log, api_key,
-        apply_changes=False, timeout_hours=24.0, verbose=False, out=print):
-    """One pass: submit new NZBs, poll in-flight jobs, fetch completed ones."""
+        apply_changes=False, timeout_hours=24.0, stall_hours=4.0, verbose=False,
+        out=print, arr_keys=None, report_failures=False, report_dry_run=False):
+    """One pass: submit new NZBs, poll in-flight jobs, fetch completed ones.
+
+    `report_failures` is off by default and reported off in the summary, so a
+    pass that says nothing about failures is not also a pass that could have
+    said something and chose not to. `report_dry_run` resolves the match and
+    logs both titles without calling anything -- the mode the rollout runs for
+    a day first.
+    """
     state = load_state(state_path)
 
     if nzb_dir and os.path.isdir(nzb_dir):
@@ -825,6 +1285,31 @@ def run(nzb_dir, watch_dir, staging_dir, state_path, failed_log, api_key,
         return 0
 
     torbox = TorBox(api_key)
+
+    # Reporting and the ledger it maintains. Both dry-run and live need the
+    # reporter -- dry run is a resolver that logs; live is a resolver that
+    # POSTs -- so it is built for either, and only for either.
+    reporter = None
+    on_report = None
+    if report_failures or report_dry_run:
+        services = arr_services(arr_keys or {})
+        # The ledger grows one entry per reported failure and nothing else ever
+        # removes one, so it is pruned on every pass that could add to it.
+        state["reported"] = prune_ledger(
+            state.get("reported") or {}, datetime.now(timezone.utc))
+        ledger = state["reported"]
+        if not services:
+            out("  failure reporting: no SONARR_API_KEY or RADARR_API_KEY set; "
+                "nothing will be reported")
+        else:
+            reporter = FailureReporter(ArrApi(), services, ledger=ledger,
+                                       now=datetime.now(timezone.utc), out=out,
+                                       dry_run=report_dry_run)
+            out(f"  failure reporting: {'dry run' if report_dry_run else 'on'} "
+                f"({', '.join(s['name'] for s in services)})")
+
+            def on_report():
+                save_state(state_path, state)
 
     paused_until = in_backoff(state)
     if paused_until is not None:
@@ -843,17 +1328,26 @@ def run(nzb_dir, watch_dir, staging_dir, state_path, failed_log, api_key,
         submitted = submit(torbox, nzb_dir, state, out=out)
     save_state(state_path, state)
 
-    results = list(poll(torbox, state, timeout_hours, failed_log, out=out))
+    results = list(poll(torbox, state, timeout_hours, failed_log, out=out,
+                        report=reporter, on_report=on_report,
+                        stall_hours=stall_hours))
 
-    # Anything that is not a completed download settles here first. A failure
-    # or a timeout is terminal and costs one line to record; the fetch is the
-    # only part of a pass that takes minutes, so it goes last and in parallel.
+    # Anything that is not a completed download settles here first. A failure,
+    # a timeout or a stall is terminal and costs one line to record; the fetch
+    # is the only part of a pass that takes minutes, so it goes last and in
+    # parallel.
+    #
+    # The NZB has to be discarded for all three. Leaving it in the outbox is
+    # what turns a terminal failure into a retry storm: the arr never cleans
+    # that folder itself, so the next pass -- two minutes later -- finds the
+    # same file, submits the same dead release, and pays another slot for it.
     for key, name, status in results:
-        if status in ("failed", "timeout"):
-            # Both are terminal, and `poll` has already logged them.
+        if status in ("failed", "timeout", "stalled"):
             discard_nzb(nzb_dir, name)
             if status == "timeout":
                 out(f"    ! {name}: timed out")
+            elif status == "stalled":
+                out(f"    ! {name}: stalled")
         elif status != "complete" and verbose:
             out(f"    ... {name}: {status}")
 
@@ -896,6 +1390,25 @@ def run(nzb_dir, watch_dir, staging_dir, state_path, failed_log, api_key,
     return 0
 
 
+def positive_hours(value):
+    """argparse type for --stall-hours: a number, and strictly above zero.
+
+    Zero is the one value that makes the stall rule fire on the first poll
+    after a job is submitted -- `stalled_hours > stall_hours` is true the
+    moment the clock starts -- so a live pass would fail every in-flight job
+    it has. It parses as a float and would otherwise run, so it is refused
+    here, at the argument, rather than left to the loop it disables.
+    """
+    try:
+        hours = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number: {value!r}")
+    if not hours > 0:  # `not >` rather than `<=` so nan is refused too
+        raise argparse.ArgumentTypeError(
+            f"must be greater than 0, got {value!r}")
+    return hours
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("nzb_dir")
@@ -906,12 +1419,22 @@ def main(argv=None):
     parser.add_argument("--api-key", default=os.environ.get("TORBOX_API_KEY", ""))
     parser.add_argument("--apply", action="store_true", help="do it (default: dry run)")
     parser.add_argument("--timeout-hours", type=float, default=24.0)
+    parser.add_argument("--stall-hours", type=positive_hours, default=4.0,
+                        help="fail a job whose reported progress has not moved "
+                             "for this many hours (default: 4)")
     parser.add_argument("--verbose", "-v", action="store_true")
+    parser.add_argument("--report-failures", action="store_true",
+                        help="tell the owning arr when a release fails for good")
+    parser.add_argument("--report-dry-run", action="store_true",
+                        help="log the failures that would be reported, and call nothing")
     args = parser.parse_args(argv)
 
     if args.apply and not args.api_key:
         print("ERROR: no API key (--api-key or TORBOX_API_KEY)", file=sys.stderr)
         return 2
+
+    arr_keys = {name: os.environ.get(env, "")
+                for name, _port, env in ARR_SERVICES}
 
     try:
         return run(
@@ -923,7 +1446,11 @@ def main(argv=None):
             args.api_key,
             apply_changes=args.apply,
             timeout_hours=args.timeout_hours,
+            stall_hours=args.stall_hours,
             verbose=args.verbose,
+            arr_keys=arr_keys,
+            report_failures=args.report_failures,
+            report_dry_run=args.report_dry_run,
         )
     except StateError as err:
         # One line, not a traceback: whoever reads the timer's log needs to know

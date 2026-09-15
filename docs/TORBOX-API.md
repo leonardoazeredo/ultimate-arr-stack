@@ -63,7 +63,7 @@ that the next person can see what exists without re-fetching the collection.
 
 ## What this repo actually calls
 
-Three of the 65, all usenet, all from `scripts/lib/usenet_blackhole.py`.
+Four of the 65, all usenet, all from `scripts/lib/usenet_blackhole.py`.
 Decypharr speaks the torrent half of the API itself and is configured rather
 than coded here.
 
@@ -71,6 +71,7 @@ than coded here.
 |---|---|---|
 | `POST /v1/api/usenet/createusenetdownload` | `TorBox.submit_file` | multipart NZB upload |
 | `GET /v1/api/usenet/mylist` | `TorBox.list_usenet` | `bypass_cache=true`, polled every pass |
+| `POST /v1/api/usenet/controlusenetdownload` | `TorBox.delete_usenet` | `operation: "delete"`, frees the slot a stalled or timed-out job still holds |
 | `GET /v1/api/usenet/requestdl` | `TorBox.request_zip_link` | `zip_link=true`, token in the query |
 
 `scripts/lib/queue_cleanup.py` mentions TorBox only in `DEBRID_CLIENT_PATTERNS`,
@@ -111,6 +112,13 @@ the reason in parentheses. Matching `{"failed", "error"}` exactly leaves the
 branch unreachable and reports dead jobs as running; see
 `FAILED_STATES` in `usenet_blackhole.py` for the live incident.
 
+**Progress is a number on every `mylist` record.** `progress` is TorBox's own
+completion figure for the job, and it moves while bytes arrive. The watcher's
+`--stall-hours` rule reads it, because `download_state` says `downloading` for a
+job that is downloading nothing: the value is what separates a large release
+that is still moving from one that has stopped and is holding a slot for no
+reason.
+
 **Post-processing is TorBox's job by default.** `post_processing` defaults to
 `-1`: repair, extract, delete the source, keep only the wanted files.
 
@@ -125,7 +133,8 @@ branch unreachable and reports dead jobs as running; see
 ## Audit: where this stack is under-using the API
 
 Findings from reading the collection against the code, with the evidence that
-prompted each. None of these is fixed yet.
+prompted each. Most are unfixed; a section that has since been addressed says
+so, and what changed.
 
 ### Post-processing is not requested, only assumed
 
@@ -159,12 +168,23 @@ The endpoint takes comma-separated hashes, around 100 per call, and returns in
 under a second per hundred. What is less clear from the docs is which hash an
 NZB maps to; that needs establishing before this is worth building.
 
-### Nothing is ever deleted from the account
+### Stalled and timed-out jobs are deleted; completed items still accumulate
 
 `controlusenetdownload` takes `{usenet_id, operation}` with `delete`, `pause` or
-`resume`, and `all: true` for the whole account. We never call it. Completed
-items therefore accumulate indefinitely, and a release the watcher has given up
-on stays in the account rather than being cleaned out.
+`resume`, and `all: true` for the whole account. The watcher now calls it with
+`operation: "delete"` for the two terminal outcomes where the job is still
+ACTIVE at TorBox: `poll()`'s stalled and timeout branches. Dropping a job from
+the state file does not stop it, so without the delete it went on holding one of
+the ten concurrent slots, which is the cost the stall rule exists to stop paying.
+
+The call is best-effort. A TorBox that refuses it (a 500, a job that is already
+gone) is logged as `could not delete from TorBox`, and the job is dropped from
+the state either way, because one un-deletable release must not stop the pass
+classifying everything behind it. A job TorBox itself reports failed is not
+deleted: it has already stopped, so there is no slot to free.
+
+Completed items still accumulate. The watcher downloads what it asked for and
+never deletes it afterwards, so the account's completed list only grows.
 
 ### The queue system is unused
 

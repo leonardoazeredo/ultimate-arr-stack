@@ -31,8 +31,8 @@ mutation usenet-blackhole-help-prints-its-own-source \
   --file scripts/usenet-blackhole.sh \
   --bats tests/usenet-blackhole.bats \
   --test "^usenet-blackhole: --help stops at the comment block" \
-  --why "the fixed-range sed that prints the header ran one line long and emitted the SCRIPT_DIR assignment below it, so --help ended with shell source dressed as documentation. Nothing asserted the output, so it shipped that way" \
-  --apply 'perl -pi -e "s/\Qsed -n '"'"'3,27p'"'"'\E/sed -n '"'"'3,30p'"'"'/" "$F"'
+  --why "the fixed-range sed that prints the header has to stop ON the last comment line; one line further and --help emits the SCRIPT_DIR assignment below it, shell source dressed as documentation. This is a hardcoded range, so it goes stale every time a line is added to the header -- which is exactly what happened when the --report-failures paragraph went in, and the test is what noticed" \
+  --apply 'perl -pi -e "s/\Qsed -n '"'"'3,46p'"'"'\E/sed -n '"'"'3,49p'"'"'/" "$F"'
 
 # --- staging inside the arr's watch folder ---------------------------------
 
@@ -55,21 +55,21 @@ mutation usenet-blackhole-fetches-one-at-a-time \
   --bats tests/python-suite.bats \
   --test "the extracted modules pass their pytest suite" \
   --why "FETCH_WORKERS = 1 restores the serial fetch this was written to remove, and it is the mutation that matters most here: the concurrency test sizes its barrier at three and is hardcoded rather than reading the constant, because a fixture that read it would shrink to one job and one barrier slot and pass against a serial implementation" \
-  --apply 'sed -i "s@^FETCH_WORKERS = 3\$@FETCH_WORKERS = 1@" "$F"'
+  --apply 'sed -i.bak "s@^FETCH_WORKERS = 3\$@FETCH_WORKERS = 1@" "$F" && rm -f "$F.bak"'
 
 mutation usenet-blackhole-fetch-pool-unbounded \
   --file scripts/lib/usenet_blackhole.py \
   --bats tests/python-suite.bats \
   --test "the extracted modules pass their pytest suite" \
   --why "an uncapped pool starts an unrar per completed release at once. The unpack is CPU-bound and this runs on a NAS that is also transcoding, with the arr's importer reading the same disk, so the bound is what keeps a large batch from stalling everything else on the box" \
-  --apply 'sed -i "s@max_workers=min(FETCH_WORKERS, len(to_fetch))@max_workers=None@" "$F"'
+  --apply 'sed -i.bak "s@max_workers=min(FETCH_WORKERS, len(to_fetch))@max_workers=None@" "$F" && rm -f "$F.bak"'
 
 mutation usenet-blackhole-fetch-output-interleaved \
   --file scripts/lib/usenet_blackhole.py \
   --bats tests/python-suite.bats \
   --test "the extracted modules pass their pytest suite" \
   --why "each fetch collects its own lines and the caller prints them whole. Handing the shared stream to three threads instead puts one release's progress inside another's, which is how a log stops being readable at exactly the moment -- several concurrent failures -- when someone needs it" \
-  --apply 'sed -i "s@out=lines.append)@out=print)@" "$F"'
+  --apply 'sed -i.bak "s@out=lines.append)@out=print)@" "$F" && rm -f "$F.bak"'
 
 # --- reading TorBox's failure states ----------------------------------------
 #
@@ -84,21 +84,21 @@ mutation usenet-blackhole-failed-state-exact-match \
   --bats tests/python-suite.bats \
   --test "the extracted modules pass their pytest suite" \
   --why "matching the failure set exactly is the original bug. TorBox never returns a bare 'failed', so the branch was unreachable, fifteen releases sat as in-progress until the 24-hour timeout, and the arr was told nothing at all -- a blackhole failure is invisible to the arr by design, so this was the only thing that could have reported it" \
-  --apply 'sed -i "s@^    if not lowered.startswith(FAILED_STATES):\$@    if lowered not in (\"failed\", \"error\"):@" "$F"'
+  --apply 'sed -i.bak "s@^    if not lowered.startswith(FAILED_STATES):\$@    if lowered not in (\"failed\", \"error\"):@" "$F" && rm -f "$F.bak"'
 
 mutation usenet-blackhole-failure-reason-dropped \
   --file scripts/lib/usenet_blackhole.py \
   --bats tests/python-suite.bats \
   --test "the extracted modules pass their pytest suite" \
   --why "the parenthetical is the whole value of the message: 'missing articles' and 'the provider broke' both end the job, and only one is worth another attempt later. Logging the raw state instead keeps the answer buried in a URL that ends in not-complete" \
-  --apply 'sed -i "s@^        inner = lowered.split(\"(\", 1)\[1\].rsplit(\")\", 1)\[0\].strip()\$@        inner = \"\"@" "$F"'
+  --apply 'sed -i.bak "s@^        inner = lowered.split(\"(\", 1)\[1\].rsplit(\")\", 1)\[0\].strip()\$@        inner = \"\"@" "$F" && rm -f "$F.bak"'
 
 mutation usenet-blackhole-failure-substring-match \
   --file scripts/lib/usenet_blackhole.py \
   --bats tests/python-suite.bats \
   --test "the extracted modules pass their pytest suite" \
   --why "a substring match anywhere in the state reads a healthy state as a failure. The prefix is what TorBox varies the tail of, and nothing else" \
-  --apply 'sed -i "s@^    if not lowered.startswith(FAILED_STATES):\$@    if not any(f in lowered for f in FAILED_STATES):@" "$F"'
+  --apply 'sed -i.bak "s@^    if not lowered.startswith(FAILED_STATES):\$@    if not any(f in lowered for f in FAILED_STATES):@" "$F" && rm -f "$F.bak"'
 
 # --- the 429 backoff --------------------------------------------------------
 #
@@ -112,21 +112,21 @@ mutation usenet-blackhole-429-does-not-stop-the-pass \
   --bats tests/python-suite.bats \
   --test "the extracted modules pass their pytest suite" \
   --why "continuing the loop after a 429 offers every remaining NZB to a budget that is already empty. Each one is refused and each refusal is another call, which is the defect this backoff exists to remove -- reconfirmed three passes in a row with nothing submitted in between" \
-  --apply 'sed -i "s@^            out(f\"    ! {release}: rate limited, pausing submissions: {err}\")\$@            out(f\"    ! {release}: rate limited\")\n            continue\n            break@g" "$F"'
+  --apply 'sed -i.bak "s@^            out(f\"    ! {release}: rate limited, pausing submissions: {err}\")\$@            out(f\"    ! {release}: rate limited\")\n            continue\n            break@g" "$F"'
 
 mutation usenet-blackhole-backoff-not-honoured \
   --file scripts/lib/usenet_blackhole.py \
   --bats tests/python-suite.bats \
   --test "the extracted modules pass their pytest suite" \
   --why "recording the deadline and then never checking it is the same as no backoff at all, with extra state. The marker is written from a pass that has already been refused, so nothing else in the run would notice" \
-  --apply 'sed -i "s@^    paused_until = in_backoff(state)\$@    paused_until = None@" "$F"'
+  --apply 'sed -i.bak "s@^    paused_until = in_backoff(state)\$@    paused_until = None@" "$F" && rm -f "$F.bak"'
 
 mutation usenet-blackhole-429-read-as-an-ordinary-error \
   --file scripts/lib/usenet_blackhole.py \
   --bats tests/python-suite.bats \
   --test "the extracted modules pass their pytest suite" \
   --why "a 429 that is not distinguished from a 500 is retried on the next pass like any other transient failure. That is the entire bug: the status is the one signal that says stop asking rather than try again" \
-  --apply 'sed -i "s@^        if code == \"429\":\$@        if False:@" "$F"'
+  --apply 'sed -i.bak "s@^        if code == \"429\":\$@        if False:@" "$F" && rm -f "$F.bak"'
 
 # --- the ten active download slots ------------------------------------------
 #
@@ -140,18 +140,217 @@ mutation usenet-blackhole-active-limit-read-as-a-per-release-failure \
   --bats tests/python-suite.bats \
   --test "the extracted modules pass their pytest suite" \
   --why "without its own type an ACTIVE_LIMIT is an ordinary 500, so the loop carries on offering every remaining NZB to a provider that has already said there is no room. That is the 51-refusals-in-one-pass measurement, and the same reasoning that makes the 429 break out applies here" \
-  --apply 'sed -i "s@^        if api_error_code(body) == \"ACTIVE_LIMIT\":\$@        if False:@" "$F"'
+  --apply 'sed -i.bak "s@^        if api_error_code(body) == \"ACTIVE_LIMIT\":\$@        if False:@" "$F" && rm -f "$F.bak"'
 
 mutation usenet-blackhole-active-limit-does-not-stop-the-pass \
   --file scripts/lib/usenet_blackhole.py \
   --bats tests/python-suite.bats \
   --test "the extracted modules pass their pytest suite" \
   --why "continuing past the refusal spends one call per waiting release on an answer that cannot change within the pass. The point of the break is that the next pass, two minutes later, is a submission rather than a waste when a slot has freed" \
-  --apply 'sed -i "s@^            out(f\"    ! {release}: no free slots, stopping this pass: {err}\")\$@            out(f\"    ! {release}: no free slots\")\n            continue\n            break@g" "$F"'
+  --apply 'sed -i.bak "s@^            out(f\"    ! {release}: no free slots, stopping this pass: {err}\")\$@            out(f\"    ! {release}: no free slots\")\n            continue\n            break@g" "$F"'
 
 mutation usenet-blackhole-any-500-stops-the-pass \
   --file scripts/lib/usenet_blackhole.py \
   --bats tests/python-suite.bats \
   --test "the extracted modules pass their pytest suite" \
   --why "treating every 500 as a full account abandons a batch over one release the provider stumbled on. ACTIVE_LIMIT shares its status with UNKNOWN_ERROR, DOWNLOAD_SERVER_ERROR and a dozen others, which is why the decision is read from the body" \
-  --apply 'sed -i "s@^        if api_error_code(body) == \"ACTIVE_LIMIT\":\$@        if True:@" "$F"'
+  --apply 'sed -i.bak "s@^        if api_error_code(body) == \"ACTIVE_LIMIT\":\$@        if True:@" "$F" && rm -f "$F.bak"'
+
+# --- telling the arrs what died ---------------------------------------------
+#
+# Phase 1 of PLAN-USENET-RECOVERY.md. The arr's queue never holds a blackhole
+# item -- measured 2026-09-15: 12 in flight, 0 in either queue, `queue-cleanup`
+# reporting "Queue size: 0 items" hourly while 227 failures accumulated across
+# 100 distinct releases. So the arr could not blocklist what it could not see,
+# and `The.Sopranos.S01E08.POLiSH.1080p.WEB.H264-CHOPiN` was grabbed again on
+# the 14th and the 15th after six blocklist entries on the 12th.
+#
+# The defect these entries reintroduce is the dangerous direction: a loosened
+# match marks an unrelated grab failed, and the arr blocklists a release that
+# was fine.
+
+mutation usenet-blackhole-title-match-not-exact \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "a prefix or substring match resolves S01E08 to S01E09 when the arr has not yet written the one you asked about, and the wrong episode of a series with 3,006 missing episodes gets blocklisted. The exact comparison is the only thing standing between a re-release with a cosmetic title difference and a blocklist entry for a release that was fine" \
+  --apply 'sed -i.bak "s@if record.get(\"sourceTitle\") != release:@if release not in (record.get(\"sourceTitle\") or \"\"):@" "$F" && rm -f "$F.bak"'
+
+mutation usenet-blackhole-title-match-case-folded \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "folding case is the first step of the fuzzy matching this deliberately does not do, and it is invisible in a dry-run log where both titles look identical anyway. If the arr's stored title ever differs in case, the pair is what the operator has to see in the dry run, not something to paper over" \
+  --apply 'sed -i.bak "s@if record.get(\"sourceTitle\") != release:@if (record.get(\"sourceTitle\") or \"\").lower() != release.lower():@" "$F" && rm -f "$F.bak"'
+
+mutation usenet-blackhole-oldest-grab-wins \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "the arr writes a fresh history row on every grab, and three grabs in 24 hours is the normal case here (history ids 11545, 11763, 11921 for one Sopranos episode). Reporting the oldest marks a grab that has already been superseded while the live one stays unblocked -- the arr would then re-grab the same dead release again" \
+  --apply 'sed -i.bak "s@best = max(matches, key=lambda r: str(r.get(\"date\") or \"\"))@best = min(matches, key=lambda r: str(r.get(\"date\") or \"\"))@" "$F" && rm -f "$F.bak"'
+
+mutation usenet-blackhole-already-failed-grabs-are-candidates \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "a downloadFailed row carries the same sourceTitle as the grab it came from, so dropping the eventType filter makes a re-report the newest match on the second pass -- the arr writes a second blocklist entry for a release it already blocked, every two minutes, forever" \
+  --apply 'sed -i.bak "s@if record.get(\"eventType\") != \"grabbed\":@if False:@" "$F" && rm -f "$F.bak"'
+
+mutation usenet-blackhole-no-history-window \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "an unbounded search matches a grab from a previous season, because the indexer returns the same release name for a re-post. The seven-day bound is what keeps a failure attributed to the attempt that actually failed" \
+  --apply 'sed -i.bak "s@since = self.now - timedelta(days=HISTORY_WINDOW_DAYS)@since = self.now - timedelta(days=3650)@" "$F" && rm -f "$F.bak"'
+
+mutation usenet-blackhole-a-failed-report-is-remembered \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "the ledger means 'the arr has this'. Recording a report the arr refused (a 500, a restart mid-POST) suppresses every retry, so the release stays unblocked with nothing in the log saying the report never landed -- the exact silent failure this whole change exists to remove" \
+  --apply 'sed -i.bak "s@^            return \"failed\"\$@            self.ledger[key] = {\"at\": self.now.isoformat()}\n            return \"failed\"@" "$F" && rm -f "$F.bak"'
+
+mutation usenet-blackhole-arr-post-http-error-read-as-success \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "curl exits 0 on a 4xx/5xx without -f, so the arr's 401 (a stale key) or 500 comes back as an accepted report. FailureReporter writes the ledger entry and returns \"reported\", and the suppression is permanent: the NZB is already discarded, so the grab the arr never accepted is never offered again -- a silent failure the ledger exists to make impossible" \
+  --apply 'sed -i.bak "/def post/,/return proc.returncode/s@\"-s\", \"-f\", \"--max-time\"@\"-s\", \"--max-time\"@" "$F" && rm -f "$F.bak"'
+
+mutation usenet-blackhole-ledger-not-checked \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "writing the ledger and never reading it is the same as no ledger, with extra state. The arr takes a second blocklist entry for a release it already blocked, and the log fills with duplicates until the state file stops being readable" \
+  --apply 'sed -i.bak "s@^        if key in self.ledger:\$@        if False:@" "$F" && rm -f "$F.bak"'
+
+mutation usenet-blackhole-ledger-not-persisted-on-report \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "the ledger has to be on disk the moment the arr accepts the report. A crash between the POST and the next save_state re-reports the same grab on the next pass -- and with the NZB already discarded there is nothing else to stop it" \
+  --apply 'sed -i.bak "s@^    if on_report is not None and outcome == \"reported\":\$@    if False:@" "$F" && rm -f "$F.bak"'
+
+mutation usenet-blackhole-history-refetched-per-failure \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "the history body is thousands of rows behind a 30s curl timeout -- measured ~11,600 rows over three weeks on Sonarr -- and resolve() runs once per failure in the pass, with several failures a pass being the ordinary case. Without the cache each failure pays for the same download again, on a timer that runs every two minutes, while the arr it is asking is the one already struggling" \
+  --apply 'sed -i.bak "s@if name not in self._history_cache:@if True:@" "$F" && rm -f "$F.bak"'
+
+# --- the stall rule ---------------------------------------------------------
+#
+# Phase 2 item 3 of PLAN-USENET-RECOVERY.md. Measured 2026-09-15: the oldest
+# in-flight job was 21.2h old with nothing to show and --timeout-hours is 24, so
+# it held one of the account's ten concurrent slots for the whole day before
+# anything noticed. TorBox reports a numeric `progress` on every `mylist`
+# record; a value that has not moved for --stall-hours is the signal that it
+# never will, and the timeout stays the bound for a release that keeps moving.
+#
+# The dangerous directions here are opposite to Phase 1's: failing a job that
+# was still moving (it loses a release that would have worked), reading a
+# missing field as a value (it fails every live job at once), and letting a
+# stalled release keep its NZB (it reproduces the retry storm).
+
+mutation usenet-blackhole-stall-rule-never-fires \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "the whole rule. Without it a release that never reports a byte of progress holds one of ten slots until the 24-hour timeout -- the measured 21.2h job, which is what Phase 2 exists to stop paying for" \
+  --apply 'sed -i.bak "s@^                if stalled_hours > stall_hours:\$@                if False:@" "$F" && rm -f "$F.bak"'
+
+mutation usenet-blackhole-stall-bound-hardcoded \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "a hardcoded four makes --stall-hours a decoration: the banner announces the operator's number while the watcher enforces its own. The flag exists because the right bound is an operational choice, not a constant" \
+  --apply 'sed -i.bak "s@stalled_hours > stall_hours@stalled_hours > 4.0@" "$F" && rm -f "$F.bak"'
+
+mutation usenet-blackhole-progress-change-is-not-a-change \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "if a moved value does not reset the clock, a genuinely large release that is still downloading is failed at the stall bound anyway -- the 24h window the plan explicitly keeps for releases that keep moving. This is the direction that costs a release that would have worked" \
+  --apply 'sed -i.bak "s@if job.get(\"last_progress\") != progress:@if job.get(\"last_progress\") is None:@" "$F" && rm -f "$F.bak"'
+
+mutation usenet-blackhole-missing-progress-read-as-unchanged \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "a record with no progress field read as the value zero fails every live job at once the moment TorBox changes its schema or an older record omits the field. Absence is not a value: the stall check is skipped and the timeout stays the only bound" \
+  --apply 'sed -i.bak "s@progress = record.get(\"progress\")@progress = record.get(\"progress\", 0.0)@" "$F" && rm -f "$F.bak"'
+
+mutation usenet-blackhole-stalled-nzb-not-discarded \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "the arr never cleans its own nzb folder, so a terminal job whose NZB stays there looks like a fresh grab two minutes later. The same dead release is submitted again and handed another slot -- the retry storm Phase 1 exists to fix, reproduced inside the change meant to relieve it" \
+  --apply 'sed -i.bak "s@if status in (\"failed\", \"timeout\", \"stalled\"):@if status in (\"failed\", \"timeout\"):@" "$F" && rm -f "$F.bak"'
+
+mutation usenet-blackhole-stall-flag-not-read-from-argv \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "the flag has to be read back out of argparse and handed to the pass. Reaching python's argv and the banner while never reaching poll() leaves --stall-hours inert, and every other stall test still passes because they call poll() directly" \
+  --apply 'sed -i.bak "/^            stall_hours=args.stall_hours,\$/d" "$F" && rm -f "$F.bak"'
+
+mutation usenet-blackhole-stall-reported-as-a-timeout \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "\"stalled\" is the ledger key, not decoration. Reporting a stall as a timeout collides with a real timeout on the same grab, so the second fact is silently dropped -- the same argument that already keeps torbox and timeout apart in Phase 1's ledger" \
+  --apply 'sed -i.bak "s@report_failed(report, job\[\"name\"\], \"stalled\", detail,@report_failed(report, job[\"name\"], \"timeout\", detail,@" "$F" && rm -f "$F.bak"'
+
+# --- a stall bound of zero, refused at both entry points --------------------
+#
+# `--stall-hours 0` is numeric and parses, and it is the one accepted value that
+# makes `stalled_hours > stall_hours` true the moment a job's clock starts: a
+# single live pass would fail every in-flight job it has and report each one to
+# its arr as a stalled release. The shell refuses it before python starts and
+# argparse refuses it at the argument, so neither has to trust that the other
+# ran -- the module is importable and callable on its own.
+
+mutation usenet-blackhole-zero-stall-bound-accepted \
+  --file scripts/usenet-blackhole.sh \
+  --bats tests/usenet-blackhole.bats \
+  --test "^usenet-blackhole: a zero --stall-hours is refused, in any spelling" \
+  --why "zero passes the numeric pattern, so without this check the pass runs with a zero-hour stall bound: the banner announces it and python is handed it. \`stalled_hours > 0\` is true the moment a job's clock starts, so every in-flight job is terminal on its first unchanged poll -- reported to its arr, its NZB discarded. The argument check is the only place the operator gets a message about the value itself rather than a pass that failed afterwards for a reason nothing explained" \
+  --apply 'sed -i.bak "s@exit !(hours > 0)@exit 0@" "$F" && rm -f "$F.bak"'
+
+mutation usenet-blackhole-zero-stall-bound-accepted-in-python \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "the module is a real entry point, not only something the shell calls: tests and one-off runs reach main() directly, and the shell's check is a separate file that can be edited without this one noticing. The zero reaches run() and poll() as soon as the type check stops refusing it, with the same cost -- every in-flight job terminal on its first unchanged poll -- and this is what says the Python half refuses it on its own rather than relying on the shell having run first" \
+  --apply 'sed -i.bak "s@if not hours > 0:@if False:@" "$F" && rm -f "$F.bak"'
+
+# --- freeing the slot a terminal job still holds ----------------------------
+#
+# poll() ended a stalled or timed-out job by deleting it from the state file and
+# doing nothing else. The job itself stayed ACTIVE at TorBox, so it went on
+# holding one of the account's ten concurrent slots -- the exact cost the stall
+# rule says it exists to stop. `controlusenetdownload` with `operation: delete`
+# is the call that actually frees it. Only the stalled and timeout branches need
+# it: a job TorBox reports failed has already stopped, so it holds nothing.
+
+mutation usenet-blackhole-stalled-job-not-deleted \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "dropping a stalled job from the state file does not stop it running. It is still ACTIVE at TorBox, so it holds one of the ten slots until the 24h timeout the stall rule exists to pre-empt -- measured 2026-09-15, the oldest in-flight job was 21.2h old with nothing to show. Without this call the stall rule only stops watching the slot being spent, which is not what its docstring claims it does" \
+  --apply 'sed -i.bak "/if stalled_hours > stall_hours:/,/results.append((key, job/ s@^\( *\)delete_at_torbox(torbox, job, out)\$@\1pass@" "$F" && rm -f "$F.bak"'
+
+mutation usenet-blackhole-timed-out-job-not-deleted \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "a job past --timeout-hours is still downloading at TorBox even though the watcher has given up on it, so its slot stays spent until TorBox finishes or fails it on its own. Deleting only on the stall branch leaves this one -- the branch the live stack lost the most to, with the oldest job at 21.2h against a 24h cap -- exactly as it was" \
+  --apply 'sed -i.bak "/age_hours > timeout_hours:/,/results.append((key, job/ s@^\( *\)delete_at_torbox(torbox, job, out)\$@\1pass@" "$F" && rm -f "$F.bak"'
+
+mutation usenet-blackhole-delete-failure-stops-the-pass \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "the delete is best-effort, the same rule a failure report follows. A TorBox that refuses one -- a 500, a job already gone -- must not take the pass down with it, or one un-deletable release stops every job behind it from being polled and fetched, and the job that could not be deleted is dropped from the state either way. Narrowing the catch past TorBoxError is how that rule gets lost" \
+  --apply 'sed -i.bak "s@^    except Exception as err:  # noqa: BLE001 - the delete is best-effort\$@    except ValueError as err:  # noqa: BLE001 - the delete is best-effort@" "$F" && rm -f "$F.bak"'
