@@ -193,6 +193,84 @@ STUB
     assert_output --partial "6"
 }
 
+@test "usenet-blackhole: the banner says the in-flight cap is off by default" {
+    # The cap ships inert, and "off" has to be visible. A pass that quietly
+    # gained a ceiling looks exactly like a pass with nothing waiting, and the
+    # measurement the flag exists for rests on knowing which of the two it was.
+    run "$RUN"
+    assert_success
+    assert_output --partial "In-flight cap: off"
+}
+
+@test "usenet-blackhole: --max-inflight reaches the banner" {
+    run "$RUN" --max-inflight 6
+    assert_success
+    assert_output --partial "In-flight cap: 6"
+    # ...and zero is still spelled as off, not as a cap of zero.
+    run "$RUN" --max-inflight 0
+    assert_success
+    assert_output --partial "In-flight cap: off"
+}
+
+@test "usenet-blackhole: --max-inflight=6 is accepted as one argument" {
+    run "$RUN" --max-inflight=6
+    assert_success
+    assert_output --partial "In-flight cap: 6"
+}
+
+@test "usenet-blackhole: a trailing --max-inflight is refused, not silently defaulted" {
+    # Falling through to 0 reads as "off was chosen" when nothing was, and the
+    # difference is whether the pass someone is reading a log from was capped.
+    run "$RUN" --max-inflight
+    assert_failure 2
+    assert_output --partial "--max-inflight needs a number"
+}
+
+@test "usenet-blackhole: a non-integer --max-inflight is refused" {
+    # Digits only. The negative is the dangerous one -- `len(jobs) >= -1` is
+    # true before the first offer, so the pass would submit nothing while its
+    # log said the cap had been reached -- and "1.5" would reach python's type
+    # check as a float where the cap is a count.
+    for value in soon -1 1.5; do
+        run "$RUN" --max-inflight "$value"
+        assert_failure 2
+        assert_output --partial "ERROR: --max-inflight must be a whole number, got '$value'"
+    done
+}
+
+@test "usenet-blackhole: a leading-zero --max-inflight is read as decimal" {
+    # "08" passes the digits-only check, and bash then reads it as an invalid
+    # octal in the banner's `-eq` test: the comparison errors, falls to the else
+    # branch, and prints the operator's spelling -- while python reads the same
+    # string as 8. Both halves have to see one decimal number, and a value the
+    # validation accepted must not put an arithmetic error in the timer's log.
+    printf 'MEDIA_ROOT=%s/data\nTORBOX_API_KEY=testtorboxkey\n' "$WORK" > "$ENV"
+    stub_python
+    run env "PATH=$WORK/bin:$PATH" "$RUN" --apply --max-inflight 08
+    assert_success
+    refute_output --partial "value too great for base"
+    assert_output --partial "In-flight cap: 8"
+    refute_output --partial "In-flight cap: 08"
+    run grep -A 1 -x -- "--max-inflight" "$ARGV_FILE"
+    assert_success
+    # Exact, not `--partial`: "8" is a substring of "08", and the difference
+    # between the two is the whole point of this test.
+    assert_line --index 1 "8"
+}
+
+@test "usenet-blackhole: --max-inflight reaches python" {
+    # Same rule as --stall-hours: a value the banner announces but python never
+    # receives leaves the ceiling inert, and the banner would be the only place
+    # it existed.
+    printf 'MEDIA_ROOT=%s/data\nTORBOX_API_KEY=testtorboxkey\n' "$WORK" > "$ENV"
+    stub_python
+    run env "PATH=$WORK/bin:$PATH" "$RUN" --apply --max-inflight 6
+    assert_success
+    run grep -A 1 -x -- "--max-inflight" "$ARGV_FILE"
+    assert_success
+    assert_output --partial "6"
+}
+
 @test "usenet-blackhole: an unknown argument is refused" {
     run "$RUN" --applyy
     assert_failure
