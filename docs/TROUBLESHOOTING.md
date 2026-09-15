@@ -798,34 +798,21 @@ as one produced two wrong diagnoses in a single evening. The plan is Pro; see
 **Related: the bare 400.** The 403 above is the rate limit. This is the other
 error, and it is the one that wedges the queue. Decypharr's
 `ErrorCodeToLinkError` has no case for `"400"`, so it falls through to the
-default branch, which classifies the error as **permanent**. Two consequences,
-both measured in the v2.5 source:
+default branch, which classifies the error as **permanent**: the client keeps
+the torrent, the arr keeps the queue item at 0%, and — because an item at the
+cutoff makes the arr refuse every alternative — the title cannot be replaced
+either. A transient upstream hiccup becomes permanently stuck episodes and
+films.
 
-- `resolveLinkWithRetry` returns at the first attempt instead of using its four
-  tries and its exponential backoff (`pkg/manager/downloader.go`). The log shows
-  no `link fetch failed, retrying` line at all, which is the tell.
-- `fetchAndValidate` memoises the failure against the link URL, and the link URL
-  for a given torrent is derived from `torrent_id`/`file_id`, so the same
-  request keeps producing the same URL.
-
-The client keeps the torrent, the arr keeps the queue item at 0%, and — because
-an item at the cutoff makes the arr refuse every alternative — the title cannot
-be replaced either. A transient upstream hiccup becomes permanently stuck
-episodes and films.
-
-**This is fixed locally.** `decypharr/Dockerfile` builds the pinned upstream
-release with upstream's own open fix ([PR #402](https://github.com/sirrobot01/decypharr/pull/402))
-applied, and `.github/workflows/decypharr-image.yml` publishes it. The compose
-file uses that image instead of `ghcr.io/sirrobot01/decypharr:v2.5`. Confirm the
-running image carries the fix:
+**This is fixed locally**, by building Decypharr from source with upstream's
+own open fix ([PR #402](https://github.com/sirrobot01/decypharr/pull/402))
+applied. See [docs/DECYPHARR-PATCH.md](DECYPHARR-PATCH.md) for how that build
+pipeline works, how to confirm it's live, and when to retire it once upstream
+ships the fix in a release. Quick check:
 
 ```bash
 docker inspect decypharr --format '{{.Config.Image}}'   # .../decypharr:v2.5-patch1
 ```
-
-The `400` itself still appears in the logs — it is a real upstream answer — but
-it now costs a retry rather than the file. Delete `decypharr/`, its workflow and
-the compose reference once upstream merges the fix into a release.
 
 **Fix (the rate limit itself):** wait it out. It cleared inside ~90 minutes
 here. Once links answer again, `queue-cleanup.timer` removes the wedged items as

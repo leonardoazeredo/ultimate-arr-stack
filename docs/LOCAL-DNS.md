@@ -62,6 +62,46 @@ docker compose -f docker-compose.arr-stack.yml restart pihole
 
 > **⚠️ Important:** Stack `.lan` domains are managed in `02-local-dns.conf`. If you add your own domains (e.g., homeassistant.lan), use either the CLI or Pi-hole web UI — but never define the same domain in both places, as they can conflict and cause unpredictable DNS resolution.
 
+### Adding a `.lan` domain for a service outside this stack
+
+For a container that isn't part of this compose project (Frigate, Home
+Assistant, etc.) but that you still want at `myservice.lan`:
+
+**1. Add the DNS entry** (gitignored `pihole/dnsmasq.d/02-local-dns.conf`):
+
+```
+address=/myservice.lan/TRAEFIK_LAN_IP
+```
+
+**2. Add a Traefik route** (create `traefik/dynamic/my-services.local.yml` —
+also gitignored):
+
+```yaml
+http:
+  routers:
+    myservice-lan:
+      rule: "Host(`myservice.lan`)"
+      entryPoints: [web]
+      service: myservice-lan
+
+  services:
+    myservice-lan:
+      loadBalancer:
+        servers:
+          - url: "http://172.20.0.30:5000"
+```
+
+**3. Deploy:**
+
+```bash
+docker exec pihole pihole restartdns
+# Traefik picks up *.local.yml automatically
+```
+
+**Requirement**: the service must be on the `arr-stack` network with a static
+IP — see the `ip_range: 172.20.0.128/25` note in `docker-compose.traefik.yml`
+for why a manually added container needs an IP outside that range.
+
 **Step 5: Set router DNS**
 
 Configure your router's DHCP to advertise your NAS IP as DNS server. All devices will then use Pi-hole for DNS.
