@@ -357,3 +357,24 @@ The `common.sh` library provides shared functions used by all checks:
 - **Domain config**: Reads domain from `.env` or `.env.nas.backup`
 - **SSH helpers**: Standardized SSH commands with timeouts
 - **File scanning**: Functions to get tracked/staged files
+
+### Bash gotcha: command substitution under `set -e`
+
+A script running with `set -e` (exit on error) exits immediately if a command
+substitution's command fails — including an SSH call that just couldn't reach
+the NAS. Add `|| true` and check for an empty result instead of letting the
+whole script die on a transient failure:
+
+```bash
+# WRONG - script exits if SSH fails
+result=$(ssh_to_nas "some command")
+
+# RIGHT - gracefully handle SSH failure
+result=$(ssh_to_nas "some command") || true
+if [[ -z "$result" ]]; then
+    echo "SKIP: SSH failed"
+    return 0
+fi
+```
+
+Used in `scripts/lib/check-env-backup.sh` and `check-uptime-monitors.sh`.

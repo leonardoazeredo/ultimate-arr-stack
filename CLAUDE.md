@@ -42,6 +42,53 @@ clears it. See *TorBox: Every Download Link Returns 403* in
 exists to pace this; do not bypass its age gate by force-clearing a whole queue
 at once.
 
+**Read `docs/TORBOX-API.md` before touching any TorBox call.** It's the
+authoritative reference — auth mechanics, the full endpoint inventory, what
+this repo actually calls vs. leaves on the table (`checkcached`, the queue
+system, `post_processing`, password-protected releases), and why this stack
+runs a hand-rolled client instead of one of TorBox's official SDKs. The
+account-behavior facts above are still correct; this is the rest of the
+picture.
+
+### Usenet: the arrs talk to TorBox directly, not through SABnzbd
+
+As of 2026-09-14, Sonarr/Radarr's usenet path is TorBox's API via each arr's
+native `UsenetBlackhole` client, not SABnzbd. SABnzbd's NNTP server only
+serves articles up to ~90 days old (measured: 101-day-old release 0/5,
+138-day 0/6); TorBox's API has no such limit. `scripts/usenet-blackhole.sh`
+(a 2-minute timer) submits each grabbed NZB to
+`POST /v1/api/usenet/createusenetdownload`, polls `mylist`, downloads the
+finished file via `requestdl`, and drops it in the arr's watch folder.
+SABnzbd still runs, with nothing pointed at it — don't assume it's still in
+the download path.
+
+Two provider limits shape this client's behavior and are worth knowing before
+debugging it: **10 concurrent slots** (an 11th submission gets `HTTP 500` /
+`ACTIVE_LIMIT`) and **60 `createusenetdownload` calls/hour** (`HTTP 429`).
+`submit()` in `scripts/lib/usenet_blackhole.py` backs off on both — breaking
+the submission loop and, for the 429 case, persisting a pause deadline in the
+state file so a fresh process two minutes later still honors it. If usenet
+grabs look stalled, check for either condition before assuming something is
+broken. `docs/TORBOX-API.md` covers both limits and the failure-string
+parsing gotcha (`download_state` is a prefix like
+`failed (Aborted, cannot be completed - ...)`, never a bare `"failed"`).
+
+`scripts/backlog-search.sh` (every 4 hours) drives a bounded backlog walk for
+both arrs — neither arr searches its own backlog by default, so a title added
+months ago and never found sits missing forever otherwise. It's paced
+per-unit with a cooldown, not a blind restart-from-the-top, to avoid
+re-searching the same slice every run.
+
+### Decypharr: built from source with a backported patch
+
+The `decypharr` service does not run the upstream image. It's built from
+source (`decypharr/Dockerfile`) with a backported fix for a provider `400`
+being misclassified as permanent, published by
+`.github/workflows/decypharr-image.yml`. See
+[docs/DECYPHARR-PATCH.md](docs/DECYPHARR-PATCH.md) for how the pipeline
+works, how to confirm the running image carries the patch, and when to retire
+the whole thing (once upstream ships the fix in a release).
+
 ## NAS Access
 
 SSH credentials are in `.claude/config.local.md`. Read it before running any NAS commands.

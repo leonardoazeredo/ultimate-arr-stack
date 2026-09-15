@@ -2,6 +2,161 @@
 
 All notable changes to this project will be documented in this file.
 
+> **This fork's own version line.** `origin` (`leonardoazeredo/ultimate-arr-stack`)
+> diverged from `upstream` (`Pharkie/ultimate-arr-stack`) after `[1.7.30]` below
+> (2026-08-05). Upstream's own subsequent releases claimed `v1.8.0` through
+> `v1.13.2` on their own history — tags you'll see in `git tag` (this repo has
+> both remotes) that belong to a different author's line, not this fork's.
+> Rather than collide with any of them, entries from `[1.7.31]` on continue
+> this fork's own `1.7.x` line, in the `1.7.25`-`1.7.99` band upstream skipped
+> when it jumped straight from `1.7.24` to `1.8.0`.
+
+## [1.7.34] - 2026-09-14
+
+### Removed
+- **qBittorrent** (#66): the operator does not want BitTorrent peer traffic
+  originating from the NAS. It had pulled 307 GB from peers and seeded 9.22 GB
+  back before removal — `docker stats` showed it still moving bytes when this
+  started. Removed the compose service, its volume and 8085 mapping, and the
+  `configure_qbittorrent()` step (cookie file, password discovery) from
+  `configure-apps.sh`. Torrents now go: Sonarr/Radarr → Decypharr → TorBox
+  fetches on its own servers → Decypharr pulls the finished file back over
+  HTTPS. Nothing on this host talks to a swarm any more.
+
+### Changed
+- **Usenet moved off SABnzbd's 90-day NNTP limit onto TorBox's API** (#75):
+  SABnzbd's `nntp.torbox.app` only serves articles up to ~90 days old —
+  measured 2026-09-14, releases aged 1/34/60/86 days resolved 5-6 for 6, but
+  101 and 138 days resolved 0. Sonarr's usenet grabs were 81 of 85 older than
+  90 days and imported 1 of 91, while the torrent path imported 109 of 202
+  over the same period. Both arrs now use their own native `UsenetBlackhole`
+  client; `scripts/usenet-blackhole.sh` (a 2-minute timer) submits each NZB to
+  TorBox's API, polls it, downloads the finished zip, and renames the release
+  into the watch folder. SABnzbd still runs, with nothing pointed at it.
+  Fetches of finished releases run 3 at a time rather than serially (#77) —
+  measured as the ceiling on a NAS also transcoding for Jellyfin. See
+  [docs/TORBOX-API.md](docs/TORBOX-API.md) for the API this client uses and
+  what it still leaves on the table.
+- **A scheduled, bounded backlog search for both arrs** (#73): neither arr
+  searches its own backlog by default — a title added months ago and never
+  found sits missing forever. Measured 2026-09-13: 3,107 missing episodes
+  across 42 series, with grabbable releases sitting unclaimed. New
+  `scripts/backlog-search.sh` + timer runs every 4 hours, bounded per pass
+  (Sonarr's own unbounded `MissingEpisodeSearch` could not be cancelled once
+  started, and was the shape of burst that had already earned a 90-minute
+  TorBox rate-limit incident). Fixed same day (#74): the walk was re-searching
+  its own head every run rather than advancing through the backlog — a
+  livelock that read as progress because the same log lines kept appearing.
+- **Decypharr rebuilt from source with upstream's own 400-is-retryable patch**
+  (#72): a bare TorBox `400` was wedging queue items permanently — measured on
+  this NAS at 70 errors in 72 hours. See
+  [docs/DECYPHARR-PATCH.md](docs/DECYPHARR-PATCH.md) for why, and how the
+  build pipeline works.
+
+### Fixed
+- **Two queue states nothing could see** (#76): four items held all five of
+  Decypharr's download slots for 8 hours while 56 items queued behind them,
+  because two classifier branches were missing — a client-carried error
+  paired with `trackedDownloadStatus: "ok"`, and a finished-but-never-imported
+  download. `queue-cleanup` now catches both.
+- **TorBox's failure states were read as an exact match, not a prefix** (#78):
+  `download_state` comes back as `failed (Aborted, cannot be completed - ...)`
+  — a prefix plus a reason, never a bare `"failed"`. Exact-match comparison
+  left the failure branch unreachable, so aborted usenet jobs sat as "in
+  progress" for a full 24-hour timeout instead of failing immediately.
+- **Stopped re-asking TorBox after a 429, and carry the pause across passes**
+  (#81): `createusenetdownload` is capped at 60 calls/hour, and a pass offers
+  every pending NZB — so a release refused with `429` was offered again two
+  minutes later, spending another call from the budget it was already waiting
+  on. Measured 2026-09-14: 47 refusals to 37 acceptances. `submit()` now
+  breaks the loop on a 429 and persists the pause deadline in the state file
+  (each pass is a fresh process).
+- **Stopped offering releases to an account with no free slots** (#83): the
+  other half of the 429 problem, and the larger half by count. TorBox's
+  10-concurrent-slot limit refuses the 11th with `ACTIVE_LIMIT` under an HTTP
+  500 — measured 2026-09-14, 51 refusals in a single pass, each burning the
+  same hourly budget the 429 fix exists to protect. `submit()` now breaks on
+  it with no backoff, since a freed slot is only discoverable by trying.
+
+See [docs/TORBOX-API.md](docs/TORBOX-API.md) for the full API reference this
+work is built on, and [docs/DECYPHARR-PATCH.md](docs/DECYPHARR-PATCH.md) for
+the patch pipeline.
+
+## [1.7.33] - 2026-09-12
+
+### Fixed
+- **E2E suite audit, four services, one security issue** (#58): the
+  Stremio-Jellyfin addon printed its Jellyfin password to its own log on every
+  restart-loop iteration (now names the server/user only); the Jellyfin
+  screenshot test's 60s timeout was a guess inherited from months of
+  ~28s runs, replaced with bounded, named waits.
+- **stremio-jellyfin: wrong auth header name, and the 401 hiding behind a 400**
+  (#60, #61): Jellyfin's `authenticatebyname` needs `Authorization`, not
+  `X-Emby-Authorization` — the latter left `request.App` null and produced a
+  400 that looked unrelated to auth. Measured against the live server, six
+  header spellings were tried; only `Authorization` with a `Token=` attribute
+  works for login and every authenticated call after it. The addon now plays
+  end to end.
+
+### Added
+- **Stremio addon routed at `stremio.lan`** (#62): previously only reachable
+  at `NAS_IP:60421`, a port outside the VLAN20 allow-list — no client on that
+  VLAN could reach it. Traefik now fronts it with no admin-auth (deliberate:
+  Stremio is a client that cannot answer an HTTP Basic challenge); access
+  control stays on Jellyfin's own per-request token in each stream URL.
+- **E2E coverage for the whole addon chain, not just its manifest** (#63):
+  three real failures in one evening — a malformed auth header killing the
+  addon on boot, an empty catalog from 401s, and episodes resolving to
+  nothing — none of which the old manifest-only test could have caught. New
+  assertions cover catalog items carrying IMDb ids, stream-URL resolution, a
+  real range-fetch of media bytes, and episode resolution.
+
+## [1.7.32] - 2026-09-11
+
+### Added
+- **CI runs on every push and PR** (#48): previously the only workflow was the
+  manual NAS deploy pipeline, so a PR could sit green with nothing having
+  looked at it. Four jobs: the full bats suite, mutation guards scoped to
+  changed files, `actionlint` + `terraform fmt -check`, and a supply-chain
+  scan — the last three made required status checks on `main` once proven
+  green (#57).
+- **Quality plan, phases 1-6** (#55): stale claims corrected (a "not required
+  yet" CI comment that had been required for 4 PRs; three counts —
+  corpus size, e2e test count — that had already drifted from what they
+  claimed); a positive compose test asserting VPN-bound services actually
+  carry `network_mode: service:gluetun` rather than only checking services
+  that already declare it; a threat model for the NAS deploy workflow; and
+  `docs/QUALITY-CONTROL-MAP.md`, a matrix of what's checked where (local/CI/
+  nightly/NAS) built from reading the actual workflows rather than intent.
+- **`scripts/lib/*.py` extracted from heredocs into real, tested modules**:
+  containerised pytest (`tests/toolkit/pytest.sh`, exits 77 rather than 0 when
+  Docker is unavailable — an absent oracle must not read as a passing one),
+  with a bats check that every module has a test file so a new one can't ship
+  untested.
+- **Mutation-testing hardening pass** (merged `86d5fcf`, 2026-09-01): four
+  guard tests in this repo turned out to be structurally incapable of
+  failing — including a test asserting the pre-commit hooks were *installed*
+  as a symlink, never that they did anything. `./tests/mutation/run-mutations.sh`
+  now proves a guard can fail by reintroducing the defect it guards and
+  requiring the test to go red; the corpus grew to 323 entries. Full writeup
+  in [docs/TEST-HARDENING-LOG.md](docs/TEST-HARDENING-LOG.md).
+
+## [1.7.31] - 2026-09-06
+
+### Removed
+- **NAS-based Tailscale exit node decommissioned** in favor of a router-native
+  implementation: `arr-stack-router` now runs its own Tailscale + WireGuard
+  config directly, showing an 8-10x throughput improvement over the NAS's
+  Docker+netns-nested path (~6-9 Mbps per-flow ceiling measured there).
+  Removed `gluetun-exit`, `tailscale-exit`, `tailscale-exit-routing` and
+  `gluetun-exit-rotator` from `docker-compose.tailscale.yml` along with their
+  volumes, env vars, zombie-detector coverage, backup coverage, and bats/e2e
+  tests. The decommissioned build was proven and hardened first (PR #38,
+  2026-08-23) before the router path's measured advantage justified removing
+  it — see [docs/EXIT-NODE-PROJECT-LOG.md](docs/EXIT-NODE-PROJECT-LOG.md) for
+  the full arc, including the open gap this carries forward: no kill-switch/
+  leak test exists yet for the router path (the NAS build had one).
+
 ## [1.7.30] - 2026-08-15
 
 ### Changed
