@@ -144,8 +144,12 @@ check_secrets() {
         # (letters and a dot are enough) and blocked every commit in the repo
         # until this line, itself years-old code nobody had committed past
         # locally since check-secrets.sh started scanning all tracked files.
-        # `this.` covers the observed case; `\$` (a shell/JS interpolation
-        # sigil) is excluded on the same reasoning pattern 9 already applies.
+        # `this.` covers the observed case. The `\$` alternative is inert for
+        # this pattern specifically -- its value class ([A-Za-z0-9._-]) never
+        # admits a `$`, so no hit can ever contain one for that half to match
+        # against. Left in anyway for parity with the shape of pattern 9's
+        # exclusion below, which -- unlike this one -- has a value class that
+        # does need it.
         if _report_secret_matches ERROR "$file" "Possible auth token" \
                "$content" '(Authorization|Bearer|TOKEN):\s*(Bearer\s+)?[A-Za-z0-9._-]{20,}' 'xxx' ':\s*(this\.|\$)'; then
             errors=$((errors + 1))
