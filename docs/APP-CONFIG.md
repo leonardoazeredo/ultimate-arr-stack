@@ -246,19 +246,20 @@ Manages torrent/Usenet indexers and syncs them to Sonarr/Radarr.
    - **Indexer Proxy:** leave blank (not needed for Usenet)
    - Test → Save
 
-   > **Tested with:** Usenet-Crawler (free, open registration at usenet-crawler.com, 50 API
-   > hits/day, real search results confirmed working via Generic Newznab). NZBGeek (~$12/year) is
-   > the reliable paid option. **Avoid:** NZBFinder's free tier has no API access (search returns
-   > "premium member required" even with a valid key); DrunkenSlug's registration is currently
-   > closed; TorBox's own `search-api.torbox.app` Newznab/Torznab endpoint (documented in their
-   > changelog) currently doesn't resolve in DNS at all — confirmed via TorBox's own authoritative
-   > nameserver, not just a local issue.
+   > **Tested with:** a paid Usenet-Crawler account, real search results confirmed working via
+   > Generic Newznab. NZBGeek (~$12/year) is another paid option. **Avoid:** NZBFinder's free tier
+   > has no API access (search returns "premium member required" even with a valid key);
+   > DrunkenSlug's registration is currently closed; TorBox's own `search-api.torbox.app`
+   > Newznab/Torznab endpoint (documented in their changelog) currently doesn't resolve in DNS at
+   > all — confirmed via TorBox's own authoritative nameserver, not just a local issue.
 
    > **Full pipeline verified end-to-end (2026-08-15), back when SABnzbd was the usenet client:**
    > Usenet-Crawler search → Radarr grab → SABnzbd download/repair/unpack → Radarr hardlink-import,
-   > all confirmed with a real movie grab. That half is historical — SABnzbd no longer does the
-   > downloading (see [§4.2](#42-usenet-torbox-blackhole)) — but the TorBox credentials note below
-   > still applies if you point SABnzbd at a provider. One gotcha along the way: SABnzbd's TorBox NNTP server (`nntp.torbox.app:563`) rejected
+   > all confirmed with a real movie grab. That half is historical: Sonarr and Radarr now use a
+   > UsenetBlackhole client, and
+   > [usenet-blackhole.timer](MAINTENANCE.md#usenet-blackhole-systemd-timer-every-2-minutes)
+   > hands each grabbed NZB to TorBox instead (see [§4.2](#42-usenet-torbox-blackhole)). The TorBox
+   > credentials note below still applies if you point SABnzbd at a provider. One gotcha along the way: SABnzbd's TorBox NNTP server (`nntp.torbox.app:563`) rejected
    > login with a generic `482 Invalid username or password` even though the credentials matched
    > what was on file — this looked like a rate limit (TorBox's `/v1/api/user/me` showed a
    > `cooldown_until` field at the time) but was actually just **stale/incorrect Usenet
