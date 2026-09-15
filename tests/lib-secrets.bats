@@ -190,6 +190,16 @@ fixture() { mkdir -p "$FILES/$(dirname "$1")"; printf '%s\n' "$2" > "$FILES/$1";
     assert_output --partial "Possible auth token in docs/req.http"
 }
 
+@test "secrets: pattern 8 does NOT flag a code reference standing in for the token" {
+    # This is the real line from stremio-jellyfin/jellyfin.js that blocked
+    # every commit in the repo: `this.authorisationHeader` is 24
+    # letters-and-a-dot, which cleared the pattern's 20-char value class with
+    # nothing else present to allowlist it.
+    fixture "app.js" "        Authorization: this.authorisationHeader,"
+    run check_secrets
+    assert_success
+}
+
 @test "secrets: pattern 9 reports a password of 15 characters, as an ERROR" {
     # 15 is the boundary the pattern names, so it is asserted at the boundary
     # rather than somewhere comfortably past it.

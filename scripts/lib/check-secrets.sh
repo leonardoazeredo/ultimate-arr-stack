@@ -137,8 +137,17 @@ check_secrets() {
         fi
 
         # Pattern 8: Bearer/Auth tokens in non-example files
+        #
+        # The exclusion regex skips a variable/property reference standing in
+        # for the token -- `Authorization: this.authorisationHeader` in
+        # stremio-jellyfin/jellyfin.js matched the 20+-char value class outright
+        # (letters and a dot are enough) and blocked every commit in the repo
+        # until this line, itself years-old code nobody had committed past
+        # locally since check-secrets.sh started scanning all tracked files.
+        # `this.` covers the observed case; `\$` (a shell/JS interpolation
+        # sigil) is excluded on the same reasoning pattern 9 already applies.
         if _report_secret_matches ERROR "$file" "Possible auth token" \
-               "$content" '(Authorization|Bearer|TOKEN):\s*(Bearer\s+)?[A-Za-z0-9._-]{20,}' 'xxx' ''; then
+               "$content" '(Authorization|Bearer|TOKEN):\s*(Bearer\s+)?[A-Za-z0-9._-]{20,}' 'xxx' ':\s*(this\.|\$)'; then
             errors=$((errors + 1))
         fi
 
