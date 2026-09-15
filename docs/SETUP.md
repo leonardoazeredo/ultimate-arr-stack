@@ -56,7 +56,7 @@ Decide how you'll access your media stack:
 - **VPN Subscription** - Any provider supported by [Gluetun](https://github.com/qdm12/gluetun-wiki/tree/main/setup/providers) (Surfshark, NordVPN, PIA, Mullvad, ProtonVPN, etc.)
 - **TorBox account** (~$3-10/month) - the debrid service that fetches torrents on its own servers; Decypharr pulls the finished file back over HTTPS. Setup: [TorBox (Decypharr)](#adding-more-services-core)
 - **Usenet Provider** (optional, ~$4-6/month) - Frugal Usenet, Newshosting, Eweka, etc.
-- **Usenet Indexer** (optional) - Usenet-Crawler (free, open registration) or NZBGeek (~$12/year).
+- **Usenet Indexer** (optional) - Usenet-Crawler (paid account) or NZBGeek (~$12/year).
   DrunkenSlug's registration is currently closed and NZBFinder's free tier has no working API
   access — see [Prowlarr setup](APP-CONFIG.md#45-prowlarr-indexer-manager) for details.
 
