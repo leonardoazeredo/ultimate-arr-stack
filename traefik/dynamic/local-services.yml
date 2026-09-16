@@ -86,6 +86,21 @@ http:
       middlewares: [security-headers]
       service: stremio-lan
 
+    # The Magnetio addon is a Stremio addon too, so it follows stremio-lan's
+    # reasoning above: no admin-auth on the -secure router, because the client
+    # is Stremio and cannot answer a Basic challenge. See that comment for why.
+    magnetio-lan:
+      rule: "Host(`magnetio.lan`)"
+      entryPoints: [web]
+      middlewares: [https-redirect]
+      service: magnetio-lan
+    magnetio-lan-secure:
+      rule: "Host(`magnetio.lan`)"
+      entryPoints: [websecure]
+      tls: {}
+      middlewares: [security-headers]
+      service: magnetio-lan
+
     # Legacy redirects (jellyseerr/jellyseer → seerr). Both entrypoints exist
     # so a direct https://jellyseerr.lan request (sniStrict requires a
     # matching cert SAN, see docs/HTTPS-LOCAL.md) still gets a clean redirect
@@ -176,6 +191,18 @@ http:
       tls: {}
       middlewares: [admin-auth@docker, security-headers]
       service: sabnzbd-lan
+
+    decypharr-lan:
+      rule: "Host(`decypharr.lan`)"
+      entryPoints: [web]
+      middlewares: [https-redirect]
+      service: decypharr-lan
+    decypharr-lan-secure:
+      rule: "Host(`decypharr.lan`)"
+      entryPoints: [websecure]
+      tls: {}
+      middlewares: [admin-auth@docker, security-headers]
+      service: decypharr-lan
 
     # === Infrastructure ===
     traefik-lan:
@@ -291,6 +318,11 @@ http:
         servers:
           - url: "http://172.20.0.17:60421"
 
+    magnetio-lan:
+      loadBalancer:
+        servers:
+          - url: "http://172.20.0.3:7000"
+
     # === *arr Stack ===
     # Sonarr/Radarr now run on the arr-core bridge with their own IPs
     # (no longer behind Gluetun). Prowlarr stays behind Gluetun (172.20.0.3).
@@ -319,6 +351,13 @@ http:
       loadBalancer:
         servers:
           - url: "http://172.20.0.3:8080"
+
+    # Decypharr is on the arr-core bridge with its own IP, not behind Gluetun
+    # (it only calls TorBox's HTTPS API) - see docs/REFERENCE.md.
+    decypharr-lan:
+      loadBalancer:
+        servers:
+          - url: "http://172.20.0.7:8282"
 
     # === Infrastructure ===
     pihole-lan:

@@ -99,13 +99,14 @@ The full walkthrough — directories on the host, app configuration, DNS, HTTPS,
 | Seerr | `NAS_IP:5055` | `https://seerr.lan` | yes, if exposed |
 | Sonarr / Radarr / Prowlarr / Bazarr | `NAS_IP:8989` / `:7878` / `:9696` / `:6767` | `https://sonarr.lan`, `https://radarr.lan`, `https://prowlarr.lan`, `https://bazarr.lan` | LAN only |
 | SABnzbd | `NAS_IP:8082` | `https://sabnzbd.lan` | LAN only |
-| Decypharr | `NAS_IP:8282` | — (no `.lan` name) | LAN only |
+| Decypharr | `NAS_IP:8282` | `https://decypharr.lan` | LAN only |
+| Magnetio add-on | `NAS_IP:7000` | `https://magnetio.lan` | LAN only |
 | Pi-hole admin | `NAS_IP:8081/admin` | `https://pihole.lan` | LAN only |
 | Uptime Kuma | `NAS_IP:3001` | `https://uptime.lan` | LAN only |
 | Traefik dashboard | — (reached through Traefik) | `https://traefik.lan` | LAN only |
 | Homepage / Beszel / duc / usenet-status | — (no published port; reached through Traefik) | `https://homepage.lan`, `https://beszel.lan`, `https://duc.lan`, `https://usenet.lan` | LAN only |
 
-The `.lan` names need the edge layer, and the `https` URLs need its auth middleware; Jellyfin and Seerr keep their own app-level login on top. The complete matrix, including which services are deliberately unpublished, is [docs/REFERENCE.md](docs/REFERENCE.md).
+The `.lan` names need the edge layer, and the `https` URLs need its auth middleware (`magnetio.lan` is the exception: its client is Stremio, which cannot answer an HTTP Basic challenge, so TLS is the whole gate). Jellyfin and Seerr keep their own app-level login on top. The complete matrix, including which services are deliberately unpublished, is [docs/REFERENCE.md](docs/REFERENCE.md).
 
 ## Common operations
 

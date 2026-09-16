@@ -3,10 +3,10 @@
 > Return to [Setup Guide](SETUP.md) · Requires [+ local DNS](LOCAL-DNS.md) already set up
 
 Adds basic-auth and HTTPS to every local-only `.lan` host: Sonarr, Radarr, Prowlarr, Bazarr,
-SABnzbd, Pi-hole, Uptime Kuma, duc, Beszel, usenet-status, the `traefik.lan` dashboard, and — since
-the Jellyfin/Seerr extension — Jellyfin and Seerr too. Most of those hosts have no auth of
-their own on the LAN, so this is their only gate. Jellyfin and
-Seerr already have real app-level auth of their own; the basicauth layer here is an intentional
+SABnzbd, Decypharr, Pi-hole, Uptime Kuma, duc, Beszel, usenet-status, the `traefik.lan`
+dashboard, and — since the Jellyfin/Seerr extension — Jellyfin and Seerr too. Most of those
+hosts have no auth of their own on the LAN, so this is their only gate. Jellyfin and Seerr
+already have real app-level auth of their own; the basicauth layer here is an intentional
 extra gate on top, applied uniformly with everything else in this tier — see the caveat below
 before relying on it for TV/mobile clients.
 
@@ -35,7 +35,8 @@ mkcert -install               # installs the CA into this machine's trust store
 mkcert -cert-file lan-admin.crt -key-file lan-admin.key \
   sonarr.lan radarr.lan prowlarr.lan bazarr.lan sabnzbd.lan \
   traefik.lan pihole.lan uptime.lan duc.lan beszel.lan jellyfin.lan seerr.lan \
-  jellyseerr.lan jellyseer.lan homepage.lan usenet.lan stremio.lan
+  jellyseerr.lan jellyseer.lan homepage.lan usenet.lan stremio.lan \
+  decypharr.lan magnetio.lan
 ```
 
 This creates two files (`lan-admin.crt`, `lan-admin.key`) signed by a CA whose private key never

@@ -22,7 +22,8 @@
 | Prowlarr | `NAS_IP:9696` | `https://prowlarr.lan`* | — |
 | Bazarr | `NAS_IP:6767` | `https://bazarr.lan`* | — |
 | SABnzbd | `NAS_IP:8082` | `https://sabnzbd.lan`* | — |
-| Decypharr | `NAS_IP:8282` | — | — |
+| Decypharr | `NAS_IP:8282` | `https://decypharr.lan`* | — |
+| Magnetio add-on | `NAS_IP:7000` | `https://magnetio.lan` | — |
 | Pi-hole | `NAS_IP:8081/admin` | `https://pihole.lan`* | — |
 | Traefik | — | `https://traefik.lan`* | — |
 | Uptime Kuma | `NAS_IP:3001` | `https://uptime.lan`* | — |
@@ -37,6 +38,8 @@
   [+ HTTPS + auth](HTTPS-LOCAL.md) setup and prompts for basic-auth (`http://` still works and
   redirects here automatically). Jellyfin/Seerr keep their own app-level login in addition to this
   gate — see that doc's client-compatibility caveat if a non-browser device stops connecting.
+  `magnetio.lan` has no `*`: it is served over HTTPS but without the basic-auth prompt, because
+  its client is Stremio, which cannot answer an HTTP Basic challenge.
 - **+ remote access** — Requires [Cloudflare Tunnel setup](REMOTE-ACCESS.md). Services marked "—" are LAN-only (not exposed to internet).
 
 ## Services & Network
