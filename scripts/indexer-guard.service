@@ -1,0 +1,34 @@
+[Unit]
+Description=Rotate the VPN exit IP when Prowlarr's indexers report a Cloudflare ban
+Documentation=file:/volume1/docker/arr-stack/scripts/indexer-guard.sh
+
+# scripts/indexer-guard.sh fetches Prowlarr's indexer-status and indexer
+# documents, asks scripts/lib/indexer_guard.py whether the failures in them are
+# evidence of an IP-level block, and rotates the VPN only when the answer is
+# yes. The overwhelmingly common elapse is one log line: no indexer is banned,
+# or the module's cooldown has not expired. It makes no docker call on that
+# path, so a timer every 15 minutes costs two local HTTP GETs and nothing else.
+
+# No EnvironmentFile, deliberately. PROWLARR_API_KEY is read out of .env by the
+# script itself, through lib/env-file.sh, which pulls out the one value it needs
+# rather than exporting every key in the file to this unit and every process it
+# spawns.
+
+[Service]
+Type=oneshot
+
+# The log directory is created inside ExecStart, in the same shell that opens
+# the redirect. An `ExecStartPre=/bin/mkdir` plus StandardOutput=append:<dir>
+# cannot work: systemd applies the unit's StandardOutput to every process it
+# spawns, ExecStartPre included, so mkdir dies with "Failed to set up standard
+# output: No such file or directory" before it can create the directory the
+# redirect points into. Observed as status=209/STDOUT on queue-cleanup.service.
+#
+# `exec` so the script is the process systemd tracks and its exit status is the
+# unit's. `>>` rather than systemd's append, for the same reason.
+#
+# A non-zero exit here is meaningful and should stay visible: the script fails
+# when gluetun cannot be left reporting running, when the stop request failed,
+# or when Prowlarr could not be restarted. The one outcome it never reports as
+# success is a tunnel left down.
+ExecStart=/bin/bash -c 'mkdir -p /volume1/docker/arr-stack/logs && exec /bin/bash /volume1/docker/arr-stack/scripts/indexer-guard.sh >> /volume1/docker/arr-stack/logs/indexer-guard.log 2>&1'
