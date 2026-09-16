@@ -103,7 +103,7 @@ The full walkthrough — directories on the host, app configuration, DNS, HTTPS,
 | Pi-hole admin | `NAS_IP:8081/admin` | `https://pihole.lan` | LAN only |
 | Uptime Kuma | `NAS_IP:3001` | `https://uptime.lan` | LAN only |
 | Traefik dashboard | — (reached through Traefik) | `https://traefik.lan` | LAN only |
-| Homepage / Beszel / duc | — (no published port; reached through Traefik) | `https://homepage.lan`, `https://beszel.lan`, `https://duc.lan` | LAN only |
+| Homepage / Beszel / duc / usenet-status | — (no published port; reached through Traefik) | `https://homepage.lan`, `https://beszel.lan`, `https://duc.lan`, `https://usenet.lan` | LAN only |
 
 The `.lan` names need the edge layer, and the `https` URLs need its auth middleware; Jellyfin and Seerr keep their own app-level login on top. The complete matrix, including which services are deliberately unpublished, is [docs/REFERENCE.md](docs/REFERENCE.md).
 

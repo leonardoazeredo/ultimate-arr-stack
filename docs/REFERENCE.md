@@ -29,6 +29,7 @@
 | duc | — | `https://duc.lan`* | — |
 | Beszel | — | `https://beszel.lan`* | — |
 | Homepage | — | `https://homepage.lan`* | — |
+| Usenet status | — | `https://usenet.lan`* | — |
 
 **Legend:**
 - **Core** — Always works on your LAN
@@ -87,6 +88,7 @@ natively on `arr-stack-router`, not on the NAS — see
 | DIUN | 172.20.0.16 | — | Image update notifier (no UI) |
 | Configarr | — | — | TRaSH Guides sync (one-shot, no UI) |
 | Homepage | 172.20.0.22 | 3000 | Unified dashboard |
+| Usenet status | 172.20.0.23 | 80 | Usenet blackhole download view (no host port; served through Traefik) |
 
 ### Service Connection Guide
 

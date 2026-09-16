@@ -47,6 +47,7 @@ check_domains() {
         "uptime.lan"
         "duc.lan"
         "beszel.lan"
+        "usenet.lan"
         "stremio.lan"
     )
 

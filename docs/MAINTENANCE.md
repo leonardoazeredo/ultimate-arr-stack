@@ -338,6 +338,63 @@ in the arr's queue to see.
 
 ---
 
+## Usenet Status Page (systemd timer, every 2 minutes)
+
+`scripts/usenet-blackhole-status.sh` renders the same state file as a
+self-contained HTML page, and `docker-compose.utilities.yml`'s `usenet-status`
+serves it at `https://usenet.lan` (Traefik's `usenet-lan` router, basic auth,
+no host port published; see [UTILITIES.md](UTILITIES.md#usenet-status-setup)).
+`scripts/usenet-status-render.timer` is what keeps the served file current.
+
+```bash
+# The served directory must exist before the container mounts it: `docker
+# compose up` creates a missing bind-mount source itself, as root, and this
+# user-level unit then cannot write into it. The unit creates it too, so this
+# line is only a belt-and-braces step for a first install.
+mkdir -p /volume1/docker/arr-stack/logs/usenet-status
+
+cp scripts/usenet-status-render.service scripts/usenet-status-render.timer ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now usenet-status-render.timer
+systemctl --user start usenet-status-render.service      # render now, and create the directory
+systemctl --user list-timers usenet-status-render.timer  # confirm it is armed
+
+docker compose -f docker-compose.utilities.yml up -d usenet-status
+```
+
+The unit creates the directory itself on every run, so a re-install never
+depends on the manual `mkdir` above, but the order in that block does matter:
+start the render once **before** the container, or the container's own
+root-owned copy of the directory wins and the render fails with a permission
+error from then on (`systemctl --user status usenet-status-render.service`
+shows it, and the fix is to remove the directory as root and render again).
+
+Two minutes, matching the blackhole timer: the page reports on what that timer
+is doing, so a faster refresh buys nothing and two minutes is the longest a
+just-grabbed release can be missing from it. A render reads two local files and
+writes a few KB, with no API call and no credential anywhere in the loop; the
+unit deliberately carries no `EnvironmentFile`.
+
+Deploying this needs the two live-NAS steps any new `.lan` host needs, neither
+of which is synced by `git pull`:
+
+```bash
+# 1. Pi-hole must answer for the name (see pihole/dnsmasq.d/02-local-dns.conf.example).
+#    Edit it on the NAS, then:
+docker restart pihole
+# 2. traefik/certs/lan-admin.crt must carry usenet.lan in its SAN list, or the
+#    -secure router fails the TLS handshake under sniStrict. Regenerate the
+#    cert with usenet.lan appended and redeploy it: see
+#    docs/HTTPS-LOCAL.md, "adding a new .lan admin host".
+```
+
+| Path | What it is |
+| --- | --- |
+| `logs/usenet-status/index.html` | the served page, generated; do not edit by hand |
+| `logs/usenet-status-render.log` | the render script's banner (its stdout is the document) |
+
+---
+
 ## Health Checks
 
 All services have Docker healthchecks. Check status:

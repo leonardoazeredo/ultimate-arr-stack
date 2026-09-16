@@ -76,14 +76,14 @@ test.describe('Admin-UI HTTPS tier', () => {
   // guards against: a stale/wrong cert deployed without this host in its
   // SAN list still completes a TLS handshake (mkcert leaf, just for the
   // wrong names) but wouldn't list `domain` under subjectaltname.
-  // The `.lan` hosts under test. homepage/duc/beszel are here specifically
-  // because they no longer publish a host port — Traefik's admin-auth is now
-  // the ONLY thing standing in front of them, so a middleware removed from
+  // The `.lan` hosts under test. homepage/duc/beszel/usenet.lan are here
+  // specifically because they never publish a host port; Traefik's admin-auth
+  // is the ONLY thing standing in front of them, so a middleware removed from
   // traefik/dynamic/local-services.yml would otherwise leave every test green
   // while the service went unauthenticated on the LAN. jellyfin.lan redirects
   // like the rest but is deliberately not auth-gated, so it appears only in
   // the redirect list and gets its own assertion below.
-  const ADMIN_TIER_HOSTS = ['sonarr.lan', 'jellyfin.lan', 'seerr.lan', 'homepage.lan', 'duc.lan', 'beszel.lan', 'stremio.lan'] as const;
+  const ADMIN_TIER_HOSTS = ['sonarr.lan', 'jellyfin.lan', 'seerr.lan', 'homepage.lan', 'duc.lan', 'beszel.lan', 'usenet.lan', 'stremio.lan'] as const;
   // Two of these are deliberately NOT behind admin-auth, for the same reason
   // and with different clients. Jellyfin's web client fires concurrent requests
   // that do not all carry a cached Basic Auth header (looping native prompts).

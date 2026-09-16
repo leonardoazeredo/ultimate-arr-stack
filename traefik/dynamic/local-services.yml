@@ -251,6 +251,22 @@ http:
       middlewares: [admin-auth@docker, security-headers]
       service: homepage-lan
 
+    # The usenet blackhole's live download view, served read-only by
+    # docker-compose.utilities.yml's usenet-status. It has no login of its own
+    # and no published host port, so admin-auth here is its only access
+    # control - same arrangement as duc and Beszel above.
+    usenet-lan:
+      rule: "Host(`usenet.lan`)"
+      entryPoints: [web]
+      middlewares: [https-redirect]
+      service: usenet-lan
+    usenet-lan-secure:
+      rule: "Host(`usenet.lan`)"
+      entryPoints: [websecure]
+      tls: {}
+      middlewares: [admin-auth@docker, security-headers]
+      service: usenet-lan
+
   middlewares:
     jellyseerr-redirect:
       redirectRegex:
@@ -330,3 +346,8 @@ http:
       loadBalancer:
         servers:
           - url: "http://172.20.0.22:3000"
+
+    usenet-lan:
+      loadBalancer:
+        servers:
+          - url: "http://172.20.0.23:80"
