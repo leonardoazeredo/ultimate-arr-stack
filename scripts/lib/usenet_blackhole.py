@@ -392,11 +392,28 @@ class TorBox:
 # How far back a history entry is allowed to be and still be the grab this
 # release came from.
 #
-# A week is generous for a submission-to-failure gap -- the test case that
-# prompted this ran the 24-hour timeout -- and bounded on purpose: the same
-# release name comes back from the indexer season after season, and an
-# unbounded search would happily match a grab from last year and fail it.
-HISTORY_WINDOW_DAYS = 7
+# Bounded on purpose: the same release name comes back from the indexer season
+# after season, and an unbounded search would happily match a grab from last
+# year and fail it.
+#
+# It only has to span the longest gap between a grab and its terminal failure,
+# which `--timeout-hours` already bounds at 24h -- the stall rule fires sooner,
+# at 4h. Two days is that bound with a day of margin.
+#
+# It was 7 days, chosen as "generous" against that same 24-hour bound, and
+# generous is what broke it: `/api/v3/history/since` over a week never returns
+# on this Sonarr. Measured 2026-09-17 against the live arr, curl --max-time 90:
+#
+#     1 day   10.4s   1.6 MB
+#     2 days  13.4s   2.2 MB
+#     4 days  13.1s   4.4 MB
+#     7 days  timeout, 0 bytes
+#
+# So every Sonarr report failed with "could not read history" while Radarr's
+# much smaller history resolved normally -- and Sonarr is where the backlog is,
+# 2,963 of those 3,006 missing episodes. A window the arr cannot serve resolves
+# nothing, however well it matches.
+HISTORY_WINDOW_DAYS = 2
 
 # How long a reported history id is remembered. This is the ledger that stops a
 # retry reporting the same grab twice; no reason for it to outlive the window
@@ -446,7 +463,22 @@ class ArrApi:
     none of it needs a socket.
     """
 
-    def __init__(self, timeout=30):
+    # How long one call to an arr may take.
+    #
+    # 60s, not 30s. These arrs answer `/api/v3/history/since` slowly and
+    # variably on this hardware: measured 2026-09-17 against the live Sonarr
+    # over a two-day window, the same call took 3.4s, 13.4s and 19.1s at
+    # different moments, and a 30s limit failed some of them. A read that times
+    # out is not a slower report, it is no report -- every release behind it
+    # comes back "could not read history" and the arr is never told, which is
+    # the retry storm this whole path exists to end.
+    #
+    # Safe to raise because the history body is fetched once per arr per pass
+    # (FailureReporter._history caches it) and passes cannot overlap: the unit
+    # is a oneshot behind a timer, and systemd will not start a second one
+    # while the first is active. Two arrs at the limit is 120s against a
+    # two-minute pass, and the timer simply waits.
+    def __init__(self, timeout=60):
         self.timeout = timeout
 
     def get_json(self, url):
@@ -513,12 +545,13 @@ class FailureReporter:
         self.now = now or datetime.now(timezone.utc)
         self.out = out
         self.dry_run = dry_run
-        # One history body per arr, not one per failure. `/history/since` over
-        # the 7-day window is thousands of rows (measured ~11,600 over three
-        # weeks on Sonarr) behind a 30s curl timeout, and resolve() runs once
-        # for every failure in the pass -- five failures re-downloaded it five
-        # times to answer the same question. A reporter is built once per pass
-        # in run(), so this cache lives for exactly one pass and no longer.
+        # One history body per arr, not one per failure. `/history/since` even
+        # over a two-day window is over a thousand rows on Sonarr, and a slow
+        # enough body to matter against ArrApi's timeout -- and resolve() runs
+        # once for every failure in the pass, so five failures would re-download
+        # it five times to answer the same question. A reporter is built once
+        # per pass in run(), so this cache lives for exactly one pass and no
+        # longer.
         # The None an unreachable arr returns is stored too: the answer cannot
         # change within the pass, and retrying it per failure would turn one
         # dead arr into one connection timeout per dead release.
