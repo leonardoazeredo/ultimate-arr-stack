@@ -313,6 +313,7 @@ old "14 tests" claim went stale.
 - `scripts/post-merge`
 - `scripts/pre-commit`
 - `scripts/sync-nas.sh`
+- `scripts/usenet-blackhole-status.sh`
 - `terraform/apply.sh`
 <!-- /NO-SWEEP-ORACLE -->
 
@@ -325,6 +326,11 @@ generated mutant could be scored against: its behaviour depends on a Go tree and
 a compiler, so a mutation sweep would report survivors that say nothing. The
 `TARGETS` list is for files whose oracle runs in this suite; this one's oracle
 runs in the build.
+
+`scripts/usenet-blackhole-status.sh` would buy nothing as a target: it is a thin
+read-only wrapper that execs `python3` on `scripts/lib/usenet_status.py`, so the
+behaviour a mutant could change lives in that module, which is swept and has its
+own pytest oracle.
 
 ## The stub harness, and why it has its own corpus entries
 

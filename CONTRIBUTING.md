@@ -327,6 +327,7 @@ scripts/
 ├── restart-stack.sh              # Restart a stack without ever using `down`
 ├── sync-nas.sh                   # Move the NAS deploy copy onto the local branch
 ├── usenet-blackhole.sh           # Move NZBs between the arrs and TorBox's API
+├── usenet-blackhole-status.sh    # Render the blackhole's state file as HTML or JSON
 ├── post-merge                    # Hook: push main, then sync the NAS to it
 ├── pre-commit                    # Main hook (symlinked from .git/hooks/)
 └── lib/
@@ -348,6 +349,7 @@ scripts/
     ├── fix_radarr_paths.py     # The Radarr fixer's logic, as an importable module
     ├── fix_sonarr_folders.py   # The Sonarr fixer's logic, as an importable module
     ├── usenet_blackhole.py     # The TorBox usenet watcher's logic, as an importable module
+    ├── usenet_status.py        # The read-only download view over that watcher's state
     └── queue_cleanup.py        # The queue cleaner's logic, as an importable module
 ```
 <!-- /SCRIPTS-TREE-ORACLE -->
