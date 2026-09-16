@@ -310,6 +310,7 @@ old "14 tests" claim went stale.
 - `scripts/backup-prune.sh`
 - `scripts/detect-credential-drift.sh`
 - `scripts/detect-vpn-zombies.sh`
+- `scripts/indexer-guard.sh`
 - `scripts/post-merge`
 - `scripts/pre-commit`
 - `scripts/sync-nas.sh`
@@ -331,6 +332,13 @@ runs in the build.
 read-only wrapper that execs `python3` on `scripts/lib/usenet_status.py`, so the
 behaviour a mutant could change lives in that module, which is swept and has its
 own pytest oracle.
+
+`scripts/indexer-guard.sh` is a thin wrapper whose decision logic all lives in
+`scripts/lib/indexer_guard.py`, which IS swept as a generated-mutation target.
+The lines left in the shell are a curl fetch, a `docker exec gluetun wget` PUT
+and a compose restart; tests/indexer-guard.bats drives all three through the
+stub harness, but the wrapper stays here because most of what a generator
+would perturb in it is argv and log text the stubs answer either way.
 
 ## The stub harness, and why it has its own corpus entries
 

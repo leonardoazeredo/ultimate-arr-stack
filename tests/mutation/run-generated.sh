@@ -98,9 +98,9 @@ TARGETS=(
   "scripts/fix-radarr-paths.sh:tests/fix-arr-paths.bats:^fix-"
   "scripts/fix-sonarr-folders.sh:tests/fix-arr-paths.bats:^fix-"
   # The Python halves of the fixers, the usenet watcher, the usenet status
-  # view, and the backlog search. universalmutator's own python.rules applies
-  # here, picked by extension in mutator.sh; the oracle is pytest, reached
-  # through the one bats test that runs it.
+  # view, the backlog search, and the indexer guard. universalmutator's own
+  # python.rules applies here, picked by extension in mutator.sh; the oracle is
+  # pytest, reached through the one bats test that runs it.
   #
   # The regex names a single test rather than the file's `^python: ` prefix,
   # which is the one place this table deliberately narrows instead of widening.
@@ -114,6 +114,7 @@ TARGETS=(
   "scripts/lib/usenet_blackhole.py:tests/python-suite.bats:^python: the extracted modules pass"
   "scripts/lib/backlog_search.py:tests/python-suite.bats:^python: the extracted modules pass"
   "scripts/lib/usenet_status.py:tests/python-suite.bats:^python: the extracted modules pass"
+  "scripts/lib/indexer_guard.py:tests/python-suite.bats:^python: the extracted modules pass"
   # The four duc files share one oracle because they are one protocol: the cgi
   # produces a request marker, the poller consumes it, scan.sh holds the lock
   # both of them branch on. A mutant in any of them is scored against all of it.

@@ -323,6 +323,7 @@ scripts/
 ├── ensure-tailscale-relay-port.sh # Re-apply node 1's relay-server-port pref
 ├── fix-radarr-paths.sh           # Fix Radarr paths after a TRaSH naming reorganize
 ├── fix-sonarr-folders.sh         # Fix Sonarr folder names against the folder format
+├── indexer-guard.sh              # Rotate the VPN exit IP when Prowlarr reports a Cloudflare ban
 ├── queue-cleanup.sh              # Remove stuck items from the Sonarr/Radarr queues
 ├── restart-stack.sh              # Restart a stack without ever using `down`
 ├── sync-nas.sh                   # Move the NAS deploy copy onto the local branch
@@ -348,6 +349,7 @@ scripts/
     ├── backlog_search.py       # The backlog sweeper's logic, as an importable module
     ├── fix_radarr_paths.py     # The Radarr fixer's logic, as an importable module
     ├── fix_sonarr_folders.py   # The Sonarr fixer's logic, as an importable module
+    ├── indexer_guard.py        # The indexer guard's decision logic, as an importable module
     ├── usenet_blackhole.py     # The TorBox usenet watcher's logic, as an importable module
     ├── usenet_status.py        # The read-only download view over that watcher's state
     └── queue_cleanup.py        # The queue cleaner's logic, as an importable module
