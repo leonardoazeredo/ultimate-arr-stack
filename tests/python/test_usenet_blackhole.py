@@ -2256,6 +2256,40 @@ def test_only_the_arrs_with_keys_are_asked():
     assert m.arr_services({}) == []
 
 
+def test_main_builds_arr_keys_in_the_shape_arr_services_reads(monkeypatch, tmp_path):
+    """The round trip the per-function tests above cannot see.
+
+    `main()` keyed this dict by display name ("Sonarr") while `arr_services()`
+    looks each one up by environment variable ("SONARR_API_KEY"). Every lookup
+    missed, so the list came back empty no matter how correct the keys were and
+    `--report-failures` reported nothing, ever. The tests above call
+    `arr_services()` directly with the shape it wants, so they passed
+    throughout: nothing exercised the half that was wrong.
+
+    Asserted by feeding main()'s own output to the function that consumes it,
+    rather than by comparing dict keys -- the point is that the two agree, not
+    that either has any particular shape.
+    """
+    captured = {}
+
+    def fake_run(*args, **kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(m, "run", fake_run)
+    monkeypatch.setenv("SONARR_API_KEY", "sonarr-key")
+    monkeypatch.setenv("RADARR_API_KEY", "radarr-key")
+
+    rc = m.main([
+        str(tmp_path), str(tmp_path), str(tmp_path),
+        str(tmp_path / "state.json"), str(tmp_path / "failed.log"),
+        "--apply", "--api-key", "torbox-key", "--report-failures",
+    ])
+    assert rc == 0
+    assert [s["name"] for s in m.arr_services(captured["arr_keys"])] == [
+        "Sonarr", "Radarr"]
+
+
 def test_the_arr_key_travels_in_the_curl_config_not_on_argv(monkeypatch):
     # Same rule as the TorBox key, and for the same reason: the blackhole runs
     # from systemd every two minutes, so an argv copy is a key on display twice
