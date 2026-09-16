@@ -22,10 +22,19 @@ set -euo pipefail
 #   ./scripts/usenet-blackhole-status.sh --json             # the same as JSON
 #   ./scripts/usenet-blackhole-status.sh --output /tmp/usenet.html
 #   ./scripts/usenet-blackhole-status.sh --state /tmp/state.json --json
+#   ./scripts/usenet-blackhole-status.sh --stall-hours 6    # match the watcher
 #
 # --json is for a script or a jq pipe. --html is one self-contained page with
 # its own inline style, so it renders from a file:// URL on the NAS with nothing
 # fetched from anywhere.
+#
+# --stall-hours (default 4) is the threshold behind the `stalled` badge, and it
+# has to be the value the watcher is running with. The watcher takes the same
+# flag (scripts/usenet-blackhole.sh --stall-hours N); leave this page on its
+# default while that timer runs on 6 and a job stalled five hours reads
+# "stalled" here while the watcher still considers it fine. Accepts the
+# `--stall-hours N` and `--stall-hours=N` forms; a value that is not a number
+# above zero is refused with exit 2 rather than passed to the module.
 #
 # The banner goes to stderr, not stdout, which is where this differs from its
 # siblings: stdout is the document here, and a banner line in front of a JSON
@@ -50,6 +59,9 @@ FAILED_LOG="$NAS_STACK_DIR/logs/usenet-blackhole-failed.log"
 # this by hand without arguments is asking to see what is downloading.
 FORMAT=html
 OUTPUT=""
+# The watcher's own default (scripts/usenet-blackhole.sh), so the page and a
+# watcher run with no --stall-hours keep answering the same question.
+STALL_HOURS=4
 # Tracked separately from OUTPUT, because an empty OUTPUT is also the normal
 # "write to stdout" state: `--output=` has to be an error, while no --output at
 # all must not be.
@@ -93,6 +105,15 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --failed-log=*) FAILED_LOG="${1#*=}" ;;
+    --stall-hours)
+      if [[ $# -lt 2 ]]; then
+        echo "ERROR: --stall-hours needs a number" >&2
+        exit 2
+      fi
+      STALL_HOURS="$2"
+      shift
+      ;;
+    --stall-hours=*) STALL_HOURS="${1#*=}" ;;
     --help|-h)
       # The header block at the top of this file, printed verbatim. A fixed
       # range rather than `sed -n '2,/^$/p'`, which BSD sed rejects -- the trap
@@ -100,9 +121,10 @@ while [[ $# -gt 0 ]]; do
       # last comment line: one line further and --help prints the SCRIPT_DIR
       # assignment below it, which is how this shipped in
       # scripts/usenet-blackhole.sh until a bats test started asserting on it.
-      # Line 38 is the `#` under the read-only warning; the range moves
-      # whenever a line is added to the header above.
-      sed -n '3,38p' "$0" | sed 's/^# \{0,1\}//'
+      # Line 47 is the `#` under the read-only warning; the range moves
+      # whenever a line is added to the header above. It was 3,38 until
+      # --stall-hours went in.
+      sed -n '3,47p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
@@ -131,6 +153,27 @@ if [[ -z "$FAILED_LOG" ]]; then
   exit 2
 fi
 
+# The same two checks scripts/usenet-blackhole.sh applies to its own
+# --stall-hours, copied rather than approximated: the page derives `stalled`
+# from this number, and a value the watcher would have refused must not reach
+# the view and quietly become the rule it disagrees by.
+case "$STALL_HOURS" in
+  ''|*[!0-9.]*|*.*.*)
+    echo "ERROR: --stall-hours must be a number, got '$STALL_HOURS'" >&2
+    exit 2
+    ;;
+esac
+
+# Zero is numeric and gets past the pattern above, and it is the one value that
+# turns the stall rule into "every job is stalled the moment its clock starts".
+# Negatives -- the "-" is not in the allowed set above -- are already refused
+# there. awk rather than a `case` for the float comparison, and not bc: bc is
+# not installed everywhere this runs.
+if ! awk -v hours="$STALL_HOURS" 'BEGIN { exit !(hours > 0) }'; then
+  echo "ERROR: --stall-hours must be greater than 0, got '$STALL_HOURS'" >&2
+  exit 2
+fi
+
 log() { echo "[usenet-blackhole-status] $1" >&2; }
 
 # A separate check rather than letting exec fail: `python3: command not found`
@@ -149,6 +192,7 @@ echo "Usenet Blackhole Status — $(date '+%Y-%m-%d %H:%M:%S')" >&2
 echo "Format: $FORMAT" >&2
 echo "State:  $STATE_PATH" >&2
 echo "Log:    $FAILED_LOG" >&2
+echo "Stall:  no progress for ${STALL_HOURS}h" >&2
 if [[ -n "$OUTPUT" ]]; then
   echo "Output: $OUTPUT" >&2
 else
@@ -156,17 +200,22 @@ else
 fi
 echo "========================================" >&2
 
-# The three arguments the module takes, in its own order. No credential is
-# among them and none is read: there is nothing here for /proc/<pid>/cmdline to
-# expose, which is the one thing this script gets for free by being read-only.
+# The three positional arguments the module takes, in its own order, plus the
+# stall threshold as its own flag -- the module pulls that out of argv wherever
+# it appears, so the positional order the module has always had is unchanged. No
+# credential is among them and none is read: there is nothing here for
+# /proc/<pid>/cmdline to expose, which is the one thing this script gets for
+# free by being read-only.
 #
 # exec, so python3 replaces this shell and its exit status is the script's --
 # `if ! python3 ...; then exit 1` would flatten "bad format" (2) and "crashed"
 # (1) into the same answer for whatever is calling this.
 if [[ -n "$OUTPUT" ]]; then
   exec python3 "${SCRIPT_DIR}/lib/usenet_status.py" \
-    "$FORMAT" "$STATE_PATH" "$FAILED_LOG" > "$OUTPUT"
+    "$FORMAT" "$STATE_PATH" "$FAILED_LOG" \
+    --stall-hours "$STALL_HOURS" > "$OUTPUT"
 fi
 
 exec python3 "${SCRIPT_DIR}/lib/usenet_status.py" \
-  "$FORMAT" "$STATE_PATH" "$FAILED_LOG"
+  "$FORMAT" "$STATE_PATH" "$FAILED_LOG" \
+  --stall-hours "$STALL_HOURS"

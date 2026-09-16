@@ -1,0 +1,39 @@
+[Unit]
+Description=Render the usenet blackhole status page that usenet.lan serves
+Documentation=file:/volume1/docker/arr-stack/scripts/usenet-blackhole-status.sh
+
+# scripts/usenet-blackhole-status.sh is the read-only half of the blackhole: it
+# reads the state file and failed log scripts/usenet-blackhole.sh writes and
+# renders them as one self-contained HTML page. nginx (the usenet-status
+# service in docker-compose.utilities.yml) serves that file at usenet.lan, so
+# what the LAN reads is the state file's own contents and never a second copy
+# of the data.
+#
+# No EnvironmentFile here, deliberately. The status script opens no credential
+# -- no TorBox call, no arr call, .env is never read -- so there is nothing for
+# this unit to hand it. scripts/usenet-blackhole.service does need
+# TORBOX_API_KEY; this one must not have it.
+
+[Service]
+Type=oneshot
+
+# The log directory and the served directory are created inside ExecStart, in
+# the same shell that opens the redirects. An `ExecStartPre=/bin/mkdir` plus
+# StandardOutput=append:<dir> cannot work: systemd applies the unit's
+# StandardOutput to every process it spawns, ExecStartPre included, so mkdir
+# dies with "Failed to set up standard output: No such file or directory"
+# before it can create the directory the redirect points into. Observed as
+# status=209/STDOUT on queue-cleanup.service.
+#
+# The served directory has to exist BEFORE the container starts, not merely
+# before the first render: `docker compose up` creates a missing bind-mount
+# source itself, as root, and this user-level unit then cannot write into it.
+# Run this service once before `up -d usenet-status` -- see
+# docs/MAINTENANCE.md.
+#
+# `exec` so the script is the process systemd tracks and its exit status is the
+# unit's. `>>` rather than systemd's append, for the same reason as the mkdir
+# above. --html is spelled out instead of relying on the default: this file
+# lands in a browser, and a future change to that default must not silently
+# turn the served page into JSON.
+ExecStart=/bin/bash -c 'mkdir -p /volume1/docker/arr-stack/logs/usenet-status && exec /bin/bash /volume1/docker/arr-stack/scripts/usenet-blackhole-status.sh --html --output /volume1/docker/arr-stack/logs/usenet-status/index.html >> /volume1/docker/arr-stack/logs/usenet-status-render.log 2>&1'

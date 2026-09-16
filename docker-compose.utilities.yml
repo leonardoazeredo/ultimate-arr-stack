@@ -367,6 +367,52 @@ services:
     restart: always
     logging: *default-logging
 
+  # ═══════════════════════════════════════════════════════════════════════════
+  # USENET-STATUS - Serves the usenet blackhole's live download view.
+  # Access: https://usenet.lan only (no host port published — see the note on ports below)
+  # The page is regenerated every 2 minutes: scripts/usenet-status-render.timer
+  # ═══════════════════════════════════════════════════════════════════════════
+  usenet-status:
+    # Patch-pinned like every other image in this repo, never a minor tag.
+    # 1.30 is nginx's stable branch (1.31 is mainline); alpine because this
+    # serves one static file and needs nothing else from the image.
+    image: nginx:1.30.5-alpine
+    container_name: usenet-status
+    <<: *default-security
+    cap_add:
+      - CHOWN           # Nginx chown on startup
+      - DAC_OVERRIDE    # Write to root-owned directories
+      - SETGID          # Nginx master drops workers to nginx (gid)
+      - SETUID          # Nginx master drops workers to nginx (uid)
+    restart: always
+    # No published port: reached via Traefik at usenet.lan (usenet-lan =>
+    # http://172.20.0.23:80) with basic auth. A publish here would hand the
+    # same page to the whole LAN unauthenticated and bypass that gate, the
+    # mistake homepage, duc and Beszel each had to have removed.
+    networks:
+      arr-core:
+        # .23 continues the utilities row (.20 is reportedly reserved for
+        # Baserow, .21 is docker-socket-proxy, .22 homepage) and sits well
+        # below the .128+ half Docker allocates from.
+        ipv4_address: 172.20.0.23
+    volumes:
+      # Read-only, and the directory holds exactly one file: the page
+      # scripts/usenet-status-render.service writes there. The state file and
+      # failed log it is rendered from stay one level up in logs/, outside
+      # this mount, so the container can never read them.
+      - ./logs/usenet-status:/usr/share/nginx/html:ro
+    environment:
+      - TZ=${TZ}
+    logging: *default-logging
+    healthcheck:
+      # Unhealthy until the render timer has written the first page, which is
+      # the honest answer for an empty directory: nginx 403s a directory with
+      # no index.html, and wget exits non-zero on that.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
   # ═══════════════════════════════════════════════════════════════════════════
   # BESZEL - Lightweight server monitoring with historical data and alerts.

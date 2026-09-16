@@ -15,6 +15,7 @@ docker compose -f docker-compose.utilities.yml up -d
 | **Uptime Kuma** | Service monitoring dashboard | http://uptime.lan |
 | **Beszel** | System metrics (CPU, RAM, disk, containers) | http://beszel.lan |
 | **duc** | Disk usage analyzer (treemap UI) | http://duc.lan |
+| **Usenet status** | What the usenet blackhole is downloading right now | http://usenet.lan |
 | **Configarr** | Syncs TRaSH Guides quality profiles to Sonarr/Radarr | Run manually |
 
 > **Want Docker log viewing?** [Dozzle](https://dozzle.dev/) is a lightweight web UI for viewing container logs in real-time. Not included in the stack, but easy to add if you want it.
@@ -125,6 +126,29 @@ BESZEL_KEY=ssh-ed25519 AAAA...your-key-here
 ```bash
 docker compose -f docker-compose.utilities.yml up -d beszel-agent
 ```
+
+## Usenet Status Setup
+
+A live view of the usenet blackhole: which releases are in flight, how far each
+one has got, which are stalled, and the tail of the failure log. It renders the
+same state file `scripts/usenet-blackhole.sh` writes, so it can only ever show
+what the blackhole itself recorded. The render timer is documented in
+[MAINTENANCE.md](MAINTENANCE.md#usenet-status-page-systemd-timer-every-2-minutes)
+along with its install steps.
+
+**First access**: open https://usenet.lan. The page publishes no host port, and
+Traefik's basic auth is its only access control, so there is no `NAS_IP:port`
+fallback (same arrangement as homepage and duc).
+
+```bash
+docker compose -f docker-compose.utilities.yml up -d usenet-status
+```
+
+The container does nothing else: it mounts `logs/usenet-status/` read-only and
+serves the `index.html` in it. If that page 404s or the container reports
+unhealthy, the render timer has not written one yet. Check
+`systemctl --user status usenet-status-render.service`, or run
+`./scripts/usenet-blackhole-status.sh` by hand to see what it would render.
 
 ## Configarr Setup
 

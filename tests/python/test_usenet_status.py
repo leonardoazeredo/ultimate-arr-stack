@@ -601,3 +601,114 @@ def test_a_trailing_z_timestamp_parses():
 
 def test_a_naive_timestamp_is_read_as_utc():
     assert m.parse_time("2026-09-15T21:01:04").utcoffset() == timedelta(0)
+
+
+# --- the stall threshold on the command line --------------------------------
+#
+# The watcher takes --stall-hours and is run on a timer, so its value is not
+# always the default. The view derives `stalled` from the same threshold and has
+# to be able to hold the watcher's number: a hardcoded 4 here called a job
+# stalled at five hours while a `--stall-hours 6` watcher still considered it
+# fine.
+
+
+def test_the_default_stall_threshold_is_the_watchers_four_hours():
+    # The number scripts/usenet-blackhole.sh defaults to. If this moved, every
+    # page rendered without --stall-hours would disagree with every watcher run
+    # without it.
+    assert m.STALL_HOURS == 4.0
+
+
+def test_a_custom_threshold_changes_which_jobs_are_stalled():
+    # The finding this closes, at the pure-function level: five hours of no
+    # progress is a stall to the default and is not one to a six-hour watcher.
+    job = a_job(progress_changed_at=at(5))
+    assert m.job_status(job, NOW) == "stalled"
+    assert m.job_status(job, NOW, stall_hours=6.0) == "downloading"
+
+
+def test_main_passes_a_custom_threshold_through_to_the_view(tmp_path, capsys):
+    # 100000 hours rather than the watcher's 6: main() reads the real clock
+    # while these fixture timestamps are anchored at the fixed NOW, so only a
+    # threshold no elapsed time can reach keeps this independent of when it
+    # runs. The pure job_status test above is where 6 versus 5 is asserted.
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps(
+        state_with({"k": a_job(progress_changed_at=at(5))})))
+
+    assert m.main(["usenet_status.py", "json", str(path),
+                   str(tmp_path / "nope.log"), "--stall-hours", "100000"]) == 0
+    view = json.loads(capsys.readouterr().out)
+    assert view["stall_hours"] == 100000.0
+    assert view["jobs"][0]["status"] == "downloading"
+    assert view["totals"]["stalled"] == 0
+
+
+def test_main_still_stalls_that_job_without_the_flag(tmp_path, capsys):
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps(
+        state_with({"k": a_job(progress_changed_at=at(5))})))
+
+    assert m.main(["usenet_status.py", "json", str(path)]) == 0
+    view = json.loads(capsys.readouterr().out)
+    assert view["stall_hours"] == 4.0
+    # at(5) is five hours before the fixture's NOW, so it is more than four
+    # hours in the past whenever this runs: the default rule sees a stall.
+    assert view["jobs"][0]["status"] == "stalled"
+    assert view["totals"]["stalled"] == 1
+
+
+def test_the_positional_order_survives_the_flag_in_front(tmp_path, capsys):
+    # `usenet_status.py <format> [state-path] [failed-log-path]` is the contract
+    # the wrapper and a hand-run rely on. The flag is pulled out of argv wherever
+    # it appears, so it must not become a positional itself.
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps(state_with({"k": a_job()})))
+    log = tmp_path / "failed.log"
+    log.write_text("2026-09-15T21:00:00Z\tsome.release\twont import\n")
+
+    assert m.main(["usenet_status.py", "--stall-hours=6", "json", str(path),
+                   str(log)]) == 0
+    view = json.loads(capsys.readouterr().out)
+    assert view["sources"] == {"state": str(path), "failed_log": str(log)}
+    assert view["failures"][0]["name"] == "some.release"
+
+
+@pytest.mark.parametrize("value", ["0", "abc", "-1", "1.2.3", "nan", "inf"])
+def test_main_refuses_a_stall_threshold_that_is_not_above_zero(
+        value, tmp_path, capsys):
+    assert m.main(["usenet_status.py", "json", str(tmp_path / "state.json"),
+                   str(tmp_path / "l"), "--stall-hours", value]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "greater than 0" in captured.err
+    assert repr(value) in captured.err
+
+
+def test_main_refuses_an_empty_stall_threshold(tmp_path, capsys):
+    # The `--stall-hours=` form with nothing after the `=`, which is the shape
+    # the wrapper's own empty-value guard exists for.
+    assert m.main(["usenet_status.py", "json", str(tmp_path / "state.json"),
+                   "--stall-hours="]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "greater than 0" in captured.err
+
+
+def test_main_refuses_a_trailing_stall_hours_flag(tmp_path, capsys):
+    # Left as the last argument, the flag would otherwise be dropped and the
+    # default silently used -- the one wrong answer that looks like a good run.
+    assert m.main(["usenet_status.py", "json", str(tmp_path / "s.json"),
+                   "--stall-hours"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "--stall-hours needs a number" in captured.err
+
+
+def test_positive_hours_takes_a_decimal_and_refuses_everything_else():
+    assert m.positive_hours("6") == 6.0
+    assert m.positive_hours("0.5") == 0.5
+    # nan and inf parse as floats and compare false against a job's age, so
+    # they read as "no job is ever stalled"; "" and None are not numbers at all.
+    for value in ("0", "-1", "abc", "", "nan", "inf", None):
+        assert m.positive_hours(value) is None

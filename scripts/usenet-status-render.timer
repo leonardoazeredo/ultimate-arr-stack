@@ -1,0 +1,24 @@
+[Unit]
+Description=Refresh the usenet blackhole status page, every 2 minutes
+
+[Timer]
+# Monotonic timers only, and deliberately not OnBootSec.
+#
+# Same trap queue-cleanup.timer was caught by and usenet-blackhole.timer
+# documents: OnBootSec measures from the last boot, and on a NAS that has been
+# up for weeks that is always in the past, so `enable --now` would start a
+# render in the same second the schedule was registered. OnActiveSec measures
+# from activation, so it is the stated delay on a fresh enable and on a timer
+# restart alike.
+OnActiveSec=2min
+OnUnitActiveSec=2min
+Unit=usenet-status-render.service
+
+# Two minutes, matching usenet-blackhole.timer: this page reports on what that
+# timer is doing, so refreshing faster than the thing it describes buys
+# nothing, and two minutes is the longest a just-grabbed release can be missing
+# from the page. A render reads two local files and writes a few KB, with no
+# API call and no credential anywhere in the loop.
+
+[Install]
+WantedBy=timers.target

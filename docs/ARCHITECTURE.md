@@ -112,6 +112,7 @@ arr-core network (172.20.0.0/24)
 │ 172.20.0.17  │ stremio-jellyfin │ Stremio addon for local Jellyfin library   │ Optional │
 │ 172.20.0.21  │ docker-socket-proxy │ Scoped Docker API access               │ Optional │
 │ 172.20.0.22  │ Homepage     │ Unified dashboard              │ Optional         │
+│ 172.20.0.23  │ usenet-status│ Usenet blackhole download view │ Optional         │
 │ 172.20.0.18, .19 │ (freed)  │ Formerly magnetio-scraper/-redis - see magnetio-net below, not reused │ -    │
 ───────────────────────────────────────────────────────────────────────────────────
 

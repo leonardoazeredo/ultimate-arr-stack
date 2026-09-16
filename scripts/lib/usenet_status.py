@@ -27,9 +27,13 @@ minutes) -- that is the price of a view that cannot disturb the downloads it is
 describing.
 
 The derived status is a display word, not a verdict. `stalled` means the same
-thing poll() means by it -- no progress for longer than STALL_HOURS -- but
-nothing is failed or deleted on the strength of this page. The next pass
-decides, and this only shows what it will be deciding about.
+thing poll() means by it -- no progress for longer than the stall threshold,
+four hours by default and settable with --stall-hours -- but nothing is failed
+or deleted on the strength of this page. The next pass decides, and this only
+shows what it will be deciding about. The threshold has to be the one the
+watcher was last run with: a view holding a different value would call a job
+stalled while the watcher still considered it fine, which is the disagreement
+--stall-hours exists to close.
 
 Every field on a job is optional except its key. `complete`, `download_state`
 and `pause_until` appear on some entries and not others, the file is written by
@@ -39,6 +43,13 @@ degrades to "unknown" or to no value at all, and never to a traceback.
 
 Usage:
   usenet_status.py <format:json|html> [state-path] [failed-log-path]
+      [--stall-hours N]
+
+--stall-hours (default 4) is the stall threshold `stalled` is derived from; it
+takes a number above zero, in the `--stall-hours N` and `--stall-hours=N`
+forms, and may appear before, between or after the positional arguments. Pass
+the same value the watcher runs with, or the page and the watcher will disagree
+about which jobs are stalled.
 """
 
 import html
@@ -52,12 +63,21 @@ from datetime import datetime, timezone
 # same question the writer answers ("is this job done, is it dead?"), and two
 # copies of that answer would drift the first time TorBox changes a state
 # string -- which has already happened once: the failure match is a PREFIX,
-# because TorBox never returns a bare "failed" (see usenet_blackhole.py).
+# because TorBox never returns a bare "failed" (see usenet_blackhole.py). The
+# stall threshold is the same argument by a different route: the watcher takes
+# it from its own command line, so this module takes it from its own
+# (--stall-hours) and defaults to the watcher's default.
 from usenet_blackhole import DONE_STATES, failure_reason
 
 # TorBox reports `progress` as a percentage, and `last_progress` in the state
 # file is that number copied verbatim. Nothing here rescales it: a view that
 # guessed at a 0-1 fraction would show "100%" for a job at one percent.
+#
+# The default stall threshold, and the same 4 hours scripts/usenet-blackhole.sh
+# defaults to. main() overrides it from --stall-hours, which is what keeps the
+# page agreeing with a watcher running on a different value: with the threshold
+# hardcoded, a job stalled 5 hours read "stalled" here while a `--stall-hours 6`
+# watcher still considered it fine.
 STALL_HOURS = 4.0
 
 # How many failure-log lines the view carries. The log is append-only and holds
@@ -528,6 +548,28 @@ def render_html(summary):
 RENDERERS = {"json": render_json, "html": render_html}
 
 
+def positive_hours(value):
+    """The stall threshold from argv, or None if it is not a usable one.
+
+    The same rule usenet_blackhole.positive_hours applies to the watcher's
+    --stall-hours, and for the same reason: zero is the one value that turns the
+    stall rule into "every job is stalled the moment its clock starts", so a
+    view run with it would paint the whole page stalled while the watcher went
+    on working. `not hours > 0` rather than `hours <= 0` so nan is refused too --
+    it parses as a float, compares false against everything, and would read as a
+    threshold no job ever crosses. Non-finite values are refused outright: inf
+    is the same "never stalled" answer, and either one re-serialises into JSON
+    (in `stall_hours`) that most parsers reject.
+    """
+    try:
+        hours = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(hours) or not hours > 0:
+        return None
+    return hours
+
+
 def main(argv):
     """Render one view and print it. Returns the process exit status.
 
@@ -535,22 +577,54 @@ def main(argv):
     backlog_search.py and the shell wrappers here follow; a missing state file
     is not an error, because an empty state file and no state file are the same
     fact about the downloads.
+
+    --stall-hours is pulled out of argv wherever it appears, so the positional
+    order this module has always had -- format, state path, failed-log path --
+    keeps working unchanged, with or without the flag.
     """
-    if len(argv) < 2:
+    positionals = []
+    stall_hours = STALL_HOURS
+    index = 0
+    while index < len(argv) - 1:
+        arg = argv[1 + index]
+        if arg == "--stall-hours" or arg.startswith("--stall-hours="):
+            if arg == "--stall-hours":
+                if 2 + index >= len(argv):
+                    print("--stall-hours needs a number", file=sys.stderr)
+                    return 2
+                raw = argv[2 + index]
+                index += 1
+            else:
+                raw = arg.split("=", 1)[1]
+            parsed = positive_hours(raw)
+            if parsed is None:
+                print(f"--stall-hours must be a number greater than 0, "
+                      f"got {raw!r}", file=sys.stderr)
+                return 2
+            stall_hours = parsed
+        else:
+            positionals.append(arg)
+        index += 1
+
+    if not positionals:
         print(__doc__, file=sys.stderr)
         return 2
 
-    fmt = argv[1].strip().lower()
+    fmt = positionals[0].strip().lower()
     if fmt not in RENDERERS:
-        print(f"format must be json or html, got {argv[1]!r}", file=sys.stderr)
+        print(f"format must be json or html, got {positionals[0]!r}",
+              file=sys.stderr)
         return 2
 
-    state_path = argv[2] if len(argv) > 2 and argv[2] else DEFAULT_STATE_PATH
-    failed_log = argv[3] if len(argv) > 3 and argv[3] else DEFAULT_FAILED_LOG
+    state_path = positionals[1] if len(positionals) > 1 and positionals[1] \
+        else DEFAULT_STATE_PATH
+    failed_log = positionals[2] if len(positionals) > 2 and positionals[2] \
+        else DEFAULT_FAILED_LOG
 
     summary = summarize(
         load_state(state_path),
         datetime.now(timezone.utc),
+        stall_hours=stall_hours,
         failures=load_failures(failed_log),
     )
     # Which files produced this page. Added here rather than inside summarize,
