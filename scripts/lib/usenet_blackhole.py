@@ -1490,8 +1490,15 @@ def main(argv=None):
         print("ERROR: no API key (--api-key or TORBOX_API_KEY)", file=sys.stderr)
         return 2
 
-    arr_keys = {name: os.environ.get(env, "")
-                for name, _port, env in ARR_SERVICES}
+    # Keyed by the environment variable, not by the display name: that is what
+    # arr_services() looks up (`keys.get(env)`), and what every test of it
+    # passes. Keying by name here made arr_services() return [] for every
+    # input, so --report-failures never resolved a single service and the
+    # blackhole never told either arr a release had died. The tests missed it
+    # because they call arr_services() directly with the right shape and never
+    # exercise how main() builds it.
+    arr_keys = {env: os.environ.get(env, "")
+                for _name, _port, env in ARR_SERVICES}
 
     try:
         return run(
