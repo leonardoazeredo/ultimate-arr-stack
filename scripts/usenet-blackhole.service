@@ -22,5 +22,20 @@ EnvironmentFile=/volume1/docker/arr-stack/.env
 # redirect points into. Observed as status=209/STDOUT on queue-cleanup.service.
 #
 # `exec` so the script is the process systemd tracks and its exit status is the
-# unit's. `>>` rather than systemd's append, for the same reason.
-ExecStart=/bin/bash -c 'mkdir -p /volume1/docker/arr-stack/logs && exec /bin/bash /volume1/docker/arr-stack/scripts/usenet-blackhole.sh --apply >> /volume1/docker/arr-stack/logs/usenet-blackhole.log 2>&1'
+# unit's. `>>` rather than systemd's redirect, for the same reason.
+#
+# --report-failures is on here, and this file is where that decision lives. The
+# script ships it off and takes a flag, which is right for a rollout but wrong
+# as a resting state: nothing in a pass's output says reporting is off unless
+# you already know to look for the line, so a stack that lost the flag reads
+# exactly like one with nothing to report. That is how the retry storm survived
+# -- 2,963 missing episodes, the same dead releases grabbed seven times each,
+# and both arr queues empty because a blackhole item is never in one.
+#
+# Verified live on 2026-09-17 before this line went in: the pass reports
+# `failure reporting: ON (POST /api/v3/history/failed)`, resolves releases to
+# grabs in both arrs, and the ledger fills with `Radarr:267:torbox`-shaped
+# entries. Re-copying this unit is how it stays on; the installed copy under
+# ~/.config/systemd/user/ is a plain copy, not a symlink, so the two can drift
+# and nothing will say so.
+ExecStart=/bin/bash -c 'mkdir -p /volume1/docker/arr-stack/logs && exec /bin/bash /volume1/docker/arr-stack/scripts/usenet-blackhole.sh --apply --report-failures >> /volume1/docker/arr-stack/logs/usenet-blackhole.log 2>&1'
