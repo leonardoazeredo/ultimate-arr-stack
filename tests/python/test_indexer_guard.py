@@ -485,11 +485,191 @@ def test_every_branch_of_the_decision_explains_itself_in_one_line():
         m.should_rotate([a_blocked()], "garbage", NOW, 6.0),
         m.should_rotate([a_blocked(evidence=False)], None, NOW, 6.0),
         m.should_rotate([], None, NOW, 6.0),
+        m.should_rotate([a_blocked()], None, NOW, 6.0, EPOCH - 600),
+        m.should_rotate([a_blocked()], None, NOW, 6.0, EPOCH - (21600 - 600)),
     ]
     assert {rotate for rotate, _ in cases} == {True, False}
     for _rotate, reason in cases:
         assert reason.strip()
         assert "\n" not in reason
+
+
+# --- the rotator's schedule --------------------------------------------------
+#
+# The second actor on this tunnel, and the only reason this module knows a
+# clock other than its own. Everything here is in epoch seconds, because that
+# is what the shared file holds and what the wrapper passes: EPOCH is the
+# fixture NOW as a number.
+
+
+EPOCH = NOW.timestamp()
+
+
+def test_holds_when_the_rotator_fires_inside_the_window():
+    # Ten minutes until the rotator's own restart: rotating now would cycle the
+    # tunnel twice inside ten minutes, for one ban.
+    rotate, reason = m.should_rotate([a_blocked()], None, NOW, 6.0,
+                                     EPOCH - (21600 - 600))
+    assert rotate is False
+    assert "1337x" in reason
+    assert "10.0 minutes" in reason
+    assert reason.strip() and "\n" not in reason
+
+
+def test_holds_when_a_rotation_happened_inside_the_window():
+    # A rotation ten minutes ago. Prowlarr is still latched into the backoff it
+    # earned against the old IP, so its ban evidence says nothing about the new
+    # one yet.
+    rotate, reason = m.should_rotate([a_blocked()], None, NOW, 6.0, EPOCH - 600)
+    assert rotate is False
+    assert "1337x" in reason
+    assert "10.0 minutes ago" in reason
+    assert "re-probe" in reason
+    assert reason.strip() and "\n" not in reason
+
+
+def test_rotates_when_neither_rotator_window_applies():
+    # Two hours since the last rotation and four hours until the next: the
+    # rotator is at neither end of its schedule.
+    rotate, reason = m.should_rotate([a_blocked()], None, NOW, 6.0,
+                                     EPOCH - 7200)
+    assert rotate is True
+    assert "1337x" in reason
+    assert "rotator" not in reason
+
+
+def test_the_recent_window_is_inclusive_at_both_ends():
+    # Closed window: a rotation exactly on `now`, and one exactly the window
+    # old, both hold. One second beyond it does not -- by then Prowlarr has had
+    # its full chance to fail against the new IP.
+    assert m.should_rotate([a_blocked()], None, NOW, 6.0, EPOCH)[0] is False
+    assert m.should_rotate([a_blocked()], None, NOW, 6.0, EPOCH - 1800)[0] is False
+    assert m.should_rotate([a_blocked()], None, NOW, 6.0, EPOCH - 1801)[0] is True
+
+
+def test_the_imminent_window_is_inclusive_at_both_ends():
+    # The same two boundaries against the rotator's restart: exactly now, and
+    # exactly the window away.
+    interval = m.DEFAULT_ROTATOR_INTERVAL_SECONDS
+    assert m.should_rotate([a_blocked()], None, NOW, 6.0,
+                           EPOCH - interval)[0] is False
+    assert m.should_rotate([a_blocked()], None, NOW, 6.0,
+                           EPOCH - (interval - 1800))[0] is False
+    assert m.should_rotate([a_blocked()], None, NOW, 6.0,
+                           EPOCH - (interval - 1801))[0] is True
+
+
+def test_a_rotator_timestamp_outside_both_windows_changes_nothing():
+    # Present, readable, and irrelevant: the answer is the one the module gave
+    # before it knew the rotator existed.
+    assert m.should_rotate([a_blocked()], None, NOW, 6.0, EPOCH - 3 * 3600) == \
+        m.should_rotate([a_blocked()], None, NOW, 6.0, None)
+
+
+def test_a_stack_with_no_rotator_record_decides_exactly_as_before():
+    # rotator_last None is every stack whose shared file has not been written:
+    # the whole schedule half of the decision is skipped, so each of these is
+    # compared against the same call without the argument.
+    cases = [
+        ([a_blocked()], None),
+        ([a_blocked()], NOW - timedelta(hours=1)),
+        ([a_blocked()], NOW - timedelta(hours=7)),
+        ([a_blocked()], "garbage"),
+        ([a_blocked(evidence=False)], None),
+        ([], None),
+    ]
+    for blocked, last in cases:
+        assert m.should_rotate(blocked, last, NOW, 6.0, None) == \
+            m.should_rotate(blocked, last, NOW, 6.0)
+
+
+def test_the_rotator_timestamp_does_not_feed_the_cooldown():
+    # The cooldown is the guard's own: a rotation by the rotator five hours ago
+    # is not five hours of the guard's cooldown, and a guard rotation seven
+    # hours ago is still one that waited.
+    rotate, reason = m.should_rotate([a_blocked()], NOW - timedelta(hours=7),
+                                     NOW, 6.0, EPOCH - 5 * 3600)
+    assert rotate is True
+    assert "cooldown has expired" in reason
+
+
+def test_the_rotator_windows_do_not_override_the_cooldown():
+    # And the other direction: a rotator timestamp outside both windows does
+    # not make a rotation inside the guard's own cooldown allowed.
+    rotate, reason = m.should_rotate([a_blocked()], NOW - timedelta(hours=2),
+                                     NOW, 6.0, EPOCH - 5 * 3600)
+    assert rotate is False
+    assert "4.0h left" in reason
+    assert "re-probe" not in reason
+
+
+def test_the_cooldown_is_reported_before_the_rotator_windows():
+    # Both reasons to hold at once. The rotator's schedule is only consulted
+    # for a rotation the guard is otherwise clear to make, so the cooldown's
+    # own line is the one that comes back.
+    rotate, reason = m.should_rotate([a_blocked()], NOW - timedelta(hours=2),
+                                     NOW, 6.0, EPOCH - 600)
+    assert rotate is False
+    assert "cooldown" in reason
+    assert "re-probe" not in reason
+
+
+def test_rotator_hold_names_the_hold_and_the_minutes():
+    assert m.rotator_hold(EPOCH - 600, NOW) == (m.ROTATOR_RECENT, 10.0)
+    assert m.rotator_hold(EPOCH - (21600 - 600), NOW) == (m.ROTATOR_IMMINENT, 10.0)
+    assert m.rotator_hold(None, NOW) == (None, None)
+    assert m.rotator_hold(EPOCH - 7200, NOW) == (None, None)
+
+
+def test_a_digit_string_timestamp_is_read_as_epoch_seconds():
+    # The wrapper passes what it read out of the file through a variable, and
+    # the module accepts the same value as text.
+    assert m.rotator_hold(str(int(EPOCH)), NOW) == (m.ROTATOR_RECENT, 0.0)
+
+
+@pytest.mark.parametrize("value", [
+    None, "", "   ", "not a number", "12x", "1.5e9x", True, False, [], {}, object(),
+])
+def test_an_unusable_rotator_timestamp_is_no_known_rotation(value):
+    # The shared file's own contract, at the function: missing, empty and
+    # non-integer all mean "no known rotation", and each decides as None does.
+    assert m.rotator_hold(value, NOW) == (None, None)
+    assert m.should_rotate([a_blocked()], None, NOW, 6.0, value) == \
+        m.should_rotate([a_blocked()], None, NOW, 6.0, None)
+
+
+def test_the_window_is_configurable_in_minutes():
+    # Five minutes is a different question from thirty: the same rotation is
+    # recent under one window and not under the other.
+    assert m.should_rotate([a_blocked()], None, NOW, 6.0,
+                           EPOCH - 600, 21600, 30.0)[0] is False
+    assert m.should_rotate([a_blocked()], None, NOW, 6.0,
+                           EPOCH - 600, 21600, 5.0)[0] is True
+
+
+def test_the_interval_is_configurable_in_seconds():
+    # A three-hour interval puts the next restart somewhere else entirely: the
+    # same timestamp is ten minutes from a restart under 10800 and over three
+    # hours from one under the default.
+    last = EPOCH - (10800 - 600)
+    assert m.should_rotate([a_blocked()], None, NOW, 6.0,
+                           last, 10800, 30.0)[0] is False
+    assert m.should_rotate([a_blocked()], None, NOW, 6.0,
+                           last, 21600, 30.0)[0] is True
+
+
+@pytest.mark.parametrize("interval", [0, 0.0, -1, -0.5, float("nan"), float("inf")])
+def test_a_rotator_interval_that_is_not_above_zero_is_refused(interval):
+    # The cooldown's own refusal, applied to the interval it is compared with:
+    # an interval of zero would make every known rotation "imminent".
+    with pytest.raises(ValueError):
+        m.should_rotate([a_blocked()], None, NOW, 6.0, EPOCH - 600, interval)
+
+
+@pytest.mark.parametrize("window", [0, 0.0, -1, -0.5, float("nan"), float("inf")])
+def test_a_rotator_window_that_is_not_above_zero_is_refused(window):
+    with pytest.raises(ValueError):
+        m.should_rotate([a_blocked()], None, NOW, 6.0, EPOCH - 600, 21600, window)
 
 
 # --- the state file ----------------------------------------------------------
@@ -708,6 +888,151 @@ def test_main_now_pins_the_clock_the_decision_is_made_against(tmp_path, capsys):
     assert json.loads(capsys.readouterr().out)["rotate"] is True
 
 
+def test_main_plumbs_the_rotator_flags_through(tmp_path, capsys):
+    # The wrapper's whole half of the coordination: the value it read out of
+    # the shared file reaches the decision, and the document says which hold
+    # that produced. real_now() because main() reads the real clock.
+    statuses = write(tmp_path / "statuses.json",
+                     [live_status(message="Cloudflare error 1006")])
+    last = int(real_now().timestamp()) - 600
+
+    assert m.main(["--statuses", statuses,
+                   "--state", str(tmp_path / "state.json"),
+                   "--rotator-last", str(last),
+                   "--rotator-interval", "21600",
+                   "--rotator-window-minutes", "30", "--json"]) == 0
+
+    view = json.loads(capsys.readouterr().out)
+    assert view["rotate"] is False
+    assert view["rotator_hold"] == m.ROTATOR_RECENT
+    assert "re-probe" in view["reason"]
+    assert view["rotator_last"] == last
+    assert view["rotator_next"] == last + 21600
+    assert view["rotator_interval_seconds"] == 21600
+    assert view["rotator_window_minutes"] == 30.0
+
+
+def test_main_holds_for_the_rotators_own_restart(tmp_path, capsys):
+    # The other hold, through the same flags: a restart ten minutes away.
+    statuses = write(tmp_path / "statuses.json",
+                     [live_status(message="Cloudflare error 1006")])
+    last = int(real_now().timestamp()) - (21600 - 600)
+
+    assert m.main(["--statuses", statuses,
+                   "--state", str(tmp_path / "state.json"),
+                   "--rotator-last", str(last), "--json"]) == 0
+
+    view = json.loads(capsys.readouterr().out)
+    assert view["rotate"] is False
+    assert view["rotator_hold"] == m.ROTATOR_IMMINENT
+    assert "minutes" in view["reason"]
+    # The interval default is the compose file's, so the wrapper does not have
+    # to pass one for the hold to be the right one.
+    assert view["rotator_interval_seconds"] == m.DEFAULT_ROTATOR_INTERVAL_SECONDS
+
+
+def test_main_with_a_rotator_window_shorter_than_the_gap_still_rotates(tmp_path, capsys):
+    # The same timestamp with a five-minute window is outside it, and the
+    # guard rotates -- which is what makes the window a real input rather than
+    # a flag that is parsed and ignored.
+    statuses = write(tmp_path / "statuses.json",
+                     [live_status(message="Cloudflare error 1006")])
+    last = int(real_now().timestamp()) - 600
+
+    assert m.main(["--statuses", statuses,
+                   "--state", str(tmp_path / "state.json"),
+                   "--rotator-last", str(last),
+                   "--rotator-window-minutes", "5", "--json"]) == 0
+
+    view = json.loads(capsys.readouterr().out)
+    assert view["rotate"] is True
+    assert view["rotator_hold"] is None
+    assert view["rotator_window_minutes"] == 5.0
+
+
+def test_main_prints_a_rotator_hold_as_a_reason_line_too(tmp_path, capsys):
+    # The text renderer is the one the timer's log carries, and it has to say
+    # why the VPN did not move without the JSON around it.
+    statuses = write(tmp_path / "statuses.json",
+                     [live_status(message="Cloudflare error 1006")])
+    assert m.main(["--statuses", statuses,
+                   "--state", str(tmp_path / "state.json"),
+                   "--rotator-last", str(int(real_now().timestamp()) - 60)]) == 0
+
+    out = capsys.readouterr().out
+    assert out.startswith("hold: ")
+    assert "re-probe" in out
+    # No --indexers document, so the record's own id is the label.
+    assert "indexer 7 (id 7)" in out
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "abc", "", "nan", "inf", "1.5"])
+def test_main_exits_2_on_an_interval_that_is_not_a_positive_whole_number(value, tmp_path, capsys):
+    assert m.main(["--statuses", str(tmp_path / "s.json"),
+                   "--state", str(tmp_path / "state.json"),
+                   "--rotator-interval", value]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "--rotator-interval" in captured.err
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "abc", "", "nan", "inf"])
+def test_main_exits_2_on_a_window_that_is_not_above_zero(value, tmp_path, capsys):
+    assert m.main(["--statuses", str(tmp_path / "s.json"),
+                   "--state", str(tmp_path / "state.json"),
+                   "--rotator-window-minutes", value]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "--rotator-window-minutes" in captured.err
+
+
+@pytest.mark.parametrize("value", ["yesterday", "-1", "nan", "inf", "", "12x"])
+def test_main_exits_2_on_a_rotator_last_that_is_not_epoch_seconds(value, tmp_path, capsys):
+    # The wrapper omits the flag when the shared file is missing or unreadable,
+    # so anything that does reach here was meant and has to be a moment.
+    assert m.main(["--statuses", str(tmp_path / "s.json"),
+                   "--state", str(tmp_path / "state.json"),
+                   "--rotator-last", value]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "--rotator-last" in captured.err
+
+
+def test_positive_seconds_accepts_whole_seconds_above_zero():
+    assert m.positive_seconds("21600") == 21600
+    assert m.positive_seconds(300) == 300
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "abc", "", "nan", "inf", "1.5"])
+def test_positive_seconds_refuses_everything_that_is_not_a_positive_whole_number(value):
+    with pytest.raises(argparse.ArgumentTypeError):
+        m.positive_seconds(value)
+
+
+@pytest.mark.parametrize("value", ["30", "0.5", "1800"])
+def test_positive_minutes_accepts_a_number_above_zero(value):
+    assert m.positive_minutes(value) == float(value)
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "abc", "", "nan", "inf"])
+def test_positive_minutes_refuses_everything_that_is_not_above_zero(value):
+    with pytest.raises(argparse.ArgumentTypeError):
+        m.positive_minutes(value)
+
+
+def test_epoch_seconds_accepts_zero_and_a_real_moment():
+    # Zero is what a clock that was never set produces, and it decides the
+    # obvious way rather than stopping the guard.
+    assert m.epoch_seconds("0") == 0
+    assert m.epoch_seconds("1789509600") == 1789509600
+
+
+@pytest.mark.parametrize("value", ["-1", "abc", "", "nan", "inf", "12x"])
+def test_epoch_seconds_refuses_everything_that_is_not_epoch_seconds(value):
+    with pytest.raises(argparse.ArgumentTypeError):
+        m.epoch_seconds(value)
+
+
 def test_main_reads_the_statuses_document_from_stdin_by_default(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(sys, "stdin",
                         io.StringIO(json.dumps([live_status(message="Cloudflare error 1006")])))
@@ -757,7 +1082,16 @@ def test_the_json_decision_is_the_documented_shape(tmp_path, capsys):
 
     view = json.loads(capsys.readouterr().out)
     assert set(view) == {"decided_at", "rotate", "reason", "cooldown_hours",
-                         "last_rotation", "rotations", "blocked"}
+                         "last_rotation", "rotations", "rotator_last",
+                         "rotator_next", "rotator_interval_seconds",
+                         "rotator_window_minutes", "rotator_hold", "blocked"}
+    # With no --rotator-last there is nothing known about the rotator, and the
+    # document says so rather than inventing a schedule.
+    assert view["rotator_last"] is None
+    assert view["rotator_next"] is None
+    assert view["rotator_hold"] is None
+    assert view["rotator_interval_seconds"] == m.DEFAULT_ROTATOR_INTERVAL_SECONDS
+    assert view["rotator_window_minutes"] == m.DEFAULT_ROTATOR_WINDOW_MINUTES
     assert set(only(view["blocked"])) == {
         "indexer_id", "name", "status_id", "disabled_till", "hours_remaining",
         "initial_failure", "most_recent_failure", "ban_evidence",
