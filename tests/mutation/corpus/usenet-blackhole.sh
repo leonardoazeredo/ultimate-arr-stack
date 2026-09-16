@@ -168,6 +168,20 @@ mutation usenet-blackhole-any-500-stops-the-pass \
 # The defect these entries reintroduce is the dangerous direction: a loosened
 # match marks an unrelated grab failed, and the arr blocklists a release that
 # was fine.
+#
+# The first one below is the opposite direction, and the one that shipped: the
+# wiring between main() and arr_services() never matched, so the feature could
+# not report anything at all and no test noticed -- the per-function test calls
+# arr_services() directly with the shape it wants, so the half that was wrong
+# had no coverage. It sits first in this section because every other entry here
+# reintroduces a defect that some test already catches; this one did not.
+
+mutation usenet-blackhole-arr-keys-keyed-by-display-name \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "keys the dict by display name where arr_services() looks each one up by environment variable, so every lookup misses and the list is empty however correct the keys are. Reporting is then dead on arrival: the pass prints 'no SONARR_API_KEY or RADARR_API_KEY set' with both keys present and 32 characters long, and nothing else in the run notices, because a blackhole that reports nothing is indistinguishable from one with nothing to report. This is how it shipped -- --report-failures was switched on against the live NAS, resolved no services for three consecutive passes, and every dead release went on being grabbed again" \
+  --apply 'sed -i.bak "s@arr_keys = {env:@arr_keys = {name:@" "$F" && sed -i.bak "s@for _name, _port, env in ARR_SERVICES}@for name, _port, env in ARR_SERVICES}@" "$F" && rm -f "$F.bak"'
 
 mutation usenet-blackhole-title-match-not-exact \
   --file scripts/lib/usenet_blackhole.py \
