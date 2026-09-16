@@ -91,6 +91,10 @@ TARGETS=(
   "scripts/queue-cleanup.sh:tests/queue-cleanup.bats:^queue-cleanup: "
   "scripts/backlog-search.sh:tests/backlog-search.bats:^backlog-search: "
   "scripts/usenet-blackhole.sh:tests/usenet-blackhole.bats:^usenet-blackhole: "
+  # The rotator was an inline compose entrypoint until 2026-09-16, which is to
+  # say it had no oracle a generator could be scored against at all. It does
+  # now: tests/gluetun-rotator.bats sources the file and drives the poll.
+  "scripts/gluetun-rotator.sh:tests/gluetun-rotator.bats:^gluetun-rotator: "
   # Both fixers share tests/fix-arr-paths.bats and both anchor on `^fix-`
   # rather than on their own half of it, so the one cross-script test in that
   # file (neither reaches a destructive operation) is part of both oracles

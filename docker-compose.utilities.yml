@@ -228,36 +228,63 @@ services:
           done
 
   # ═══════════════════════════════════════════════════════════════════════════
-  # GLUETUN-ROTATOR - Periodically restarts gluetun so it re-picks a WireGuard
-  # exit server from VPN_COUNTRIES, instead of staying pinned to whatever
-  # server it first connected to. A plain `docker restart` (same container ID,
-  # not a recreate), so gluetun-recover's existing health_status watcher
-  # revives every "service:gluetun" dependent afterwards - no extra recovery
-  # logic needed here.
+  # GLUETUN-ROTATOR - Restarts gluetun so it re-picks a WireGuard exit server
+  # from VPN_COUNTRIES, instead of staying pinned to whatever server it first
+  # connected to. A plain `docker restart` (same container ID, not a recreate),
+  # so gluetun-recover's existing health_status watcher revives every
+  # "service:gluetun" dependent afterwards - no extra recovery logic needed
+  # here. The loop itself is scripts/gluetun-rotator.sh, mounted read-only
+  # below; everything about the schedule and the uid it runs as applies to that
+  # file.
+  #
+  # The schedule is shared with scripts/indexer-guard.sh, which rotates the
+  # same tunnel when Prowlarr reports a banned exit IP. Both actors write the
+  # moment of a rotation into logs/vpn-rotation/last-rotation - one
+  # epoch-seconds line, and only that subdirectory is mounted here - and this
+  # loop restarts gluetun once GLUETUN_ROTATE_INTERVAL_SECONDS have passed
+  # since it. A guard rotation therefore restarts this interval instead of
+  # being followed minutes later by a second tunnel cycle, and this service no
+  # longer restarts gluetun minutes after the guard already got a fresh IP. A
+  # missing or unreadable file starts the interval rather than rotating on the
+  # spot, which keeps the first restart a full interval after the container
+  # starts - the timing the fixed sleep had.
+  #
+  # Runs as ${PUID}:${PGID} because the shared file lives in a bind-mounted
+  # directory owned by the deploy user, and `cap_drop: ALL` leaves even this
+  # container's root without CAP_DAC_OVERRIDE, so root could not write it.
+  # Create the directory as that user before starting the service
+  # (mkdir -p logs/vpn-rotation): docker creates a missing bind-mount source
+  # as root, and the write would then fail for everyone. Reaching the Docker
+  # API needs no privilege either way - DOCKER_HOST is TCP through
+  # docker-socket-proxy, not a unix socket owned by root - so the docker CLI
+  # works as an ordinary uid.
   # ═══════════════════════════════════════════════════════════════════════════
   gluetun-rotator:
     image: docker:29.7-cli
     container_name: gluetun-rotator
     <<: *default-security
+    user: "${PUID}:${PGID}"
     depends_on:
       - docker-socket-proxy
     environment:
       - TZ=${TZ}
       - DOCKER_HOST=tcp://docker-socket-proxy:2375
       - GLUETUN_ROTATE_INTERVAL_SECONDS=${GLUETUN_ROTATE_INTERVAL_SECONDS:-21600}
+      - GLUETUN_ROTATE_CHECK_SECONDS=${GLUETUN_ROTATE_CHECK_SECONDS:-300}
+    volumes:
+      # The one file the two actors share, and nothing else from logs/ - the
+      # state files and logs the guard writes there stay out of this container.
+      - ./logs/vpn-rotation:/vpn-rotation
+      # Read-only: the loop itself, so it can be shellchecked and tested (see
+      # tests/gluetun-rotator.bats) instead of living in an inline entrypoint.
+      - ./scripts/gluetun-rotator.sh:/gluetun-rotator.sh:ro
     networks:
       - arr-core
     restart: always
     logging: *default-logging
     entrypoint:
       - /bin/sh
-      - -c
-      - |
-        while true; do
-          sleep "$$GLUETUN_ROTATE_INTERVAL_SECONDS"
-          echo "gluetun-rotator: restarting gluetun (interval=$${GLUETUN_ROTATE_INTERVAL_SECONDS}s) to rotate exit server"
-          docker restart gluetun || echo "gluetun-rotator: FAILED to restart gluetun"
-        done
+      - /gluetun-rotator.sh
 
   # ═══════════════════════════════════════════════════════════════════════════
   # UPTIME KUMA - Monitoring dashboard. Shows health of all your services.

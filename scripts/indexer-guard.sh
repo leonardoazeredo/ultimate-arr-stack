@@ -28,6 +28,15 @@ set -euo pipefail
 #     by a real read of the status, and the script will not exit 0 while
 #     gluetun does not report running.
 #
+# This guard is not the only thing that cycles the tunnel. gluetun-rotator
+# (docker-compose.utilities.yml) restarts gluetun on its own six-hour schedule,
+# so the two coordinate through logs/vpn-rotation/last-rotation: one
+# epoch-seconds line that either actor writes after it rotates. This script
+# reads it and passes it to the decision module, which holds when the rotator
+# is about to fire anyway or when a rotation just happened; after a rotation of
+# its own the script writes it, so the rotator's interval starts from that
+# moment instead of minutes earlier.
+#
 # Usage:
 #   ./scripts/indexer-guard.sh                     # decide, rotate if warranted
 #   ./scripts/indexer-guard.sh --dry-run           # decide and log, touch nothing
@@ -35,8 +44,8 @@ set -euo pipefail
 #   ./scripts/indexer-guard.sh --state /tmp/indexer-guard-state.json
 #
 # --dry-run stops after the decision: no PUT is sent, no container is restarted
-# and the state file is not written. It is how to watch the guard decide before
-# a timer is allowed to act on it.
+# and neither the state file nor the shared rotation timestamp is written. It
+# is how to watch the guard decide before a timer is allowed to act on it.
 #
 # --cooldown-hours is the minimum time between two rotations and defaults to
 # the module's own six hours. A banned IP stays banned, so two reconnects
@@ -84,6 +93,12 @@ PROWLARR_SERVICE="prowlarr"
 # directory and the module would resolve a relative one against whatever it got.
 STATE_PATH="$NAS_STACK_DIR/logs/indexer-guard-state.json"
 
+# The one file this guard and gluetun-rotator both write: a single epoch-seconds
+# line naming the most recent rotation by either actor. Only that subdirectory
+# is mounted into the rotator, and the guard writes it as the deploy user, so
+# the directory has to be one this user can create and write.
+ROTATOR_FILE="$NAS_STACK_DIR/logs/vpn-rotation/last-rotation"
+
 DRY_RUN=false
 # Empty means "not given": the module's default applies, and there is nothing
 # for this script to validate or pass through.
@@ -111,15 +126,16 @@ while [[ $# -gt 0 ]]; do
       ;;
     --state=*) STATE_PATH="${1#*=}" ;;
     --help|-h)
-      # The header block at the top of this file, printed verbatim. A fixed
-      # range rather than `sed -n '2,/^$/p'`, which BSD sed rejects -- the trap
-      # every sibling here documents, learned on macOS. It has to stop ON the
-      # last comment line: one line further and --help prints the SCRIPT_DIR
-      # assignment below it, which is how this shipped in
-      # scripts/usenet-blackhole.sh until a bats test started asserting on it.
-      # Line 60 is the `#` under the exit-status paragraph; the range moves
-      # whenever a line is added to the header above.
-      sed -n '3,60p' "$0" | sed 's/^# \{0,1\}//'
+      # The header block at the top of this file, printed verbatim: the first
+      # run of comment lines after the shebang, up to the first line that is
+      # not a comment. An awk range rather than a line range, because a fixed
+      # `sed -n '3,69p'` silently drops the tail of the help the moment anyone
+      # adds a line to the header -- and it has to stop ON the last comment
+      # line, or --help prints the SCRIPT_DIR assignment below it as if it were
+      # documentation. `sed -n '2,/^$/p'` is not the answer either: BSD sed
+      # rejects a range whose end is a regex combined with a start line.
+      awk 'NR == 1 { next } /^#/ { started = 1; sub(/^# ?/, ""); print; next }
+           started { exit }' "$0"
       exit 0
       ;;
     *)
@@ -190,6 +206,54 @@ if [[ -z "$PROWLARR_KEY" ]]; then
   exit 1
 fi
 
+# rotator_last_value: the shared rotation timestamp, if it is one at all.
+#
+# The file holds one epoch-seconds integer and either actor may have written
+# it. Missing, empty, unreadable, or anything that is not a run of digits means
+# there is no known rotation, and then this script passes nothing on: that is
+# the state of a stack whose rotator has not written the file yet, and the
+# module is the one place that decides what "no known rotation" means.
+rotator_last_value() {
+  local text
+  [[ -f "$ROTATOR_FILE" ]] || return 1
+  text="$(cat "$ROTATOR_FILE" 2>/dev/null)" || return 1
+  text="${text//[[:space:]]/}"
+  case "$text" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s' "$text"
+}
+
+# The rotator's two numbers: when either actor last rotated, and how long the
+# rotator's own interval is. Both go to the module together -- one without the
+# other cannot say when the next restart is due.
+ROTATOR_LAST="$(rotator_last_value || true)"
+ROTATOR_INTERVAL="$(env_value "$ENV_FILE" GLUETUN_ROTATE_INTERVAL_SECONDS || true)"
+
+# A value the module would refuse is treated as absent rather than passed on:
+# the module's own default (six hours, the compose file's default too) applies,
+# and a pass is not stopped over a typo in .env. Zero is in this set because
+# "rotate every pass" is the one interval that must never take effect quietly,
+# and it is every spelling of zero rather than the literal `0`: `00` used to
+# fall through an exact `0)` arm to argparse, whose refusal stopped the whole
+# pass.
+case "$ROTATOR_INTERVAL" in
+  ''|*[!0-9]*)
+    if [[ -n "$ROTATOR_INTERVAL" ]]; then
+      err "GLUETUN_ROTATE_INTERVAL_SECONDS='$ROTATOR_INTERVAL' in $ENV_FILE is not a whole number of seconds; using the module's default."
+    fi
+    ROTATOR_INTERVAL=""
+    ;;
+  # A non-zero digit somewhere makes it a real interval, so 0100 stays out of
+  # the zero arm below. The value reaching this point is all digits: the arm
+  # above took everything else.
+  *[!0]*) ;;
+  *)
+    err "GLUETUN_ROTATE_INTERVAL_SECONDS='$ROTATOR_INTERVAL' in $ENV_FILE is not an interval; using the module's default."
+    ROTATOR_INTERVAL=""
+    ;;
+esac
+
 # curl_quote <value>: a value escaped for a curl config file.
 #
 # curl reads a double-quoted config value literally, so a backslash or a quote
@@ -224,13 +288,21 @@ if ! prowlarr_get /api/v1/indexer "$INDEXER_FILE"; then
   exit 1
 fi
 
-# The module's arguments, with --cooldown-hours appended only when the operator
-# gave one. ${ARRAY[@]+"${ARRAY[@]}"} rather than a bare expansion: with `set -u`
-# an empty array is an unbound variable in bash before 4.4, and /bin/bash on
+# The module's arguments, with a flag appended only when there is a value for
+# it: --cooldown-hours when the operator gave one, and the two rotator numbers
+# when the shared file and .env between them have usable ones.
+# ${ARRAY[@]+"${ARRAY[@]}"} rather than a bare expansion: with `set -u` an
+# empty array is an unbound variable in bash before 4.4, and /bin/bash on
 # macOS is 3.2.
 MODULE_ARGS=()
 if [[ -n "$COOLDOWN_HOURS" ]]; then
   MODULE_ARGS+=(--cooldown-hours "$COOLDOWN_HOURS")
+fi
+if [[ -n "$ROTATOR_LAST" ]]; then
+  MODULE_ARGS+=(--rotator-last "$ROTATOR_LAST")
+fi
+if [[ -n "$ROTATOR_INTERVAL" ]]; then
+  MODULE_ARGS+=(--rotator-interval "$ROTATOR_INTERVAL")
 fi
 
 # The decision module reads both documents, consults the state file and prints
@@ -358,6 +430,36 @@ record_rotation() {
   python3 "$GUARD_MODULE" --state "$STATE_PATH" --record-rotation
 }
 
+# record_rotator_rotation: write this rotation into the file the rotator reads.
+#
+# The same epoch seconds the rotator writes, written the same way: a temporary
+# file in the same directory, then a rename over the target, so the rotator's
+# poll can never read half a number. The directory is created first, because a
+# missing one leaves the write nowhere to land.
+#
+# A failure here is logged and nothing else -- deliberately not part of
+# $FAILED. This is coordination, not the cooldown (that is the state file,
+# recorded just above), and its worst case is the rotator starting a fresh
+# interval from an absent timestamp: one redundant cycle six hours from now,
+# not a rotation that did not happen. The pass must not fail over it.
+record_rotator_rotation() {
+  local dir now tmp
+  dir="$(dirname "$ROTATOR_FILE")"
+  now="$(date +%s)"
+  if ! mkdir -p "$dir"; then
+    err "could not create $dir; the rotator's interval will not restart from this rotation."
+    return 0
+  fi
+  tmp="$ROTATOR_FILE.$$"
+  if printf '%s\n' "$now" > "$tmp" && mv "$tmp" "$ROTATOR_FILE"; then
+    log "recorded the rotation in $ROTATOR_FILE"
+  else
+    rm -f "$tmp"
+    err "could not write $ROTATOR_FILE; the rotator's interval will not restart from this rotation."
+  fi
+  return 0
+}
+
 FAILED=false
 STOPPED=false
 
@@ -398,6 +500,11 @@ if $STOPPED; then
     FAILED=true
     err "could not record the rotation in $STATE_PATH; the cooldown will not cover the next pass."
   fi
+  # The rotator's half of the same record, on the same condition and at the
+  # same point in the pass: the timestamp has to be there before anything
+  # below can fail, or the rotator's interval restarts from a moment that is
+  # already hours old.
+  record_rotator_rotation
 fi
 
 # The verification the incident asked for, and the reason it is a read rather

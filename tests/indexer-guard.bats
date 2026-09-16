@@ -33,6 +33,7 @@ setup() {
     SCRIPT="$STACK/scripts/indexer-guard.sh"
     ENV_FILE="$STACK/.env"
     STATE="$STACK/logs/indexer-guard-state.json"
+    ROTATOR_FILE="$STACK/logs/vpn-rotation/last-rotation"
 
     printf 'PROWLARR_API_KEY=test-key\n' > "$ENV_FILE"
 
@@ -104,13 +105,32 @@ esac'
 }
 
 @test "indexer-guard: --help stops at the comment block" {
-    # The fixed-range sed that prints this stops ON the last comment line; one
-    # line further and --help prints the SCRIPT_DIR assignment as if it were
-    # documentation. Anything that adds a line to the header has to move the
-    # range with it, and this is what says so.
+    # The block ends ON its last comment line; one line further and --help
+    # prints the SCRIPT_DIR assignment as if it were documentation.
     run "$SCRIPT" --help
     refute_output --partial "SCRIPT_DIR="
     refute_output --partial "NAS_STACK_DIR="
+}
+
+@test "indexer-guard: the help output ends on the header block's last line" {
+    # The range is derived here from the file's own shape -- the first run of
+    # comment lines after the shebang -- rather than from the awk that prints
+    # it, so this can fail. A range that stops one line short still prints
+    # plausible help text; the last line (and the count) is what says the whole
+    # block arrived.
+    local first last expected_last help_out
+    first="$(awk 'NR > 1 && /^#/ { print NR; exit }' "$SCRIPT")"
+    [ -n "$first" ] || fail "found no header comment block in $SCRIPT"
+    last="$(awk -v f="$first" 'NR > f && !/^#/ { print NR - 1; exit }' "$SCRIPT")"
+    [ -n "$last" ] || fail "the header comment block runs to the end of $SCRIPT"
+    expected_last="$(sed -n "${last}p" "$SCRIPT" | sed 's/^# \{0,1\}//')"
+
+    help_out="$BATS_TEST_TMPDIR/help.txt"
+    "$SCRIPT" --help > "$help_out" || fail "--help exited non-zero"
+    # Read from the file, not from $output: `run` strips the trailing newline,
+    # so an empty last line is invisible there.
+    [ "$(tail -1 "$help_out")" = "$expected_last" ]
+    [ "$(wc -l < "$help_out" | tr -d ' ')" -eq "$((last - first + 1))" ]
 }
 
 @test "indexer-guard: an unknown flag is refused with exit 2" {
@@ -233,4 +253,162 @@ esac'
     assert_success
     assert_output --partial "hold:"
     assert_output --partial "cooldown"
+}
+
+# --- the shared rotation timestamp ------------------------------------------
+#
+# The other half of the coordination: logs/vpn-rotation/last-rotation, the one
+# line gluetun-rotator reads and writes too. What the module does with the
+# value is covered in tests/python/test_indexer_guard.py; what is covered here
+# is the shell half -- that it reads the file, passes what it found, and writes
+# it at the right moment and only then.
+
+@test "indexer-guard: the shared file's timestamp reaches the decision" {
+    # A rotation ten minutes ago, which is inside the module's default window:
+    # the guard holds and the reason says why, which it can only do if the
+    # value in the file arrived.
+    mkdir -p "$(dirname "$ROTATOR_FILE")"
+    printf '%s\n' "$(( $(date +%s) - 600 ))" > "$ROTATOR_FILE"
+
+    run "$SCRIPT" --state "$STATE"
+    assert_success
+    assert_output --partial "hold:"
+    assert_output --partial "re-probe"
+    assert_stub_not_called docker ""
+    assert_nothing_forbidden
+}
+
+@test "indexer-guard: a timestamp the rotator is about to act on holds too" {
+    # The other hold: the rotator's own restart is ten minutes away, and a
+    # rotation now would cycle the tunnel twice inside those ten minutes.
+    mkdir -p "$(dirname "$ROTATOR_FILE")"
+    printf '%s\n' "$(( $(date +%s) - (21600 - 600) ))" > "$ROTATOR_FILE"
+
+    run "$SCRIPT" --state "$STATE"
+    assert_success
+    assert_output --partial "hold:"
+    assert_output --partial "restarts gluetun in"
+    assert_nothing_forbidden
+}
+
+@test "indexer-guard: the interval comes from GLUETUN_ROTATE_INTERVAL_SECONDS" {
+    # The same ten-minutes-to-restart timestamp under a three-hour interval.
+    # Under the module's six-hour default it would be more than three hours
+    # from a restart and the guard would rotate, so the hold is the .env value
+    # arriving rather than the default doing the work.
+    printf 'GLUETUN_ROTATE_INTERVAL_SECONDS=10800\n' >> "$ENV_FILE"
+    mkdir -p "$(dirname "$ROTATOR_FILE")"
+    printf '%s\n' "$(( $(date +%s) - (10800 - 600) ))" > "$ROTATOR_FILE"
+
+    run "$SCRIPT" --state "$STATE"
+    assert_success
+    assert_output --partial "hold:"
+    assert_output --partial "restarts gluetun in"
+    assert_nothing_forbidden
+}
+
+@test "indexer-guard: every all-zero interval spelling falls back to the default" {
+    # `00` is the same interval as `0` spelled differently, and an exact `0)`
+    # arm passed it through to argparse, whose refusal stopped the whole pass
+    # instead of falling back. The hold is what proves the fallback: this
+    # timestamp is ten minutes short of the rotator's restart under the
+    # module's six-hour default, and a value read as an interval would leave
+    # no rotator schedule for the guard to hold on.
+    local value
+    for value in 0 00 000; do
+        printf 'PROWLARR_API_KEY=test-key\nGLUETUN_ROTATE_INTERVAL_SECONDS=%s\n' "$value" > "$ENV_FILE"
+        mkdir -p "$(dirname "$ROTATOR_FILE")"
+        printf '%s\n' "$(( $(date +%s) - (21600 - 600) ))" > "$ROTATOR_FILE"
+        # The curl stub counts calls to tell the two fetches apart, so the
+        # counter starts over for each pass rather than serving the indexer
+        # document in place of the status one.
+        rm -f "$CURL_CALLS"
+
+        run "$SCRIPT" --state "$STATE"
+        assert_success
+        assert_output --partial "GLUETUN_ROTATE_INTERVAL_SECONDS='$value' in $ENV_FILE is not an interval"
+        assert_output --partial "hold:"
+        assert_output --partial "restarts gluetun in"
+        assert_nothing_forbidden
+    done
+}
+
+@test "indexer-guard: a missing shared file passes nothing to the module" {
+    # The normal state of a stack whose rotator has not written the file yet:
+    # the decision is the one the guard made before there was anything to
+    # coordinate with.
+    [ ! -e "$ROTATOR_FILE" ]
+
+    run "$SCRIPT" --dry-run --state "$STATE"
+    assert_success
+    assert_output --partial "rotate:"
+    refute_output --partial "re-probe"
+    refute_output --partial "restarts gluetun in"
+}
+
+@test "indexer-guard: a garbage shared file passes nothing to the module" {
+    # If this reached argparse, the module would exit 2 and the pass would stop
+    # rather than decide; the guard rotating is the proof that it did not.
+    mkdir -p "$(dirname "$ROTATOR_FILE")"
+    printf 'not-a-number\n' > "$ROTATOR_FILE"
+
+    run "$SCRIPT" --dry-run --state "$STATE"
+    assert_success
+    assert_output --partial "rotate:"
+    refute_output --partial "re-probe"
+}
+
+@test "indexer-guard: an empty shared file passes nothing to the module" {
+    mkdir -p "$(dirname "$ROTATOR_FILE")"
+    : > "$ROTATOR_FILE"
+
+    run "$SCRIPT" --dry-run --state "$STATE"
+    assert_success
+    assert_output --partial "rotate:"
+}
+
+@test "indexer-guard: a real rotation writes the shared timestamp" {
+    # It has to be written on the rotation path, next to the state file's own
+    # record, so the rotator's interval starts from this moment instead of the
+    # one it last knew about. The value is checked against the clock this test
+    # saw rather than merely "a number": a file written from a stale variable
+    # would be the same bug in a quieter form.
+    local start end written
+    start="$(date +%s)"
+    run "$SCRIPT" --state "$STATE"
+    end="$(date +%s)"
+
+    assert_failure  # the stubbed prowlarr restart is refused; the rotation itself happened
+    assert_output --partial "recorded the rotation in $ROTATOR_FILE"
+    [ -f "$ROTATOR_FILE" ]
+
+    written="$(cat "$ROTATOR_FILE")"
+    case "$written" in
+        ''|*[!0-9]*) fail "the shared timestamp is not an integer: '$written'" ;;
+    esac
+    [ "$written" -ge "$start" ]
+    [ "$written" -le "$end" ]
+
+    # Atomic means no temporary left beside it: a reader that finds one has
+    # found this script's leftovers, not a timestamp.
+    run bash -c "ls '$STACK/logs/vpn-rotation/'"
+    assert_output "last-rotation"
+}
+
+@test "indexer-guard: --dry-run writes no shared timestamp" {
+    run "$SCRIPT" --dry-run --state "$STATE"
+    assert_success
+    assert_output --partial "rotate:"
+    [ ! -e "$ROTATOR_FILE" ]
+}
+
+@test "indexer-guard: --dry-run leaves an existing shared timestamp alone" {
+    mkdir -p "$(dirname "$ROTATOR_FILE")"
+    printf '1700000000\n' > "$ROTATOR_FILE"
+
+    run "$SCRIPT" --dry-run --state "$STATE"
+    assert_success
+
+    run cat "$ROTATOR_FILE"
+    assert_output "1700000000"
 }

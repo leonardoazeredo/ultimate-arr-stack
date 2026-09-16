@@ -42,9 +42,35 @@ mode (--record-rotation), which the wrapper calls only after it has cycled the
 VPN: a module that could mark a rotation on the decision path would make the
 cooldown a lie.
 
+Coordinating with the rotator
+-----------------------------
+A second actor cycles this same tunnel. gluetun-rotator in
+docker-compose.utilities.yml restarts gluetun every
+GLUETUN_ROTATE_INTERVAL_SECONDS (six hours by default) to pick a new exit
+server, and it knows nothing about bans. Both actors write the moment of a
+rotation into one shared file, and the wrapper passes that value here as
+`rotator_last`. Without it, a guard rotation can land minutes before the
+rotator's own restart -- two tunnel cycles back to back -- or minutes after
+one, which rotates on ban evidence gathered through an IP that was already
+being replaced. So the guard holds when the rotator's restart is inside
+`rotator_window_minutes` (default 30), and holds again for that long after any
+rotation, because Prowlarr needs time to fail against the new IP before its
+ban evidence means anything.
+
+The guard's own cooldown is untouched by this: `rotator_last` never extends
+it, and the cooldown is still measured from the rotations this guard itself
+recorded. A missing, empty or non-integer `rotator_last` is "no known
+rotation", which decides exactly as this module did before the two actors knew
+about each other.
+
+Nothing here opens that file. The wrapper reads it, and passes the value in.
+
 Usage:
   indexer_guard.py [--statuses PATH|-] [--indexers PATH|-] [--state PATH]
-                   [--cooldown-hours N] [--now TIMESTAMP] [--json]
+                   [--cooldown-hours N] [--rotator-last EPOCH]
+                   [--rotator-interval SECONDS]
+                   [--rotator-window-minutes MINUTES]
+                   [--now TIMESTAMP] [--json]
   indexer_guard.py --state PATH --record-rotation [--now TIMESTAMP]
   indexer_guard.py --verdict PATH|-
 
@@ -60,6 +86,14 @@ blocked record is labelled `indexer 7` from its own id. --cooldown-hours takes
 a number above zero; zero is refused at the argument rather than read as "no
 cooldown", because a cooldown of zero is a rotation on every pass that has a
 failed indexer in it.
+
+--rotator-last is the epoch-seconds timestamp the wrapper read out of the file
+the two actors share; omit it and the rotator's schedule is not consulted at
+all, which is the behaviour of a stack that has not rotated through either
+actor yet. --rotator-interval is that service's own restart interval, and
+--rotator-window-minutes is how close either event has to be to count as
+"about to happen" or "just happened". Both are validated like the cooldown:
+zero and below are refused at the argument.
 
 --record-rotation writes a rotation into --state and exits; it is the mode the
 wrapper calls once the VPN has been cycled, and it is the only thing here that
@@ -115,7 +149,25 @@ BAN_PATTERNS = (
 # enough that a genuinely banned IP is not held for the rest of the day. It is
 # a *minimum*, not a schedule -- nothing rotates on a timer, and this only
 # decides whether a rotation that is otherwise justified may happen yet.
+#
+# It is measured from the guard's own recorded rotations and from nothing
+# else: the rotator's shared timestamp is not a second source for it.
 DEFAULT_COOLDOWN_HOURS = 6.0
+
+# The rotator's schedule, as the two actors agree on it. gluetun-rotator
+# restarts gluetun GLUETUN_ROTATE_INTERVAL_SECONDS after the last rotation
+# either actor recorded, and the guard holds while that restart is inside
+# DEFAULT_ROTATOR_WINDOW_MINUTES. Both defaults have to match the ones in
+# docker-compose.utilities.yml, or the hold describes a schedule that is not
+# the real one.
+DEFAULT_ROTATOR_INTERVAL_SECONDS = 21600
+DEFAULT_ROTATOR_WINDOW_MINUTES = 30.0
+
+# The two coordination holds, as the decision document names them: the
+# rotator's own restart is inside the window ("imminent"), or a rotation by
+# either actor is ("recent").
+ROTATOR_IMMINENT = "imminent"
+ROTATOR_RECENT = "recent"
 
 # Only a convenience for a hand-run from the stack root. The wrapper passes
 # absolute paths, because a timer has no meaningful working directory.
@@ -329,32 +381,144 @@ def last_rotation_time(value):
     return parse_time(value)
 
 
-def should_rotate(blocked, last_rotation, now, cooldown_hours=DEFAULT_COOLDOWN_HOURS):
-    """Whether to rotate the VPN, and a one-line reason either way.
+def _positive_float(value):
+    """`value` as a float above zero, or (None, the refusal to raise).
 
-    True needs both halves: at least one blocked indexer whose failure is ban
-    evidence, and a cooldown that has expired. Blocked indexers alone are not
-    enough -- a timeout is a slow indexer, not a banned IP -- and evidence
-    alone is not enough either, because a rotation five minutes after the last
-    one cannot produce a different IP that Cloudflare likes better.
+    The one positive-number rule in this module. _require_positive and
+    _positive_number are the two wrappers over it -- a ValueError for the
+    checks inside the decision, an argparse.ArgumentTypeError for the flags --
+    so their accept and reject sets cannot drift apart.
 
-    `last_rotation` is the state file's timestamp, as a datetime or as the
-    string it was stored as; None means this stack has never rotated, which
-    cannot be inside a cooldown. A value that is present but unreadable blocks
-    the rotation instead: the one irreversible action here must not be taken
-    because the record of the last one was garbled.
-
-    The boundary is inclusive (`elapsed >= cooldown_hours`): the cooldown is a
-    minimum time between rotations, and a rotation exactly on it is a rotation
-    that waited. cooldown_hours must be finite and above zero -- the CLI
-    refuses anything else at the argument with positive_hours, and a ValueError
-    here is the same refusal at the function, so a caller cannot pass 0 and
-    quietly get "every pass may rotate".
+    Zero is not "no limit" anywhere here: a window of zero holds on nothing at
+    all, a cooldown of zero rotates on every pass with a failed indexer in it,
+    and nan compares false against every elapsed time, so it would read as a
+    limit nothing ever reaches. A bool is not a number, for the same reason it
+    is not an id in _as_id.
     """
-    if not isinstance(cooldown_hours, (int, float)) or isinstance(cooldown_hours, bool) \
-            or not math.isfinite(cooldown_hours) or not cooldown_hours > 0:
-        raise ValueError(f"cooldown_hours must be a number above 0, "
-                         f"got {cooldown_hours!r}")
+    if isinstance(value, bool):
+        return None, f"not a number: {value!r}"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None, f"not a number: {value!r}"
+    if not math.isfinite(number) or not number > 0:
+        # `not number > 0`, not `number <= 0`, so nan is caught here too.
+        return None, f"must be a number greater than 0, got {value!r}"
+    return number, ""
+
+
+def _require_positive(value, label):
+    """`value` as a float above zero, or ValueError.
+
+    The refusal the cooldown has always had, now shared with the rotator
+    interval and window so all three refuse the same set -- _positive_float is
+    the rule itself.
+    """
+    number, _refusal = _positive_float(value)
+    if number is None:
+        raise ValueError(f"{label} must be a number above 0, got {value!r}")
+    return number
+
+
+def _epoch_seconds(value):
+    """`value` as epoch seconds, or None when it is not one.
+
+    A missing, empty, non-numeric or non-finite value means "no known
+    rotation" rather than an error: that is the state of a stack whose rotator
+    has not written the file yet, and it has to decide the same way this
+    module did before the two actors were coordinated. A numeric string is
+    read as the number it spells, a whole number comes back as an int so the
+    decision document reads 1789573153 rather than 1789573153.0, and a
+    fractional one comes back as a float.
+
+    A bool is not a number here for the same reason it is not an id in
+    _as_id.
+
+    A negative value is a number here: the shared file's reader has no bound
+    of its own, and epoch_seconds adds the one the --rotator-last flag needs.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+    elif isinstance(value, str) and value.strip():
+        try:
+            number = float(value.strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    if not math.isfinite(number):
+        return None
+    return int(number) if number.is_integer() else number
+
+
+def rotator_hold(rotator_last, now,
+                 rotator_interval_seconds=DEFAULT_ROTATOR_INTERVAL_SECONDS,
+                 rotator_window_minutes=DEFAULT_ROTATOR_WINDOW_MINUTES):
+    """Which coordination hold applies, and the minutes it is about.
+
+    Returns (kind, minutes): kind is ROTATOR_IMMINENT, ROTATOR_RECENT or
+    None, and minutes is the time until the rotator's restart or the time
+    since the rotation. Pure -- `now` is a parameter, like everywhere else
+    here -- and it reads no file: the wrapper hands over the value it read.
+
+    The rotator restarts gluetun `rotator_interval_seconds` after the last
+    rotation either actor recorded, so a restart inside the window is about to
+    cycle the tunnel anyway (imminent), and a rotation inside it is too fresh
+    for the ban evidence to mean much -- Prowlarr is still latched into a
+    backoff it earned on the old IP (recent). Both bounds are inclusive.
+
+    Only an event still ahead of, or behind, `now` holds: a rotator whose
+    restart moment has already passed is overdue rather than imminent, and
+    nothing here can tell when it will actually fire. `rotator_last` None --
+    no file, an empty one, a value that is not a number -- is no hold at all.
+    """
+    interval = _require_positive(rotator_interval_seconds,
+                                 "rotator_interval_seconds")
+    window = _require_positive(rotator_window_minutes,
+                               "rotator_window_minutes") * 60.0
+    last = _epoch_seconds(rotator_last)
+    if last is None:
+        return None, None
+    moment = _utc(now).timestamp()
+    remaining = (last + interval) - moment
+    if 0.0 <= remaining <= window:
+        return ROTATOR_IMMINENT, remaining / 60.0
+    elapsed = moment - last
+    if 0.0 <= elapsed <= window:
+        return ROTATOR_RECENT, elapsed / 60.0
+    return None, None
+
+
+def _rotator_reason(names, hold, minutes):
+    """The one-line reason for a coordination hold. Never called without one."""
+    if hold == ROTATOR_IMMINENT:
+        return (f"{names} show ban evidence but the rotator restarts gluetun "
+                f"in {minutes:.1f} minutes on its own schedule; not rotating")
+    return (f"{names} show ban evidence but the VPN rotated {minutes:.1f} "
+            f"minutes ago and Prowlarr needs time to re-probe from the new "
+            f"IP before its ban evidence can be trusted; not rotating")
+
+
+def _decide(blocked, last_rotation, now, cooldown_hours, rotator_last,
+            rotator_interval_seconds, rotator_window_minutes):
+    """should_rotate's whole answer plus which coordination hold applied.
+
+    (rotate, reason, hold), with hold one of the ROTATOR_* names or None. The
+    decision document reports the third element and the wrapper only needs the
+    first two, so one function decides both and the two renderers cannot
+    disagree.
+    """
+    cooldown_hours = _require_positive(cooldown_hours, "cooldown_hours")
+    hold, minutes = rotator_hold(rotator_last, now, rotator_interval_seconds,
+                                 rotator_window_minutes)
+
+    def rotating(reason):
+        """A rotation the guard is otherwise clear to make, or the hold."""
+        if hold is None:
+            return True, reason, None
+        return False, _rotator_reason(names, hold, minutes), hold
 
     now = _utc(now)
     rows = [row for row in blocked or () if isinstance(row, dict)]
@@ -364,30 +528,71 @@ def should_rotate(blocked, last_rotation, now, cooldown_hours=DEFAULT_COOLDOWN_H
     if not banned:
         if not rows:
             return False, ("no indexer is in backoff, so there is nothing to "
-                           "rotate for")
+                           "rotate for"), None
         names = ", ".join(row.get("name") or UNKNOWN_INDEXER for row in rows)
         return False, (f"{names} in backoff with no ban evidence (a timeout or "
-                       f"a plain error is not an IP ban); not rotating")
+                       f"a plain error is not an IP ban); not rotating"), None
 
     names = ", ".join(row.get("name") or UNKNOWN_INDEXER for row in banned)
     if last_rotation is None or (isinstance(last_rotation, str)
                                  and not last_rotation.strip()):
-        return True, (f"{names} show ban evidence and no rotation has been "
-                      f"recorded yet; rotating")
+        return rotating(f"{names} show ban evidence and no rotation has been "
+                        f"recorded yet; rotating")
 
     since = last_rotation_time(last_rotation)
     if since is None:
         return False, (f"{names} show ban evidence but the recorded last "
                        f"rotation ({last_rotation!r}) is not a timestamp, so "
-                       f"the {cooldown} cooldown cannot be checked; not rotating")
+                       f"the {cooldown} cooldown cannot be checked; not rotating"), None
 
     elapsed = (now - _utc(since)).total_seconds() / 3600.0
     if elapsed >= cooldown_hours:
-        return True, (f"{names} show ban evidence and the {cooldown} cooldown "
-                      f"has expired (last rotation {elapsed:.1f}h ago); rotating")
+        return rotating(f"{names} show ban evidence and the {cooldown} cooldown "
+                        f"has expired (last rotation {elapsed:.1f}h ago); rotating")
     return False, (f"{names} show ban evidence but the {cooldown} cooldown has "
                    f"{cooldown_hours - elapsed:.1f}h left (last rotation "
-                   f"{elapsed:.1f}h ago); not rotating")
+                   f"{elapsed:.1f}h ago); not rotating"), None
+
+
+def should_rotate(blocked, last_rotation, now, cooldown_hours=DEFAULT_COOLDOWN_HOURS,
+                  rotator_last=None,
+                  rotator_interval_seconds=DEFAULT_ROTATOR_INTERVAL_SECONDS,
+                  rotator_window_minutes=DEFAULT_ROTATOR_WINDOW_MINUTES):
+    """Whether to rotate the VPN, and a one-line reason either way.
+
+    True needs both halves: at least one blocked indexer whose failure is ban
+    evidence, and a cooldown that has expired. Blocked indexers alone are not
+    enough -- a timeout is a slow indexer, not a banned IP -- and evidence
+    alone is not enough either, because a rotation five minutes after the last
+    one cannot produce a different IP that Cloudflare likes better. On top of
+    those, the rotator's own schedule has to leave room: see rotator_hold.
+
+    `last_rotation` is the state file's timestamp, as a datetime or as the
+    string it was stored as; None means this stack has never rotated, which
+    cannot be inside a cooldown. A value that is present but unreadable blocks
+    the rotation instead: the one irreversible action here must not be taken
+    because the record of the last one was garbled.
+
+    `rotator_last` is the last rotation by either actor, in epoch seconds, as
+    the wrapper read it out of the file the two share. None means there is no
+    known one, and the rotator's schedule is not consulted at all -- a stack
+    that has never coordinated decides exactly as it did before there was
+    anything to coordinate with. A restart inside `rotator_window_minutes`
+    holds this rotation, and so does any rotation inside it, because Prowlarr
+    has not failed against the new IP yet. Neither window touches the cooldown:
+    `rotator_last` never extends it, and the only rotations it is measured
+    from are the ones this guard recorded itself.
+
+    The boundary is inclusive (`elapsed >= cooldown_hours`): the cooldown is a
+    minimum time between rotations, and a rotation exactly on it is a rotation
+    that waited. cooldown_hours, and the two rotator numbers, must be finite
+    and above zero -- the CLI refuses anything else at the argument with
+    positive_hours/positive_seconds/positive_minutes, and a ValueError here is
+    the same refusal at the function, so a caller cannot pass 0 and quietly
+    get "every pass may rotate".
+    """
+    return _decide(blocked, last_rotation, now, cooldown_hours, rotator_last,
+                   rotator_interval_seconds, rotator_window_minutes)[:2]
 
 
 # --- the state file ---------------------------------------------------------
@@ -470,6 +675,18 @@ def record_rotation(state, now):
     return updated
 
 
+def _positive_number(value):
+    """The acceptance rule -- and the wording -- the positive flags share.
+
+    _positive_float decides; this only turns its refusal into the exception
+    argparse turns into exit 2.
+    """
+    number, refusal = _positive_float(value)
+    if number is None:
+        raise argparse.ArgumentTypeError(refusal)
+    return number
+
+
 def positive_hours(value):
     """argparse type for --cooldown-hours: a number, and strictly above zero.
 
@@ -484,14 +701,52 @@ def positive_hours(value):
     a type: the refusal has to happen at the argument, before a decision is
     ever computed, and argparse turns ArgumentTypeError into exit 2.
     """
-    try:
-        hours = float(value)
-    except (TypeError, ValueError):
-        raise argparse.ArgumentTypeError(f"not a number: {value!r}")
-    if not math.isfinite(hours) or not hours > 0:  # `not >` so nan is caught too
+    return _positive_number(value)
+
+
+def positive_minutes(value):
+    """argparse type for --rotator-window-minutes: a number above zero.
+
+    The cooldown's rule and its accept/reject set, for the same reason: a
+    window of zero would hold on nothing at all, and nan would never match a
+    remaining time.
+    """
+    return _positive_number(value)
+
+
+def positive_seconds(value):
+    """argparse type for --rotator-interval: whole seconds, above zero.
+
+    Nothing here needs sub-second precision, and a value that is not a whole
+    number is refused rather than truncated -- `--rotator-interval 1.5` read
+    as 1 would put the hold in the wrong place every time it is consulted.
+    """
+    seconds = _positive_number(value)
+    if not seconds.is_integer():
         raise argparse.ArgumentTypeError(
-            f"must be a number greater than 0, got {value!r}")
-    return hours
+            f"must be a whole number of seconds, got {value!r}")
+    return int(seconds)
+
+
+def epoch_seconds(value):
+    """argparse type for --rotator-last: epoch seconds, at or after zero.
+
+    Zero is accepted because a file may hold it after a clock that has never
+    been set, and it decides the obvious way: a rotation at the epoch is
+    neither imminent nor recent. A negative value is refused, and so is
+    anything that is not a number. The wrapper omits the flag entirely when
+    the shared file is missing or unreadable, so a value that reaches here is
+    one the caller meant.
+
+    _epoch_seconds does the reading, so the file's own reader and this flag
+    cannot disagree about what a timestamp is; the lower bound is the only
+    thing added here, because a moment before the epoch is not one the shared
+    file could hold.
+    """
+    seconds = _epoch_seconds(value)
+    if seconds is None or seconds < 0:
+        raise argparse.ArgumentTypeError(f"not epoch seconds: {value!r}")
+    return seconds
 
 
 def _timestamp_arg(value):
@@ -547,16 +802,28 @@ def _plain(value):
     return value
 
 
-def decision(statuses, indexers, state, now, cooldown_hours):
+def decision(statuses, indexers, state, now, cooldown_hours,
+             rotator_last=None,
+             rotator_interval_seconds=DEFAULT_ROTATOR_INTERVAL_SECONDS,
+             rotator_window_minutes=DEFAULT_ROTATOR_WINDOW_MINUTES):
     """The whole answer as plain data, for either renderer.
 
     Pure, and the only place the two documents meet: everything the CLI prints
     is derived here, so the JSON and the text line cannot disagree about what
     was decided.
+
+    The rotator fields are what a reader of the log needs to see why a
+    hold happened: when either actor last rotated, when the rotator will next
+    on its own schedule (None when nothing is known), and which of the two
+    coordination holds applied. They are derived data -- `reason` remains the
+    sentence that says what was decided.
     """
     blocked = blocked_indexers(statuses, indexers, now)
     last_rotation = state.get("last_rotation") if isinstance(state, dict) else None
-    rotate, reason = should_rotate(blocked, last_rotation, now, cooldown_hours)
+    rotate, reason, hold = _decide(blocked, last_rotation, now, cooldown_hours,
+                                   rotator_last, rotator_interval_seconds,
+                                   rotator_window_minutes)
+    last = _epoch_seconds(rotator_last)
     return {
         "decided_at": now.isoformat(),
         "rotate": rotate,
@@ -564,6 +831,12 @@ def decision(statuses, indexers, state, now, cooldown_hours):
         "cooldown_hours": cooldown_hours,
         "last_rotation": last_rotation,
         "rotations": state.get("rotations", 0) if isinstance(state, dict) else 0,
+        "rotator_last": last,
+        "rotator_next": (last + rotator_interval_seconds
+                         if last is not None else None),
+        "rotator_interval_seconds": rotator_interval_seconds,
+        "rotator_window_minutes": rotator_window_minutes,
+        "rotator_hold": hold,
         "blocked": blocked,
     }
 
@@ -629,6 +902,22 @@ def main(argv=None):
                         default=DEFAULT_COOLDOWN_HOURS, metavar="N",
                         help="the minimum hours between two rotations "
                              "(default: %(default)s)")
+    parser.add_argument("--rotator-last", type=epoch_seconds, default=None,
+                        metavar="EPOCH",
+                        help="the last VPN rotation by either actor, in epoch "
+                             "seconds, out of the timestamp file the wrapper "
+                             "shares with gluetun-rotator (default: none, and "
+                             "the rotator's schedule is not consulted)")
+    parser.add_argument("--rotator-interval", type=positive_seconds,
+                        default=DEFAULT_ROTATOR_INTERVAL_SECONDS,
+                        metavar="SECONDS",
+                        help="how often gluetun-rotator restarts gluetun, in "
+                             "seconds (default: %(default)s)")
+    parser.add_argument("--rotator-window-minutes", type=positive_minutes,
+                        default=DEFAULT_ROTATOR_WINDOW_MINUTES,
+                        metavar="MINUTES",
+                        help="how close either rotation has to be, in minutes, "
+                             "for the guard to hold (default: %(default)s)")
     parser.add_argument("--record-rotation", action="store_true",
                         help="record a rotation in --state and exit, printing "
                              "the new count; the caller must have performed "
@@ -692,7 +981,8 @@ def main(argv=None):
             return 2
 
     view = decision(statuses, indexers, load_state(args.state),
-                    now, args.cooldown_hours)
+                    now, args.cooldown_hours, args.rotator_last,
+                    args.rotator_interval, args.rotator_window_minutes)
     if args.json:
         print(json.dumps(_plain(view), indent=2, sort_keys=True))
     else:
