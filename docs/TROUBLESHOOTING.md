@@ -530,6 +530,63 @@ sudo crontab -e
 
 **Note:** SSD caching will **not** help with video streaming — it only accelerates frequently re-read data, and video playback is sequential read-once.
 
+## Stremio: "No streams were found" in the Browser
+
+**Symptom:** web.stremio.com lists the Jellyfin and Magnetio addons as installed, but the
+board's `Jellyfin - Movie` and `Jellyfin - Series` rows are empty, the Magnetio rows read
+`Env: Failed to fetch: Failed to fetch`, and opening any title reports **"No streams were
+found"**. Every container is up and healthy, and `curl` against the addons from the LAN
+returns a valid manifest.
+
+**Cause:** Chrome's Local Network Access check, not the stack. A page on a public origin may
+not fetch a resource that resolves into the local address space unless the permission is
+granted, and `web.stremio.com` is public while every `.lan` name resolves to Traefik's
+private macvlan address. Chrome reports this as a CORS failure, which is what sends people
+to inspect the addon's CORS headers — those are correct and always were
+(`access-control-allow-origin: *`).
+
+Measured on Chrome 153 against this stack:
+
+```
+Access to fetch at 'https://stremio.lan/manifest.json' from origin 'https://web.stremio.com'
+has been blocked by CORS policy: Permission was denied for this request to access the
+`local` address space.
+```
+
+**Diagnose:** the tell is that navigation is unaffected while fetching is not. Opening
+`https://stremio.lan/manifest.json` in a tab loads it; the addon still fails. In DevTools the
+console shows the message above, and the Network tab shows
+`/meta/…` and `/stream/…` failing as `net::ERR_FAILED` with no server-side request logged
+(`docker logs stremio-jellyfin` stays silent for them).
+
+Two further causes present the same way — the addon is installed, healthy, and simply never
+receives anything — so check both while you are here:
+
+- **A stale host in the transport URL.** An addon installed before a network change keeps
+  pointing at the address it was installed with. Nothing answers there, so the addon's own
+  log records no request and it reads as idle rather than misconfigured. Magnetio sat at
+  `http://192.168.8.246:7000/...` for months: an address from before the NAS moved to
+  `192.168.110.246`, on a subnet with nothing on it.
+- **HTTP on a `.lan` name.** Local Network Access exempts private IP literals and `.local`
+  names from the mixed content check, so `http://192.168.110.246:8096` still answers from an
+  HTTPS page — measured 2026-09-17, HTTP 200 with the permission granted. A `.lan` name is
+  neither a literal nor `.local`, so `http://magnetio.lan` is blocked as mixed content. That
+  is why every addon route here is HTTPS rather than HTTP on the host's IP.
+
+**Fix:** grant the permission for the site. Chrome prompts on first use — clicking *Allow*
+is the whole fix — or set it under
+`chrome://settings/content/localNetworkAccess`. Verified 2026-09-17: with the permission
+denied, a title reports "No streams were found"; with it granted, the same title plays in
+the same session (`readyState: 4`, `currentTime` advancing).
+
+Two things this does **not** change:
+
+- Playing through the **Stremio desktop app** sidesteps the check entirely. It is a native
+  app, not a page on a public origin, so it is not subject to it.
+- **"Streaming server is not available"** is a separate banner and expected in a browser.
+  That is the desktop app's local server on `127.0.0.1:11470`; without it Stremio loses
+  torrent streaming and subtitle hashing, but a direct playable URL still plays.
+
 ## Memory: Unnecessary Swap With Plenty of Free RAM
 
 **Symptom:** `free -h` shows several GB of swap used even though there's plenty of available RAM. System feels slower than expected for the amount of RAM installed.
