@@ -86,6 +86,52 @@ http:
       middlewares: [security-headers]
       service: stremio-lan
 
+    # The Magnetio addon, routed for the same reason as the Jellyfin one above:
+    # it publishes port 7000, that port is not in the `vlan20-to-nas-svcs`
+    # allow-list, and Traefik on 443 is. Without this router the addon is
+    # reachable only from the NAS itself.
+    #
+    # It is not merely unreachable, though. The URL Stremio was holding is
+    # `http://192.168.8.246:7000/...`, and 192.168.8.246 is the NAS's address
+    # from before the segmentation rename -- it is 192.168.110.246 now and
+    # nothing answers on 192.168.8.0/24 at all, so the addon was being asked
+    # for at an address that no longer exists. Measured 2026-09-17: the board
+    # rendered "TorBox - Movies - Movie / Env: Failed to fetch", and
+    # `docker logs magnetio-addon` had never recorded a single stream request
+    # from a client -- it was running correctly and hearing nothing.
+    #
+    # The plain HTTP in that URL is a separate matter and worth stating
+    # precisely, because the obvious reading of it is wrong. Chrome does not
+    # block an HTTP request to a private IP literal from an HTTPS page: Local
+    # Network Access exempts private IP literals and `.local` names from the
+    # mixed content check (developer.chrome.com/blog/local-network-access), and
+    # measured here, `fetch('http://192.168.110.246:8096/System/Info/Public')`
+    # from web.stremio.com returns 200 with the permission granted. What is
+    # NOT exempt is an HTTP request to a `.lan` name, which is neither a
+    # literal nor `.local` -- so the route below has to be HTTPS, and that is
+    # the reason it is.
+    #
+    # No admin-auth on the -secure router, same as stremio.lan and for the same
+    # reason: Stremio is a client that cannot answer an HTTP Basic challenge, so
+    # a 401 here is an addon that will not install rather than a prompt. Note
+    # what that leaves open, because it differs from every other router in this
+    # file: the addon's own install URL carries the TorBox API key in its path,
+    # and anything on a VLAN that may reach Traefik:443 can fetch that path and
+    # read the key out of it. Access control is the network boundary plus the
+    # unguessable path, not authentication. Treat rotating that key as also
+    # meaning "reinstall this addon".
+    magnetio-lan:
+      rule: "Host(`magnetio.lan`)"
+      entryPoints: [web]
+      middlewares: [https-redirect]
+      service: magnetio-lan
+    magnetio-lan-secure:
+      rule: "Host(`magnetio.lan`)"
+      entryPoints: [websecure]
+      tls: {}
+      middlewares: [security-headers]
+      service: magnetio-lan
+
     # Legacy redirects (jellyseerr/jellyseer → seerr). Both entrypoints exist
     # so a direct https://jellyseerr.lan request (sniStrict requires a
     # matching cert SAN, see docs/HTTPS-LOCAL.md) still gets a clean redirect
@@ -290,6 +336,18 @@ http:
       loadBalancer:
         servers:
           - url: "http://172.20.0.17:60421"
+
+    # magnetio-addon declares no network of its own -- it runs on Gluetun's
+    # network namespace (network_mode: "container:gluetun") so that all of its
+    # traffic, DHT and peer connections included, leaves through the VPN tunnel.
+    # So it is reached at Gluetun's arr-core address, not its own: there is no
+    # separate IP for it to be reached at. Verified 2026-09-17 by fetching
+    # http://172.20.0.3:7000/manifest.json from inside the Traefik container,
+    # which returned the addon's manifest.
+    magnetio-lan:
+      loadBalancer:
+        servers:
+          - url: "http://172.20.0.3:7000"
 
     # === *arr Stack ===
     # Sonarr/Radarr now run on the arr-core bridge with their own IPs

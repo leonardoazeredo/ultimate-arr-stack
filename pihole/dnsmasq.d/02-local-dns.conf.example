@@ -35,6 +35,7 @@ address=/beszel.lan/TRAEFIK_LAN_IP
 address=/homepage.lan/TRAEFIK_LAN_IP
 address=/usenet.lan/TRAEFIK_LAN_IP
 address=/stremio.lan/TRAEFIK_LAN_IP
+address=/magnetio.lan/TRAEFIK_LAN_IP
 
 # Proper IPv6 response for .lan domains (no real IPv6 addresses needed).
 # Returns :: (unspecified) instead of NXDOMAIN for AAAA queries. This is the

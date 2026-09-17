@@ -76,15 +76,28 @@ export class JellyfinApi {
 
     async searchItems(skip, movie, searchTerm = null) {
         let firstItem = Number(skip) + 1
-        let itemsSearch = `${server}/Items?userId=${this.auth.User.Id}&hasImdb=true&Recursive=true&IncludeItemTypes=Movie,Series&startIndex=${firstItem}&limit=${itemsLimit}&sortBy=SortName`
+        // `IncludeItemTypes` must appear exactly ONCE in this URL. It used to be
+        // baked into the base as `Movie,Series` and then appended again as
+        // `Movie` or `Series`, and Jellyfin 12 mishandles the repeated parameter
+        // whenever either occurrence is a comma-separated list: it drops the
+        // filter and answers with the library's Studios instead of the type that
+        // was asked for.
+        //
+        // Measured against this server on 2026-09-17, same library, same user:
+        //   IncludeItemTypes=Movie                  -> 52 items, all Movie
+        //   IncludeItemTypes=Movie,Series           -> 90 items (52 Movie, 38 Series)
+        //   IncludeItemTypes=Movie,Series&...&Movie -> 226 items, 153 Studio + 47 Movie
+        //
+        // A Studio carries no ProviderIds.Imdb, so itemToMeta produced metas with
+        // no `id` and a `type` of "studio" -- not one of the addon's declared
+        // types -- and Stremio dropped every one of them. The addon stayed
+        // healthy and answered 200 with a well-formed body, while the
+        // "Jellyfin - Movie" and "Jellyfin - Series" rows rendered empty.
+        const includeItemTypes = movie ? 'Movie' : 'Series'
+        let itemsSearch = `${server}/Items?userId=${this.auth.User.Id}&hasImdb=true&Recursive=true&IncludeItemTypes=${includeItemTypes}&startIndex=${firstItem}&limit=${itemsLimit}&sortBy=SortName`
         if (searchTerm) {
             itemsSearch += `&searchTerm=${searchTerm}`
         }
-
-        if (movie) {
-            itemsSearch += `&IncludeItemTypes=Movie`
-        } else
-            itemsSearch += `&IncludeItemTypes=Series`
 
         return axios.get(itemsSearch,
             {
