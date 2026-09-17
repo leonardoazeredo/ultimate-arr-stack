@@ -1044,6 +1044,7 @@ export function landingTemplate(manifest, initialConfig = {}) {
           <select id="sort">
             <option value="qualityseeders">Quality then seeders</option>
             <option value="qualitysize">Quality then size</option>
+            <option value="fhd-first">1080p first, then 4K</option>
             <option value="seeders">Seeders only</option>
             <option value="size">Size only</option>
           </select>

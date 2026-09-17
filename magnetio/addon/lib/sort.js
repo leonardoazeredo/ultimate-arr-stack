@@ -15,6 +15,30 @@ const QUALITY_ORDER = [
   Quality.UNKNOWN,
 ];
 
+// The same tiers with 1080p ahead of the UHD ones, for `sort=fhd-first`.
+//
+// Upstream's ordering answers "which release is best?" and puts the largest
+// resolution first. That is the wrong question for a client that has to start
+// playing the thing: a 25 GB 4K remux is the slowest entry in the list to begin
+// streaming, the least likely to direct-play on a phone, a laptop or a TV
+// stick, and the most likely to need transcoding. Measured on this stack, the
+// default order returned five 4K releases and no 1080p at all under a
+// `limit=5` -- the tier that would have played immediately was sorted past the
+// cut and never sent.
+//
+// So this order is "playable first": the HD tiers in descending resolution,
+// then the UHD tiers, with the genuinely-bad tiers last as upstream has them.
+// Opt-in, and the default above is untouched.
+const QUALITY_ORDER_FHD_FIRST = [
+  Quality.FHD,
+  Quality.HD,
+  Quality.SD,
+  Quality.UHD_4K,
+  Quality.UHD_8K,
+  Quality.CAM,
+  Quality.UNKNOWN,
+];
+
 /**
  * Sort streams by language preference first, then by the configured sort strategy.
  */
@@ -43,6 +67,9 @@ function _sortStreams(streams, config) {
     case SortType.SIZE:
       return [...streams].sort((a, b) => b.size - a.size);
 
+    case SortType.FHD_FIRST:
+      return sortByQuality(streams, (a, b) => b.seeders - a.seeders, QUALITY_ORDER_FHD_FIRST);
+
     case SortType.QUALITY_THEN_SEEDERS:
     default:
       return sortByQuality(streams, (a, b) => b.seeders - a.seeders);
@@ -53,9 +80,9 @@ function _sortStreams(streams, config) {
  * Group by quality tier and sort within each tier by the given comparator.
  * Prioritises "healthy" streams (≥5 seeders) over merely "seeded" (≥1).
  */
-function sortByQuality(streams, tiebreak) {
+function sortByQuality(streams, tiebreak, qualityOrder = QUALITY_ORDER) {
   const groups = new Map();
-  for (const q of QUALITY_ORDER) groups.set(q, { healthy: [], seeded: [], unhealthy: [] });
+  for (const q of qualityOrder) groups.set(q, { healthy: [], seeded: [], unhealthy: [] });
 
   for (const s of streams) {
     const q     = extractQuality(s);
