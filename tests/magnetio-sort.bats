@@ -88,6 +88,50 @@ require_node() {
     [ "$(echo "$output" | wc -l | tr -d ' ')" -eq 4 ]
 }
 
+@test "magnetio sort: fhd-first caps each tier, so the 4K releases are still sent" {
+    require_node
+    # The cap is the whole difference between "1080p first" and "1080p only".
+    # The pool on this stack runs to roughly 29x 1080p against 5x 4K, so with a
+    # plain ordering the 1080p group fills every slot the limit allows and the
+    # 4K tier never reaches the client -- measured, `limit=20` gave 19x 1080p
+    # and 1x 4K. Ordering fixes which comes first; only the cap makes the lower
+    # tier visible at all.
+    run node --input-type=module -e "
+        import { sortStreams } from '$SORT_JS';
+        const mk = (q, i) => ({ quality: q, seeders: 10, size: 5e9, title: q + '-' + i, name: q + '-' + i, languages: ['en'] });
+        const streams = [
+            ...Array.from({ length: 12 }, (_, i) => mk('1080p', i)),
+            ...Array.from({ length: 6 },  (_, i) => mk('4k', i)),
+        ];
+        console.log(sortStreams(streams, { sort: 'fhd-first', languages: ['en'] }).map(s => s.quality).join(' '));
+    "
+    [ "$status" -eq 0 ]
+    [ "$(echo "$output" | tr ' ' '\n' | grep -c '^1080p$')" -eq 5 ]
+    [ "$(echo "$output" | tr ' ' '\n' | grep -c '^4k$')" -eq 5 ]
+    # Position, not just presence: every 1080p must precede every 4K.
+    local first_uhd
+    first_uhd=$(echo "$output" | tr ' ' '\n' | grep -n '^4k$' | head -1 | cut -d: -f1)
+    [ "$first_uhd" -eq 6 ]
+}
+
+@test "magnetio sort: the cap does not touch the default mode" {
+    require_node
+    # QUALITY_ORDER's call site passes no cap, so a default-mode list is still
+    # every stream it was given. A cap leaking into the shared helper would
+    # silently drop streams for everyone not using fhd-first.
+    run node --input-type=module -e "
+        import { sortStreams } from '$SORT_JS';
+        const mk = (q, i) => ({ quality: q, seeders: 10, size: 5e9, title: q + '-' + i, name: q + '-' + i, languages: ['en'] });
+        const streams = [
+            ...Array.from({ length: 12 }, (_, i) => mk('1080p', i)),
+            ...Array.from({ length: 6 },  (_, i) => mk('4k', i)),
+        ];
+        console.log(sortStreams(streams, { sort: 'qualityseeders', languages: ['en'] }).length);
+    "
+    [ "$status" -eq 0 ]
+    [ "$output" -eq 18 ]
+}
+
 @test "magnetio sort: every SortType the config offers has a case in the switch" {
     require_node
     # A mode added to types.js and exposed in the dropdown but never handled in

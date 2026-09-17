@@ -4,6 +4,11 @@ import { SortType, Quality } from './types.js';
 const HEALTHY_SEEDER_COUNT = 5;
 const SEEDED_SEEDER_COUNT  = 1;
 
+// How many releases one quality tier may contribute under `fhd-first`. Five is
+// what makes the mode useful rather than a wall of near-identical 1080p: enough
+// to have a real choice, few enough that the 4K tier below is still on screen.
+const FHD_FIRST_PER_TIER = 5;
+
 // Quality ordering (index 0 = best)
 const QUALITY_ORDER = [
   Quality.UHD_8K,
@@ -68,7 +73,8 @@ function _sortStreams(streams, config) {
       return [...streams].sort((a, b) => b.size - a.size);
 
     case SortType.FHD_FIRST:
-      return sortByQuality(streams, (a, b) => b.seeders - a.seeders, QUALITY_ORDER_FHD_FIRST);
+      return sortByQuality(streams, (a, b) => b.seeders - a.seeders,
+                           QUALITY_ORDER_FHD_FIRST, FHD_FIRST_PER_TIER);
 
     case SortType.QUALITY_THEN_SEEDERS:
     default:
@@ -79,8 +85,16 @@ function _sortStreams(streams, config) {
 /**
  * Group by quality tier and sort within each tier by the given comparator.
  * Prioritises "healthy" streams (≥5 seeders) over merely "seeded" (≥1).
+ *
+ * `perTierCap` bounds how many a single tier may contribute, and defaults to 0
+ * meaning no bound. Ordering alone is not enough to make the HD tiers visible:
+ * the pool here runs to roughly 29x 1080p against 5x 4K, so with a plain
+ * ordering the 1080p group fills every slot the `limit` allows and the 4K
+ * releases never reach the client at all. Measured 2026-09-17, `limit=20`:
+ * 19x 1080p + 1x 4K. The cap is what turns "1080p first" into "1080p first,
+ * 4K still there".
  */
-function sortByQuality(streams, tiebreak, qualityOrder = QUALITY_ORDER) {
+function sortByQuality(streams, tiebreak, qualityOrder = QUALITY_ORDER, perTierCap = 0) {
   const groups = new Map();
   for (const q of qualityOrder) groups.set(q, { healthy: [], seeded: [], unhealthy: [] });
 
@@ -94,11 +108,12 @@ function sortByQuality(streams, tiebreak, qualityOrder = QUALITY_ORDER) {
 
   const result = [];
   for (const { healthy, seeded, unhealthy } of groups.values()) {
-    result.push(
+    const tier = [
       ...healthy.sort(tiebreak),
       ...seeded.sort(tiebreak),
       ...unhealthy.sort(tiebreak),
-    );
+    ];
+    result.push(...(perTierCap > 0 ? tier.slice(0, perTierCap) : tier));
   }
   return result;
 }
