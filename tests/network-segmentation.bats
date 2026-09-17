@@ -33,7 +33,20 @@ TRAEFIK_VLAN10_IP="${TRAEFIK_VLAN10_IP:-192.168.110.250}"
 # actually uses — was broken. 445 is `vlan20-to-nas-timemachine`: the Mac's
 # Time Machine destination is an SMB share on the NAS, and the Mac is on VLAN20
 # while the NAS is on VLAN10, so backups cross this boundary.
-SEG_ALLOWED_NAS="${SEG_ALLOWED_NAS:-22 53 445 5055 8096}"
+#
+# 60421 and 7000 are the two Stremio addons (stremio-jellyfin and Magnetio), and
+# they are in this list because they are reached in cleartext by IP:port instead
+# of through the `.lan` HTTPS route. The Android TV client cannot use that
+# route: the cert is signed by the private mkcert CA, which Stremio's transport
+# does not trust (Android apps ignore user-installed CAs by default), so the
+# TLS handshake dies before any request is served. Measured
+# 2026-09-17 on the Chromecast with Google TV: Stremio 1.10.4 (targetSdk 36)
+# resolved stremio.lan about a thousand times over five days and never completed
+# a single HTTP request, while its manifest declares
+# usesCleartextTraffic="true", which is what makes the cleartext route work for
+# it. The ports are the addons themselves, not a Traefik route, so they belong
+# in this list rather than SEG_ALLOWED_TRAEFIK.
+SEG_ALLOWED_NAS="${SEG_ALLOWED_NAS:-22 53 445 5055 8096 60421 7000}"
 SEG_ALLOWED_TRAEFIK="${SEG_ALLOWED_TRAEFIK:-80 443}"
 
 # A name Pi-hole is authoritative for, used to prove UDP/53 end to end rather
