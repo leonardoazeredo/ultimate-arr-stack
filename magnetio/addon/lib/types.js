@@ -33,6 +33,7 @@ export const SortType = {
   QUALITY_THEN_SIZE:    'qualitysize',
   SEEDERS:              'seeders',
   SIZE:                 'size',
+  FHD_FIRST:            'fhd-first',
 };
 
 // Quality tiers (high → low)
