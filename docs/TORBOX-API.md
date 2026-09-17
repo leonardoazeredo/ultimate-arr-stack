@@ -174,8 +174,69 @@ ten. A pre-flight check would not make bad releases good, but it would stop them
 costing download capacity.
 
 The endpoint takes comma-separated hashes, around 100 per call, and returns in
-under a second per hundred. What is less clear from the docs is which hash an
-NZB maps to; that needs establishing before this is worth building.
+under a second per hundred. It cannot serve as that check, for two reasons, both
+measured against the live account on 2026-09-17 with 327 usenet jobs in
+`mylist`.
+
+Given a hash the account already owns, the call works. The `hash` field on a
+`mylist` job is a 32-character MD5-shaped string (for example
+`9acd321c7ddcded56e7f84890291b9c5`), and this returns that release's name, size
+and hash:
+
+```
+GET /v1/api/usenet/checkcached?hash=<hash>&format=object
+```
+
+No derivation tried so far computes that hash from a local NZB before submitting
+it. 16 candidate derivations were tested against 3 NZB files whose release names
+matched a `mylist` entry character for character:
+`the.sopranos.s04e09.1080p.bluray.x264-shortbrehd`,
+`Severance.S01E08.1080p.BluRay.x264-BORDURE` and
+`Foundation.S01E05.1080p.WEB.H264-CAKES-FTP`. Each candidate is the MD5 of one
+input:
+
+1. the raw file bytes
+2. the release name
+3. the release name plus `.nzb`
+4. the file's basename
+5. the first segment message-id, bare
+6. the first segment message-id, wrapped in angle brackets
+7. every segment message-id concatenated in document order, no separator
+8. every segment message-id concatenated in sorted order, no separator
+9. every segment message-id joined with newlines in original document order
+10. the last segment message-id
+11. the first `subject` attribute
+12. all `subject` attributes concatenated
+13. the sorted `<group>` list joined by commas
+14. the lowercased release name
+15. the file with all whitespace stripped
+16. the reported size as a string
+
+None matched: no client-computable derivation was found among the sixteen tried.
+
+Even with the hash, the endpoint cannot predict whether a release will complete,
+because `cached` describes what TorBox already holds rather than what the
+backbone can still retrieve. Queried for `the.sopranos.s04e09...` (hash
+`ce05aede44be4f71859ddc7ae283eca4`) while that job's `download_state` was
+`processing` and it was downloading, `checkcached` answered `{"data":{}}`, the
+identical empty answer it gives for a job that failed
+(`d601c08cc972ebea0535f085996af9bf`). Across all 327 jobs, `cached` is true for
+167 of the 167 that completed and false for 155 of the 155 that failed. The
+remaining five were neither completed nor failed at measurement time, still in
+flight and non-terminal, so they fall outside that comparison entirely; among the
+322 terminal jobs there are no exceptions. A field that matches the outcome
+perfectly in both directions is written after the bytes arrive; it does not
+forecast whether they will.
+
+A pre-flight gate built on `checkcached` would therefore reject every release
+that is merely new, which is every release worth submitting. The abort is a
+TorBox-side fact learned only by submitting. It still costs a submission, and
+what makes it cost once instead of three to five times is the failure reporting
+that went live on 2026-09-17.
+
+This closes the question rather than deferring it. If TorBox ever documents a
+client-derivable identifier, that is the moment to revisit, and it would need a
+test showing the derivation matching a real job's hash.
 
 ### Stalled and timed-out jobs are deleted; completed items still accumulate
 
