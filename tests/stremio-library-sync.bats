@@ -122,33 +122,52 @@ STUB
     # The Stremio API answers HTTP 200 with an `error` body for a bad key, so a
     # missing one does not look like an auth failure anywhere downstream. The
     # script names it before the request instead.
+    #
+    # Two assertions, and both are needed. The phrase asserted on is the
+    # shell's own ("is not set in <path>"), not the bare "STREMIO_AUTH_KEY is
+    # not set" that the Python module also prints to stderr -- bats captures
+    # stderr, so the weaker phrase is satisfied by the module's message even
+    # with this guard deleted, and the test then passes for a reason it does
+    # not claim. The mutation corpus found exactly that: entry
+    # `stremio-library-shell-key-guard-removed` SURVIVED until the argv check
+    # below was added.
+    stub_python
     printf 'SEERR_API_KEY=seerr-key\n' > "$ENV"
     run "$RUN"
     assert_failure 1
-    assert_output --partial "STREMIO_AUTH_KEY is not set"
+    assert_output --partial "STREMIO_AUTH_KEY is not set in"
+    refute_output --partial "exited non-zero"
+    [ ! -f "$ARGV_FILE" ] || fail "python3 was reached without a Stremio key"
 }
 
 @test "stremio-library-sync: the key guard fires in dry run too" {
     # A dry run is how an operator decides whether applying is safe. One that
     # reports "nothing new" while the key is missing is the opposite of that
     # answer, so the guard is not conditional on --apply.
+    stub_python
     printf 'SEERR_API_KEY=seerr-key\n' > "$ENV"
     run "$RUN"
     assert_failure 1
+    [ ! -f "$ARGV_FILE" ] || fail "python3 was reached in a dry run without a Stremio key"
 }
 
 @test "stremio-library-sync: refuses to run without SEERR_API_KEY" {
+    # Same two-assertion shape as the Stremio key above, for the same reason:
+    # the Python module prints its own SEERR_API_KEY message to stderr, so the
+    # bare phrase is not evidence that this shell guard ran.
+    stub_python
     printf 'STREMIO_AUTH_KEY=stremio-key\n' > "$ENV"
     run "$RUN" --apply
     assert_failure 1
-    assert_output --partial "SEERR_API_KEY is not set"
+    assert_output --partial "SEERR_API_KEY is not set in"
+    [ ! -f "$ARGV_FILE" ] || fail "python3 was reached without a Seerr key"
 }
 
 @test "stremio-library-sync: refuses to run when .env is missing entirely" {
     rm -f "$ENV"
     run "$RUN"
     assert_failure 1
-    assert_output --partial "not set"
+    assert_output --partial "STREMIO_AUTH_KEY is not set in"
 }
 
 @test "stremio-library-sync: a value containing an equals sign survives" {

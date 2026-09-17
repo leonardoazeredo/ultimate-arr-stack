@@ -98,7 +98,7 @@ mutation stremio-library-first-run-does-not-baseline \
   --file scripts/lib/stremio_library.py \
   --bats tests/python-suite.bats \
   --test "the extracted modules pass their pytest suite" \
-  --why "the baseline is the whole reason the first run is allowed to be automatic. Without it, `enable --now` on the timer -- or any run after the state file is lost -- reads 145 existing library items as 145 new ones and starts requesting them, three at a time forever. Measured 2026-09-17: 122 of those 145 are in neither arr, so the backlog is real and the burst is real, and it arrives with no operator action beyond installing the schedule" \
+  --why "the baseline is the whole reason the first run is allowed to be automatic. Without it, 'enable --now' on the timer -- or any run after the state file is lost -- reads 145 existing library items as 145 new ones and starts requesting them, three at a time forever. Measured 2026-09-17: 122 of those 145 are in neither arr, so the backlog is real and the burst is real, and it arrives with no operator action beyond installing the schedule" \
   --apply 'perl -0777 -pi -e "s/\Q        if not backfill:\E/        if False:/" "$F"'
 
 # --- the wrapper passes --apply on a dry run --------------------------------
@@ -111,7 +111,7 @@ mutation stremio-library-shell-dry-run-passes-apply \
   --file scripts/stremio-library-sync.sh \
   --bats tests/stremio-library-sync.bats \
   --test "^stremio-library-sync: a dry run does not pass --apply to python" \
-  --why "the banner says DRY RUN while the pass creates real Seerr requests, which is the one thing a dry run must never do -- it is how an operator checks what a change would do before letting it happen. usenet-blackhole.sh shipped this exact defect, from \${APPLY:+--apply}: `:+` tests for non-empty and APPLY=false is non-empty, so the flag went on every invocation" \
+  --why "the banner says DRY RUN while the pass creates real Seerr requests, which is the one thing a dry run must never do -- it is how an operator checks what a change would do before letting it happen. usenet-blackhole.sh shipped this exact defect, from \${APPLY:+--apply}: ':+' tests for non-empty and APPLY=false is non-empty, so the flag went on every invocation" \
   --apply 'python3 -c "import sys;p=sys.argv[1];s=open(p).read();old=\"if \$APPLY; then PY_ARGS+=(--apply); fi\";new=\"PY_ARGS+=(--apply)\";assert old in s, old;s=s.replace(old,new,1);open(p,\"w\").write(s)" "$F"'
 
 # --- the missing-key guard comes off ----------------------------------------
