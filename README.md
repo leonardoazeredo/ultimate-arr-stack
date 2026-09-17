@@ -11,7 +11,7 @@ A Docker Compose media stack for a NAS: request a film or a series, it downloads
 ## What's in the stack
 
 | Group | Services | Role |
-|---|---|---|
+| --- | --- | --- |
 | Requests | **Seerr** | The front door: users ask for a title, it routes to the right app |
 | Library | **Sonarr**, **Radarr** | Series and film management, quality profiles, imports |
 | Indexers | **Prowlarr** | Indexer manager; keeps Sonarr/Radarr in sync |
@@ -49,7 +49,7 @@ Three invariants hold the design together:
 ## Requirements
 
 | | |
-|---|---|
+| --- | --- |
 | Host | Any Docker host — Ugreen, Synology, QNAP, a Linux box, or a Raspberry Pi 4+. The reference deployment is a Ugreen NAS (aarch64). |
 | Docker | Engine + Compose v2, with the ability to run `network_mode: service:*` and macvlan networks |
 | Static IP | **Required.** Pi-hole binds `${NAS_IP}:53`; if the address arrives by DHCP after Docker starts, Pi-hole never binds and the network loses DNS |
@@ -80,7 +80,7 @@ curl -sI http://<NAS_IP>:8096/System/Info/Public       # Jellyfin responding?
 Then add the layers you want — each is a separate compose file so one can never take another down:
 
 | Layer | Bring it up | Guide |
-|---|---|---|
+| --- | --- | --- |
 | Edge: Traefik, `*.lan` DNS, HTTPS with auth | `docker compose -f docker-compose.traefik.yml up -d` | [LOCAL-DNS.md](docs/LOCAL-DNS.md), [HTTPS-LOCAL.md](docs/HTTPS-LOCAL.md) |
 | Monitoring, dashboards, configarr, recovery helpers | `docker compose -f docker-compose.utilities.yml up -d` | [UTILITIES.md](docs/UTILITIES.md) |
 | Remote access via Tailscale | `docker compose -f docker-compose.tailscale.yml up -d` | [TAILSCALE.md](docs/TAILSCALE.md) |
@@ -94,7 +94,7 @@ The full walkthrough — directories on the host, app configuration, DNS, HTTPS,
 ## Access
 
 | Service | LAN | `.lan` (with the edge layer) | Remote |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Jellyfin | `NAS_IP:8096` | `https://jellyfin.lan` | yes, if exposed |
 | Seerr | `NAS_IP:5055` | `https://seerr.lan` | yes, if exposed |
 | Sonarr / Radarr / Prowlarr / Bazarr | `NAS_IP:8989` / `:7878` / `:9696` / `:6767` | `https://sonarr.lan`, `https://radarr.lan`, `https://prowlarr.lan`, `https://bazarr.lan` | LAN only |
@@ -110,7 +110,7 @@ The `.lan` names need the edge layer, and the `https` URLs need its auth middlew
 ## Common operations
 
 | Task | Command |
-|---|---|
+| --- | --- |
 | Health at a glance | `docker compose -f docker-compose.arr-stack.yml ps` |
 | Restart safely — **never** `down` | `./scripts/restart-stack.sh [all\|arr\|traefik\|utilities\|magnetio\|cloudflared]` |
 | Reconcile every stack after a reboot | `./scripts/boot-compose-up.sh` |
@@ -119,6 +119,7 @@ The `.lan` names need the edge layer, and the `https` URLs need its auth middlew
 | Detect the credential-propagation drift class | `./scripts/detect-credential-drift.sh` |
 | Configure the apps through their APIs | `./scripts/configure-apps.sh` |
 | Clear stuck download-queue items | `./scripts/queue-cleanup.sh` |
+| Turn a Stremio library addition into a download | `./scripts/stremio-library-sync.sh --apply` |
 | Repair Sonarr folder names / Radarr paths | `./scripts/fix-sonarr-folders.sh`, `./scripts/fix-radarr-paths.sh` |
 | Back up config volumes | `./scripts/arr-backup.sh` |
 | Apply tiered retention to backups | `./scripts/backup-prune.sh` |
@@ -132,7 +133,7 @@ The `.lan` names need the edge layer, and the `https` URLs need its auth middlew
 Three layers, and none of them needs a cloud CI account:
 
 | Layer | Run it with | What it proves |
-|---|---|---|
+| --- | --- | --- |
 | Static + behavioural (bats) | `./tests/run-tests.sh` | Compose validity, duplicate ports and IPs, pinned images, secret hygiene, `.env` documentation, script behaviour, hook wiring. Needs no Docker and no host access. It ends with a census — `executed / skipped / failed`, the reasons for the skips, and a warning when the git-gated tests produced no verdict on this host. Read that line; "ok" is not the same as "covered". |
 | Python toolkit | `./tests/toolkit/pytest.sh` | The `scripts/lib/*.py` modules. Exits **77**, never 0, when Docker is unavailable — an absent oracle must not read as a passing one. |
 | End-to-end (Playwright) | `npm run test:e2e` | Real HTTP, UI, VPN-egress and DNS behaviour against a live stack. Sixteen of its tests need the Docker socket, so the full run happens on the host itself. A floor reporter fails any full-suite run that executed fewer than 30 tests: a missing or rotted `.env.e2e` used to produce a green run that had executed almost nothing. |
@@ -157,7 +158,7 @@ Guards here are **proved able to fail**, not assumed to work. [tests/mutation/](
 ## Documentation
 
 | Doc | Purpose |
-|---|---|
+| --- | --- |
 | [SETUP.md](docs/SETUP.md) | The full install walkthrough |
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | How the pieces fit together |
 | [REFERENCE.md](docs/REFERENCE.md) | Cheat sheet: URLs, ports, IPs, commands |

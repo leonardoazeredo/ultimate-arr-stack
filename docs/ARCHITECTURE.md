@@ -28,6 +28,12 @@ When someone requests a movie or TV show, here's what happens:
 
 > **Why two download clients?** Both paths run through TorBox, and neither joins a swarm nor opens a usenet connection from this host. Decypharr speaks TorBox's debrid API for torrents; the usenet path is the arrs' own Blackhole client plus a timer that carries each NZB through TorBox's usenet API. Most users configure both - Sonarr/Radarr take whichever release scores better, and each covers what the other cannot find. See [Usenet](APP-CONFIG.md#42-usenet-torbox-blackhole) for why SABnzbd is no longer the usenet client.
 
+### The second front door: Stremio's library
+
+Seerr is the front door for a request someone makes deliberately, but it is not the only place a title gets added to a watchlist. Adding one to the **Stremio library** is the same intent expressed somewhere else, and it used to go nowhere. `scripts/stremio-library-sync.sh` closes that gap on a timer: it reads the Stremio account's library, resolves each newly added title to a TMDB id through Cinemeta, and creates the same Seerr request the portal would have.
+
+It is a bridge, not a second pipeline. Everything downstream of Seerr is unchanged, and the pacing rules above apply to it too: it creates at most a few requests per pass, and its first run records the existing library rather than requesting it. The design notes, and why Stremio cannot simply push the event to an addon, are at the top of `scripts/lib/stremio_library.py`; the operator's view is in [MAINTENANCE.md](MAINTENANCE.md#stremio-library-sync-systemd-timer-every-10-minutes).
+
 ## VPN Protection
 
 **Why VPN?** Your ISP can see which indexers you query. The VPN encrypts this so they only see "encrypted traffic to VPN server". Neither download path needs it: TorBox fetches both the torrent and the usenet release on its own servers, and only the finished file crosses the wire, over HTTPS.
@@ -187,7 +193,7 @@ All containers run with hardened defaults:
 Two YAML anchors define security profiles in each compose file:
 
 | Anchor | Used by | Capabilities |
-|--------|---------|-------------|
+| -------- | --------- | ------------- |
 | `x-security` | All non-LSIO services | None by default (services add back only what they need) |
 | `x-security-lsio` | Sonarr, Radarr, Prowlarr, SABnzbd, Bazarr | `CHOWN`, `SETUID`, `SETGID`, `DAC_OVERRIDE` (s6-overlay needs these to switch users during init) |
 
@@ -196,6 +202,7 @@ Decypharr uses its own inline security block (not the shared anchor): same four 
 Services that write to Docker volumes as root add back `CHOWN` + `DAC_OVERRIDE` (Jellyfin, Seerr, Uptime Kuma, DUC, Beszel, DIUN, Configarr). Services with read-only or no volumes don't need any (FlareSolverr, Cloudflared, Traefik, Deunhealth, Beszel-agent).
 
 Additional requirements:
+
 - **Gluetun** — adds `NET_ADMIN` (required to create VPN tunnel interfaces)
 - **Uptime Kuma** — adds `FOWNER` (sets ownership on created files)
 - **Pi-hole** — adds `NET_ADMIN`, `NET_RAW`, `CHOWN`, `SETUID`, `SETGID`, `SETFCAP`, `SYS_NICE`, `DAC_OVERRIDE`, and disables `no-new-privileges` (FTL uses `setcap` at startup)

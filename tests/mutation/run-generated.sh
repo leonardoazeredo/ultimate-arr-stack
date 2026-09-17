@@ -91,6 +91,10 @@ TARGETS=(
   "scripts/queue-cleanup.sh:tests/queue-cleanup.bats:^queue-cleanup: "
   "scripts/backlog-search.sh:tests/backlog-search.bats:^backlog-search: "
   "scripts/usenet-blackhole.sh:tests/usenet-blackhole.bats:^usenet-blackhole: "
+  # The Stremio bridge's two halves, each with its own oracle: the wrapper is
+  # driven against a stub python3 by tests/stremio-library-sync.bats, and the
+  # module's decisions are faked in tests/python/test_stremio_library.py.
+  "scripts/stremio-library-sync.sh:tests/stremio-library-sync.bats:^stremio-library-sync: "
   # The rotator was an inline compose entrypoint until 2026-09-16, which is to
   # say it had no oracle a generator could be scored against at all. It does
   # now: tests/gluetun-rotator.bats sources the file and drives the poll.
@@ -119,6 +123,7 @@ TARGETS=(
   "scripts/lib/backlog_search.py:tests/python-suite.bats:^python: the extracted modules pass"
   "scripts/lib/usenet_status.py:tests/python-suite.bats:^python: the extracted modules pass"
   "scripts/lib/indexer_guard.py:tests/python-suite.bats:^python: the extracted modules pass"
+  "scripts/lib/stremio_library.py:tests/python-suite.bats:^python: the extracted modules pass"
   # The four duc files share one oracle because they are one protocol: the cgi
   # produces a request marker, the poller consumes it, scan.sh holds the lock
   # both of them branch on. A mutant in any of them is scored against all of it.

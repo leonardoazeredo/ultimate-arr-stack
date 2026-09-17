@@ -256,7 +256,7 @@ That matters because lowering the floor to let a release through lets it through
 **everywhere**. Measured the same day, after the floor was lowered:
 
 | | before | after |
-|---|---|---|
+| --- | --- | --- |
 | Radarr `Bluray-1080p` | 50.8 MB/min | **18 MB/min** |
 | Sonarr `Bluray-1080p` | 50.4 MB/min | **18 MB/min** |
 | Sonarr `Bluray-2160p` | — | 94.6 MB/min |
@@ -395,6 +395,89 @@ docker restart pihole
 
 ---
 
+## Stremio Library Sync (systemd timer, every 10 minutes)
+
+Adding a title to the Stremio library does nothing on this stack by itself.
+Nothing watches for it, so the film sits in Stremio's library and never reaches
+Radarr or Sonarr. This bridges the two: it reads the Stremio account's library
+every 10 minutes, resolves anything newly added to a TMDB id, and creates the
+Seerr request that routes it to the arrs.
+
+```bash
+# Dry run — see what it would request. Writes no state and requests nothing.
+./scripts/stremio-library-sync.sh
+
+# Actually create the requests
+./scripts/stremio-library-sync.sh --apply
+
+# Per-item detail, including the state file's size
+./scripts/stremio-library-sync.sh --apply -v
+
+# At most one request this pass
+./scripts/stremio-library-sync.sh --apply --max 1
+```
+
+**First run baselines and requests nothing.** It records every title already in
+the library and stops. That is not a bug and it is the most important thing on
+this page: measured 2026-09-17, 122 of this library's 145 items are in neither
+arr, and requesting them in one pass is the shape of the burst that earned this
+TorBox account a 90-minute refusal. To bring them in deliberately:
+
+```bash
+./scripts/stremio-library-sync.sh --apply --backfill --max 3
+```
+
+Run that by hand, repeatedly, over days — the timer will not do it for you,
+because `--backfill` only means anything on a first run and the timer passes no
+such flag. Each pass creates at most `--max` requests (default 3) and leaves the
+rest for the next one, so a backlog drains in the order the titles were added.
+
+Install once, as the deploy user — no root:
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp scripts/stremio-library-sync.service scripts/stremio-library-sync.timer ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now stremio-library-sync.timer
+systemctl --user list-timers stremio-library-sync.timer   # confirm it is armed
+systemctl --user start stremio-library-sync.service       # baseline now, rather than in a minute
+```
+
+Output goes to `logs/stremio-library-sync.log`, and what has been handled to
+`logs/stremio-library-sync-state.json`. The unit exits non-zero when a request
+could not be created, so `systemctl --user status stremio-library-sync.service`
+shows an unreachable Seerr rather than leaving it only in the log.
+
+**When it stops finding anything.** The Stremio API answers HTTP 200 with an
+`error` body for an expired key rather than a 401, so the symptom is not an
+error anywhere except this log. It reads:
+
+```
+ERROR: HTTP None from https://api.strem.io/api/datastoreGet: Stremio rejected the auth key: Session does not exist
+```
+
+Log in at [web.stremio.com](https://web.stremio.com) again and re-copy
+`auth.key` into `STREMIO_AUTH_KEY`, as `.env.example` describes. If instead it
+reports a plausible library size and nothing new, the key is fine and nobody has
+added anything.
+
+What it deliberately does not do:
+
+- **Nothing is deleted.** Removing a title from the Stremio library is not
+  wired to anything here. A library edit is a low-stakes action on a phone, and
+  connecting it to a delete from disk is not a trade worth making silently.
+- **Nothing is guessed from a title.** An id it cannot resolve — `kitsu:` and
+  anything else a catalog invents — is logged, recorded once so the timer does
+  not re-log it forever, and skipped. Falling back to a name search is how the
+  wrong film gets downloaded, which is worse than a miss.
+
+| Path | What it is |
+| --- | --- |
+| `logs/stremio-library-sync.log` | one banner per pass, and what it requested |
+| `logs/stremio-library-sync-state.json` | every item handled, and how |
+
+---
+
 ## Health Checks
 
 All services have Docker healthchecks. Check status:
@@ -404,6 +487,7 @@ docker ps --format "table {{.Names}}\t{{.Status}}"
 ```
 
 Services showing `(unhealthy)` may need attention. Common causes:
+
 - **Gluetun unhealthy**: VPN connection lost — check `docker logs gluetun`
 - **SABnzbd/Prowlarr/FlareSolverr unhealthy**: Often caused by Gluetun being down (they share its network). Sonarr/Radarr are on the bridge and not affected by a gluetun outage.
 - **Pi-hole unhealthy**: DNS resolution failing — check upstream DNS config
