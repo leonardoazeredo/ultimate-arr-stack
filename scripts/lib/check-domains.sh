@@ -49,6 +49,7 @@ check_domains() {
         "beszel.lan"
         "usenet.lan"
         "stremio.lan"
+        "magnetio.lan"
     )
 
     # Check .lan domains (parallel for speed)
