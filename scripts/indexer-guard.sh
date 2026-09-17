@@ -37,6 +37,67 @@ set -euo pipefail
 # its own the script writes it, so the rotator's interval starts from that
 # moment instead of minutes earlier.
 #
+# The demand gate
+# ---------------
+# Ban evidence alone is not a reason to cycle the tunnel. An indexer this stack
+# has never downloaded from can sit banned for weeks without costing it
+# anything, and rotating for it drops every connection in the stack for a
+# search nobody was going to make. So a rotation the checks above have already
+# cleared is gated on Sonarr's own data -- does this stack still need
+# something, and did that indexer ever supply it:
+#
+#   - GET /api/v3/wanted/missing?monitored=true, page/pageSize: one record per
+#     monitored episode Sonarr is still looking for, and the series it belongs
+#     to. Unmonitored and already-downloaded episodes are not in it.
+#   - GET /api/v3/history?eventType=1, page/pageSize: one record per grab,
+#     carrying its series and `data.indexer` -- the indexer that supplied it.
+#     Sonarr names a Prowlarr indexer "EZTV (Prowlarr)" where Prowlarr's own
+#     document says "EZTV", so the module takes that one trailing suffix off
+#     before comparing, case-insensitively.
+#
+# Both endpoints are paginated, and the walk is sized by Sonarr's own count
+# rather than by a fixed number of pages. Page one's envelope carries
+# `totalRecords`, the size of the whole document; the module's --page-total mode
+# reads that one integer out of it -- this script still does no JSON parsing of
+# its own -- and the number of pages fetched is ceil(totalRecords /
+# DEMAND_PAGE_SIZE), at least one, bounded by DEMAND_MAX_PAGES. A 2,963-record
+# missing list is three requests rather than five, and a 7,120-record history is
+# eight rather than a hard-coded handful.
+#
+# The cap is a bound, not a guess. When a document needs more pages than
+# DEMAND_MAX_PAGES, the walk stops at the cap and every page it did fetch
+# carries the document's own totalRecords -- so the module can see that the
+# pages do not cover the document and reports demand unknown, which fails open
+# exactly as an unreachable Sonarr does. Judging the join on the pages that fit
+# would report "no demand" for an indexer whose grabs are all on the pages
+# nobody fetched, and that is a false hold: the banned IP stays in place while
+# every indexer behind it fails. This is why DEMAND_MAX_PAGES is a bound rather
+# than a claim about how deep the walk needs to go.
+#
+# The whole fetch runs under one time budget, DEMAND_BUDGET_SECONDS, because
+# --max-time bounds a request and not a pass: ten slow requests is a five-minute
+# stall inside a systemd unit. Every Sonarr request in the pass shares the
+# deadline -- each one gets the smaller of 30 seconds and what is left of it --
+# and a request that would start with none of the budget left is not made at
+# all. The gate is skipped with --demand-error and the pass decides on Prowlarr's
+# evidence, which is the same direction every other Sonarr failure falls.
+#
+# Sonarr is asked only for a pass that would otherwise rotate: the module
+# decides first, from Prowlarr's evidence, and the demand gate is a second
+# decision on top of that. So the everyday hold -- which is nearly every pass --
+# still costs exactly the two Prowlarr requests it always did, no Sonarr call
+# at all, and the gate is applied after the cooldown and the rotator's windows
+# have had their say rather than in front of them.
+#
+# It fails open. No SONARR_API_KEY in .env, Sonarr unreachable, a document that
+# is not JSON, pages that do not cover the document, a budget that ran out: the
+# failure is logged to stderr, the module is told demand was unknown, and the
+# pass decides on Prowlarr's evidence exactly as it did before this gate
+# existed. The alternative -- reading "no answer" as "no demand" -- would hold a
+# banned IP in place for every indexer the stack does use, which is the outage
+# the guard exists to end. SONARR_URL is overridable from .env and defaults to
+# Sonarr's published port on this host.
+#
 # Usage:
 #   ./scripts/indexer-guard.sh                     # decide, rotate if warranted
 #   ./scripts/indexer-guard.sh --dry-run           # decide and log, touch nothing
@@ -59,6 +120,8 @@ set -euo pipefail
 #
 # Prerequisites:
 #   - PROWLARR_API_KEY in .env
+#   - SONARR_API_KEY in .env for the demand gate; without it the gate is
+#     skipped (a warning, not a failure) and the pass decides without it
 #   - python3, curl and docker on PATH
 #   - the gluetun and prowlarr containers running
 #
@@ -79,6 +142,42 @@ GUARD_MODULE="$SCRIPT_DIR/lib/indexer_guard.py"
 PROWLARR_URL="http://localhost:9696"
 GLUETUN_API="http://127.0.0.1:8000/v1"
 GLUETUN_CONTAINER="gluetun"
+
+# Sonarr's published port, for the demand gate. Overridable from .env for a
+# stack that publishes it elsewhere; the default is the port it gets in
+# docker-compose.arr-stack.yml.
+SONARR_URL=""
+SONARR_DEFAULT_URL="http://localhost:8989"
+
+# The demand gate's paging: how many records one page holds, the bound on how
+# many pages of each endpoint are walked, and the whole fetch's time budget in
+# seconds. Sonarr's own default page size is 20, which would make the join see
+# an arbitrary slice of a library's history.
+#
+# DEMAND_MAX_PAGES is a bound, not the length of the walk. Page one's envelope
+# carries totalRecords, the module reads that number out through --page-total,
+# and only the pages it requires are fetched. Twenty pages of a thousand is
+# twenty thousand records -- past any history this stack is likely to grow --
+# and a document bigger than that is reported by the module as demand unknown
+# rather than judged on the slice that fits. See the header.
+DEMAND_PAGE_SIZE=1000
+DEMAND_MAX_PAGES=20
+
+# The whole demand fetch's budget, shared by every Sonarr request in the pass,
+# and counted in $SECONDS rather than against a date because a pass is seconds
+# long and the shell counts them for free. INDEXER_GUARD_* is the tests' dial:
+# nothing in .env sets it, and the default is the wait a production pass may
+# spend on Sonarr. See demand_budget_spent and demand_max_time.
+#
+# The default is kept in its own variable so the typo fallback below restores
+# the same number this line sets rather than a second copy of it.
+DEMAND_BUDGET_SECONDS=120
+DEMAND_BUDGET_DEFAULT="$DEMAND_BUDGET_SECONDS"
+DEMAND_BUDGET_SECONDS="${INDEXER_GUARD_DEMAND_BUDGET_SECONDS:-$DEMAND_BUDGET_SECONDS}"
+
+# The moment the budget started counting, set by demand_args. Zero until then,
+# which is what makes the helpers safe to call from anywhere.
+DEMAND_START=0
 
 # Prowlarr is defined in this compose file and must be restarted through it.
 # Never with --remove-orphans: this stack splits its services across several
@@ -178,6 +277,63 @@ fi
 log() { echo "[indexer-guard] $1"; }
 err() { echo "[indexer-guard] ERROR: $1" >&2; }
 
+# The demand budget's override, checked rather than trusted. A whole number of
+# seconds is what the arithmetic below needs, and zero is allowed here where the
+# cooldown's zero is not: a zero budget is "make no Sonarr request at all",
+# which is how a test watches the fail-open path fire without waiting out a real
+# one. Anything that is not a number is a typo and the production default stands.
+case "$DEMAND_BUDGET_SECONDS" in
+  ''|*[!0-9]*)
+    err "INDEXER_GUARD_DEMAND_BUDGET_SECONDS='$DEMAND_BUDGET_SECONDS' is not a whole number of seconds; using $DEMAND_BUDGET_DEFAULT."
+    DEMAND_BUDGET_SECONDS="$DEMAND_BUDGET_DEFAULT"
+    ;;
+esac
+
+# demand_budget_spent: whether this pass has used up its Sonarr time budget.
+#
+# Checked before every request rather than around the walk, so a pass that runs
+# out stops at a page boundary instead of starting one more request it cannot
+# pay for. A budget of zero is spent before the first request, which is the
+# whole of that behaviour.
+demand_budget_spent() {
+  [[ $((SECONDS - DEMAND_START)) -ge "$DEMAND_BUDGET_SECONDS" ]]
+}
+
+# demand_max_time: how long the next Sonarr request may take, in seconds.
+#
+# The smaller of the per-request ceiling and what is left of the budget, and
+# never below 1: curl reads --max-time 0 as "no limit", which is the unbounded
+# wait the budget exists to prevent. A request reaching this point has already
+# passed demand_budget_spent, so the floor is a rounding allowance rather than a
+# way to overrun the budget.
+demand_max_time() {
+  local remaining=$((DEMAND_BUDGET_SECONDS - (SECONDS - DEMAND_START)))
+  if (( remaining > 30 )); then
+    remaining=30
+  fi
+  if (( remaining < 1 )); then
+    remaining=1
+  fi
+  printf '%s' "$remaining"
+}
+
+# demand_pages_needed <total-records>: pages of DEMAND_PAGE_SIZE covering
+# `total`, before the cap.
+#
+# The ceil, and at least one page even when Sonarr reports an empty document:
+# the walk always fetches page one, because reading the count is what needs a
+# page to read. The cap is applied by the caller rather than here, so the
+# caller can tell "this document needs four pages" from "this document needs
+# more pages than the cap allows" and say which one it is looking at.
+demand_pages_needed() {
+  local total="$1" pages
+  pages=$(( (total + DEMAND_PAGE_SIZE - 1) / DEMAND_PAGE_SIZE ))
+  if (( pages < 1 )); then
+    pages=1
+  fi
+  printf '%s' "$pages"
+}
+
 # A separate check rather than letting the first python3 call fail: `python3:
 # command not found` is exit 127 with the shell's own wording, which reads as
 # the guard being broken rather than the host being short a package.
@@ -204,6 +360,14 @@ PROWLARR_KEY="$(env_value "$ENV_FILE" PROWLARR_API_KEY || true)"
 if [[ -z "$PROWLARR_KEY" ]]; then
   err "PROWLARR_API_KEY is not set in $ENV_FILE."
   exit 1
+fi
+
+# Sonarr's address, with the .env value winning when there is one. Read here and
+# not lazily because it is not a credential and costs nothing: a pass that never
+# reaches the demand gate still knows where Sonarr would have been.
+SONARR_URL="$(env_value "$ENV_FILE" SONARR_URL || true)"
+if [[ -z "$SONARR_URL" ]]; then
+  SONARR_URL="$SONARR_DEFAULT_URL"
 fi
 
 # rotator_last_value: the shared rotation timestamp, if it is one at all.
@@ -279,6 +443,21 @@ prowlarr_get() {
     | curl -sS --fail --max-time 30 --config - -o "$out"
 }
 
+# sonarr_get <path> <output-file>: fetch one Sonarr API document to a file.
+#
+# prowlarr_get's twin, and the same rule for the same reason: the key goes into
+# a curl config on stdin, never into curl's argv, because argv is world-readable
+# through /proc/<pid>/cmdline. The timeout is the smaller of 30 seconds and what
+# is left of the pass's DEMAND_BUDGET_SECONDS -- see demand_max_time -- so a
+# Sonarr that is hanging costs one bounded wait rather than one per page, and a
+# pass that has spent its budget makes no request at all.
+sonarr_get() {
+  local path="$1" out="$2"
+  printf 'url = "%s"\nheader = "X-Api-Key: %s"\n' \
+    "$(curl_quote "$SONARR_URL$path")" "$(curl_quote "$SONARR_KEY")" \
+    | curl -sS --fail --max-time "$(demand_max_time)" --config - -o "$out"
+}
+
 if ! prowlarr_get /api/v1/indexerstatus "$STATUS_FILE"; then
   err "could not fetch /api/v1/indexerstatus from Prowlarr at $PROWLARR_URL."
   exit 1
@@ -305,35 +484,188 @@ if [[ -n "$ROTATOR_INTERVAL" ]]; then
   MODULE_ARGS+=(--rotator-interval "$ROTATOR_INTERVAL")
 fi
 
-# The decision module reads both documents, consults the state file and prints
-# its answer. Its exit status is 0 for any decision it reached, `rotate`
-# included; a non-zero one means it could not read its own input, which is a
-# bug here rather than a verdict.
-DECISION_JSON=""
-if ! DECISION_JSON="$(python3 "$GUARD_MODULE" \
-      --statuses "$STATUS_FILE" \
-      --indexers "$INDEXER_FILE" \
-      --state "$STATE_PATH" \
-      ${MODULE_ARGS[@]+"${MODULE_ARGS[@]}"} \
-      --json)"; then
-  err "the decision module exited non-zero; nothing was rotated."
-  exit 1
-fi
+# guard_decide [extra module flags...]: run the decision module and print its
+# decision document.
+#
+# A function because the pass may decide twice -- once on Prowlarr's evidence,
+# and once again with Sonarr's demand attached -- and the two runs have to be
+# the same command with one thing added. Its exit status is 0 for any decision
+# it reached, `rotate` included; a non-zero one means it could not read its own
+# input, which is a bug here rather than a verdict.
+guard_decide() {
+  local -a extra=()
+  if [[ $# -gt 0 ]]; then
+    extra=("$@")
+  fi
+  python3 "$GUARD_MODULE" \
+    --statuses "$STATUS_FILE" \
+    --indexers "$INDEXER_FILE" \
+    --state "$STATE_PATH" \
+    ${MODULE_ARGS[@]+"${MODULE_ARGS[@]}"} \
+    ${extra[@]+"${extra[@]}"} \
+    --json
+}
 
+# verdict_of <decision-document>: set ROTATE and REASON from it.
+#
 # The verdict and its reason, out of the JSON the module just printed. The
 # module's own --verdict mode does that reading, so the validation that used to
 # be an untested heredoc here sits inside the pytest oracle instead. A parse
 # failure stops the pass rather than being read as "hold": a guard that quietly
 # holds when it cannot read its own decision is a guard that has stopped
 # working, and nothing would say so.
-if ! VERDICT="$(printf '%s' "$DECISION_JSON" \
-      | python3 "$GUARD_MODULE" --verdict -)"; then
-  err "could not read the decision module's output as a decision."
+verdict_of() {
+  if ! VERDICT="$(printf '%s' "$1" \
+        | python3 "$GUARD_MODULE" --verdict -)"; then
+    err "could not read the decision module's output as a decision."
+    return 1
+  fi
+  ROTATE="${VERDICT%%$'\t'*}"
+  REASON="${VERDICT#*$'\t'}"
+  return 0
+}
+
+if ! DECISION_JSON="$(guard_decide)"; then
+  err "the decision module exited non-zero; nothing was rotated."
   exit 1
 fi
+verdict_of "$DECISION_JSON" || exit 1
 
-ROTATE="${VERDICT%%$'\t'*}"
-REASON="${VERDICT#*$'\t'}"
+# --- the demand gate --------------------------------------------------------
+#
+# Sonarr is asked here, and only here: after the module has said this pass would
+# otherwise rotate. A pass that holds on Prowlarr's evidence -- no backoff, no
+# ban evidence, a cooldown still running, the rotator about to fire -- never
+# reaches this code and never costs a Sonarr request.
+#
+# demand_args builds the module flags for the second, demand-aware decision: one
+# flag per page of each document, or --demand-error when the data could not be
+# fetched. It returns 0 either way -- a Sonarr that cannot be reached is a
+# skipped gate, not a failed pass.
+
+# The pages of the document demand_walk just fetched: --flag PATH pairs.
+DEMAND_PAGES=()
+
+# sonarr_page_total <file>: the size of the whole document, out of one page's
+# envelope, or a non-zero exit when the page is not one.
+#
+# The one integer the walk is sized from, and the module reads it: this script
+# parses no JSON, and "what counts as an envelope" has one definition rather
+# than two -- the same one the module's truncation check uses.
+sonarr_page_total() {
+  python3 "$GUARD_MODULE" --page-total "$1"
+}
+
+# demand_walk <description> <flag> <file-prefix> <request-path> <failure-text>
+#
+# Fetches one Sonarr document's pages and leaves one --flag PATH pair per page in
+# DEMAND_PAGES. Four things bound the walk, and every one of them fails open:
+#
+#   - the budget: a request that would start with none of DEMAND_BUDGET_SECONDS
+#     left is not made, and the gate is skipped;
+#   - page one: fetched like every page after it and behind the same budget
+#     check as every other request, with no exemption of its own: a budget
+#     already spent when the walk starts skips it, the same way it would skip
+#     any later page. It is still the page the count comes from, though, so a
+#     page that cannot be fetched, or is not an envelope, is a Sonarr failure
+#     rather than a demand answer;
+#   - totalRecords: the number of pages is what that count requires, so a
+#     document that fits in three pages costs three requests rather than twenty;
+#   - DEMAND_MAX_PAGES: the bound. A document that needs more is fetched up to
+#     the cap and no further; the module sees the envelopes, knows the walk
+#     stopped short, and reports demand unknown rather than judging the slice.
+#
+# Returns 1 with DEMAND_ARGS already set to the --demand-error the caller hands
+# the module, and nothing partial reaches it: a page three that fails never
+# arrives as pages one and two of a document nobody can join on.
+demand_walk() {
+  local description="$1" flag="$2" prefix="$3" request="$4" failure="$5"
+  local page total needed pages out
+
+  DEMAND_PAGES=()
+  page=1
+  total=""
+  pages=1
+
+  while [[ "$page" -le "$pages" ]]; do
+    if demand_budget_spent; then
+      err "the Sonarr demand fetch exceeded its ${DEMAND_BUDGET_SECONDS}s budget; the demand gate is skipped for this pass."
+      DEMAND_ARGS=(--demand-error "the Sonarr demand fetch exceeded its ${DEMAND_BUDGET_SECONDS}s budget")
+      return 1
+    fi
+
+    out="$WORK_DIR/sonarr-$prefix-$page.json"
+    if ! sonarr_get "$request&page=$page&pageSize=$DEMAND_PAGE_SIZE" "$out"; then
+      err "could not fetch the $description from Sonarr at $SONARR_URL; the demand gate is skipped for this pass."
+      DEMAND_ARGS=(--demand-error "$failure")
+      return 1
+    fi
+    DEMAND_PAGES+=("$flag" "$out")
+
+    if [[ "$page" -eq 1 ]]; then
+      if ! total="$(sonarr_page_total "$out")"; then
+        err "Sonarr's first $description page is not a page envelope; the demand gate is skipped for this pass."
+        DEMAND_ARGS=(--demand-error "the Sonarr $description page could not be read")
+        return 1
+      fi
+      needed="$(demand_pages_needed "$total")"
+      if (( needed > DEMAND_MAX_PAGES )); then
+        log "Sonarr's $description document holds $total records, past the ${DEMAND_MAX_PAGES}-page cap of $DEMAND_PAGE_SIZE; stopping there, and the module will report demand unknown rather than judge the pages that fit."
+        pages="$DEMAND_MAX_PAGES"
+      else
+        pages="$needed"
+      fi
+    fi
+
+    page=$((page + 1))
+  done
+  return 0
+}
+
+demand_args() {
+  local -a missing=() history=()
+
+  # A missing key is the one failure that is known before any request, and it
+  # is the operator's to fix: warn, skip the gate, and let the pass rotate on
+  # Prowlarr's evidence as it did before the gate existed.
+  if [[ -z "$SONARR_KEY" ]]; then
+    err "SONARR_API_KEY is not set in $ENV_FILE; the Sonarr demand gate is skipped for this pass."
+    DEMAND_ARGS=(--demand-error "SONARR_API_KEY is not set in .env")
+    return 0
+  fi
+
+  # The budget starts where the first Sonarr request can happen, and both walks
+  # share it: one deadline for the pass rather than one per document.
+  DEMAND_START=$SECONDS
+
+  if ! demand_walk "monitored missing episodes" --demand-missing missing \
+        "/api/v3/wanted/missing?monitored=true" "the Sonarr wanted/missing request failed"; then
+    return 0
+  fi
+  missing=("${DEMAND_PAGES[@]}")
+
+  if ! demand_walk "grabbed history" --demand-history history \
+        "/api/v3/history?eventType=1" "the Sonarr history request failed"; then
+    return 0
+  fi
+  history=("${DEMAND_PAGES[@]}")
+
+  # Both families, or neither: the join needs both documents, and the module
+  # treats half of one as demand it could not read rather than as no demand.
+  DEMAND_ARGS=("${missing[@]}" "${history[@]}")
+  return 0
+}
+
+DEMAND_ARGS=()
+if [[ "$ROTATE" == rotate ]]; then
+  SONARR_KEY="$(env_value "$ENV_FILE" SONARR_API_KEY || true)"
+  demand_args
+  if ! DECISION_JSON="$(guard_decide ${DEMAND_ARGS[@]+"${DEMAND_ARGS[@]}"})"; then
+    err "the decision module exited non-zero on the demand gate; nothing was rotated."
+    exit 1
+  fi
+  verdict_of "$DECISION_JSON" || exit 1
+fi
 
 case "$ROTATE" in
   hold)

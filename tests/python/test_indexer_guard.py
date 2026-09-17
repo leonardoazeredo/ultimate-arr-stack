@@ -672,6 +672,793 @@ def test_a_rotator_window_that_is_not_above_zero_is_refused(window):
         m.should_rotate([a_blocked()], None, NOW, 6.0, EPOCH - 600, 21600, window)
 
 
+# --- the demand gate ---------------------------------------------------------
+#
+# The other half of a rotation: ban evidence says the IP is blocked, demand
+# says this stack cares. The two ways to get the gate wrong are not
+# symmetrical either. Holding a banned IP because Sonarr could not be reached
+# leaves every indexer failing until someone notices; rotating for an indexer
+# nothing here has ever downloaded from spends the outage for nothing. So the
+# tests below are about the join, the name Sonarr spells differently, and which
+# way an unreadable answer falls.
+
+
+def a_demand(*names, known=True, error=None):
+    """A demand state as demand_from_documents builds one.
+
+    Names are given already normalised -- lower case, no " (Prowlarr)" suffix
+    -- because that is what indexers_with_demand returns. The tests that spell
+    a name the way Sonarr does go through the join itself.
+    """
+    return {"known": known, "indexers": set(names), "error": error}
+
+
+def a_page(*records):
+    """One Sonarr page, shaped the way the API sends it."""
+    return {"page": 1, "pageSize": 1000, "totalRecords": len(records),
+            "records": list(records)}
+
+
+def a_grabbed(series_id, indexer):
+    """One GET /api/v3/history?eventType=1 record."""
+    return {"seriesId": series_id, "eventType": "grabbed",
+            "data": {"indexer": indexer}}
+
+
+def a_full_page(total, record, page=1, size=1000):
+    """One page of `size` records, out of a document the envelope counts `total`.
+
+    The two numbers are deliberately independent: `totalRecords` is the whole
+    document's size, and a page that holds fewer records than its envelope
+    claims is exactly what a walk that stopped early produces.
+    """
+    return {"page": page, "pageSize": size, "totalRecords": total,
+            "records": [dict(record) for _ in range(size)]}
+
+
+def write_pages(directory, name, pages):
+    """`pages` written as <name>-1.json, <name>-2.json, ...; returns the paths.
+
+    One file per page, the way the wrapper writes them, so a test declares the
+    document as a whole and the flags as the walk produced them.
+    """
+    return [write(directory / f"{name}-{index}.json", page)
+            for index, page in enumerate(pages, start=1)]
+
+
+def test_sonarrs_prowlarr_suffix_comes_off_before_the_comparison():
+    # Prowlarr owns the indexer and pushes it into Sonarr, which stores the
+    # name with this suffix. The demand join compares the two documents, so the
+    # suffix is the difference between "EZTV has demand" and "no indexer here
+    # needs anything".
+    assert m.normalise_indexer_name("EZTV (Prowlarr)") == "eztv"
+    assert m.normalise_indexer_name("1337x (Prowlarr)") == "1337x"
+
+
+def test_normalising_trims_and_folds_case():
+    assert m.normalise_indexer_name("  EZTV  ") == "eztv"
+    assert m.normalise_indexer_name("eZtV") == "eztv"
+    assert m.normalise_indexer_name(" EZTV (Prowlarr) ") == "eztv"
+    assert m.normalise_indexer_name("1337X (Prowlarr)") == "1337x"
+
+
+def test_a_prowlarr_that_is_not_the_trailing_suffix_is_part_of_the_name():
+    # "exactly that trailing suffix": a name that merely contains the text is
+    # a different indexer, and stripping it would join two of them.
+    assert m.normalise_indexer_name("EZTV (Prowlarr) HD") == "eztv (prowlarr) hd"
+    assert m.normalise_indexer_name("(Prowlarr) EZTV") == "(prowlarr) eztv"
+    assert m.normalise_indexer_name("EZTV (Prowlarrs)") == "eztv (prowlarrs)"
+    assert m.normalise_indexer_name("EZTV (Prowlarr) (Prowlarr)") == "eztv (prowlarr)"
+
+
+def test_a_name_that_is_not_text_normalises_to_nothing():
+    # The empty string never matches anything, which is the point: a number or
+    # a null in the field is not a name, and returning it unchanged would let
+    # two nameless records match each other.
+    for value in (None, 7, 4.2, True, {}, [], object()):
+        assert m.normalise_indexer_name(value) == ""
+
+
+def test_a_grab_for_a_missing_series_is_demand():
+    missing = [{"seriesId": 12, "monitored": True}]
+    history = [a_grabbed(12, "EZTV (Prowlarr)")]
+    assert m.indexers_with_demand(missing, history) == {"eztv"}
+
+
+def test_a_grab_for_a_series_that_is_not_missing_is_not_demand():
+    # The series is complete today, so the one indexer that ever supplied it is
+    # not one this stack needs anything from.
+    missing = [{"seriesId": 12}]
+    history = [a_grabbed(99, "EZTV (Prowlarr)")]
+    assert m.indexers_with_demand(missing, history) == set()
+
+
+def test_nothing_missing_is_no_demand_from_anyone():
+    # Half of the join, and the half that decides the other way: a stack with
+    # nothing missing has no demand at all, however many grabs its history
+    # holds.
+    history = [a_grabbed(12, "EZTV (Prowlarr)"), a_grabbed(13, "YTS")]
+    assert m.indexers_with_demand([], history) == set()
+    assert m.indexers_with_demand([{"seriesId": None}], history) == set()
+
+
+def test_only_series_with_a_missing_episode_can_carry_demand():
+    # An unmonitored episode and an already-downloaded one are not in the
+    # document at all: `monitored=true` is the request's filter, asserted in
+    # tests/indexer-guard.bats. What the module enforces is the join's other
+    # half -- a grab for a series the missing document does not name was for a
+    # series that is not missing, whatever the reason.
+    missing = a_page({"seriesId": 12})
+    history = a_page(a_grabbed(12, "EZTV (Prowlarr)"),
+                     a_grabbed(13, "YTS"), a_grabbed(14, "RARBG"))
+    assert m.indexers_with_demand(missing, history) == {"eztv"}
+
+
+def test_several_indexers_with_demand_come_back_together():
+    missing = [{"seriesId": 1}, {"seriesId": 2}]
+    history = [a_grabbed(1, "EZTV (Prowlarr)"), a_grabbed(2, "yts"),
+               a_grabbed(2, "EZTV (Prowlarr)")]
+    assert m.indexers_with_demand(missing, history) == {"eztv", "yts"}
+
+
+def test_a_history_record_with_no_usable_indexer_is_skipped():
+    missing = [{"seriesId": 12}]
+    history = [
+        {"seriesId": 12},
+        {"seriesId": 12, "data": None},
+        {"seriesId": 12, "data": "EZTV (Prowlarr)"},
+        a_grabbed(12, ""),
+        a_grabbed(12, "   "),
+        a_grabbed(12, None),
+    ]
+    assert m.indexers_with_demand(missing, history) == set()
+
+
+def test_a_series_id_that_arrived_as_a_string_still_joins():
+    # The same document round-tripped through a shell or a viewer comes back
+    # with quotes. _as_id accepts both, so the join does too.
+    missing = [{"seriesId": "12"}]
+    history = [a_grabbed(12, "EZTV (Prowlarr)")]
+    assert m.indexers_with_demand(missing, history) == {"eztv"}
+
+
+@pytest.mark.parametrize("document", [None, {}, [], "not a document", 7, [None, "x"]])
+def test_a_demand_document_in_any_other_shape_has_no_records(document):
+    assert m.indexers_with_demand(document, document) == set()
+
+
+def test_a_paginated_page_is_read_as_its_records(tmp_path):
+    # Sonarr answers with an envelope, not a bare array, and `records` is where
+    # every field this gate reads lives.
+    missing = write(tmp_path / "missing.json", a_page({"seriesId": 12}))
+    history = write(tmp_path / "history.json", a_page(a_grabbed(12, "EZTV (Prowlarr)")))
+    state = m.demand_from_documents([missing], [history])
+    assert state["known"] is True
+    assert state["indexers"] == {"eztv"}
+
+
+def test_several_pages_of_one_document_are_joined():
+    # The wrapper writes one file per page and repeats the flag; the pages are
+    # one document as far as the join is concerned.
+    missing_a = {"page": 1, "records": [{"seriesId": 12}]}
+    missing_b = {"page": 2, "records": [{"seriesId": 13}]}
+    history = {"page": 1, "records": [a_grabbed(13, "EZTV (Prowlarr)")]}
+    # Through the pure join, which is what the CLI feeds both pages into.
+    assert m.indexers_with_demand(missing_a["records"] + missing_b["records"],
+                                  history["records"]) == {"eztv"}
+
+
+@pytest.mark.parametrize("blocks", [
+    [None], [{}], [[]], ["not a document"], [{"page": 1}], [{"records": "no"}],
+])
+def test_a_demand_document_with_no_records_is_an_empty_join(blocks):
+    assert m.indexers_with_demand(blocks, blocks) == set()
+
+
+def test_no_demand_flags_at_all_is_not_a_demand_input():
+    # None, not an empty state: nothing asked Sonarr, and the decision has to
+    # be the one this module made before the gate existed.
+    assert m.demand_from_documents(None, None, None) is None
+    assert m.demand_from_documents([], [], None) is None
+
+
+def test_a_wrapper_that_could_not_fetch_is_unknown_demand():
+    state = m.demand_from_documents(None, None, "Sonarr unreachable")
+    assert state == {"known": False, "indexers": frozenset(),
+                     "error": "Sonarr unreachable"}
+
+
+def test_half_of_the_join_is_unknown_demand():
+    # Both documents are needed to know anything: with one of them there is no
+    # join to make, and "no demand" would be a guess.
+    assert m.demand_from_documents(["missing.json"], [], None)["known"] is False
+    assert m.demand_from_documents([], ["history.json"], None)["known"] is False
+    assert "both Sonarr documents" in \
+        m.demand_from_documents([], ["history.json"], None)["error"]
+
+
+def test_an_empty_missing_document_is_a_real_answer(tmp_path):
+    # Sonarr saying "nothing is missing" is known demand with nothing in it --
+    # not an unknown one. Reading it as unknown would skip the gate and rotate
+    # for an indexer nothing here needs.
+    missing = write(tmp_path / "missing.json", a_page())
+    history = write(tmp_path / "history.json", a_page(a_grabbed(12, "EZTV (Prowlarr)")))
+    state = m.demand_from_documents([missing], [history])
+    assert state["known"] is True
+    assert state["indexers"] == frozenset()
+
+
+@pytest.mark.parametrize("content", ["", "{ not json", "<html>nope</html>", "[1,"])
+def test_a_malformed_demand_document_is_unknown_demand(content, tmp_path):
+    # Fail open all the way down: a page that cannot be read is demand nobody
+    # knows, not a traceback on a timer and not "no demand".
+    missing = write(tmp_path / "missing.json", a_page({"seriesId": 12}))
+    history = tmp_path / "history.json"
+    history.write_text(content)
+    state = m.demand_from_documents([missing], [str(history)])
+    assert state["known"] is False
+    assert state["indexers"] == frozenset()
+    assert "not JSON" in state["error"]
+
+
+def test_a_demand_page_that_is_not_there_is_unknown_demand(tmp_path):
+    state = m.demand_from_documents([str(tmp_path / "nope.json")],
+                                    [str(tmp_path / "also-nope.json")])
+    assert state["known"] is False
+    assert "cannot read" in state["error"]
+
+
+# --- a walk that stopped short -----------------------------------------------
+#
+# The wrapper fetches Sonarr's pages until the envelope's own count is covered,
+# bounded by its page cap and its time budget. Whatever the reason it stopped,
+# the pages in hand are not the whole document, and a join over them is the
+# dangerous reading: an indexer whose grabs are all on the pages nobody fetched
+# looks exactly like an indexer with no demand, and that hold leaves a banned IP
+# in place while every indexer behind it fails. So an incomplete document is
+# demand UNKNOWN -- fail open, like every other unreadable answer -- and the
+# note says which document and how much of it arrived.
+
+
+def test_a_multi_page_document_that_adds_up_is_known_demand(tmp_path):
+    # Three pages of a thousand records each, and envelopes that count 3000:
+    # the walk covered the document, so the join is made on all of it. This is
+    # the shape the early stop produces on a healthy stack, and it has to stay
+    # a known answer -- reading every multi-page document as truncated would
+    # make the gate unknown forever.
+    missing = write_pages(tmp_path, "missing",
+                          [a_full_page(3000, {"seriesId": 12}, page=page)
+                           for page in (1, 2, 3)])
+    history = write_pages(
+        tmp_path, "history",
+        [a_full_page(3000, a_grabbed(12, "1337x (Prowlarr)"), page=page)
+         for page in (1, 2, 3)])
+    state = m.demand_from_documents(missing, history)
+    assert state["known"] is True
+    assert state["indexers"] == {"1337x"}
+
+
+def test_pages_that_add_up_exactly_to_the_envelope_are_complete(tmp_path):
+    # The boundary, and the comparison is inclusive: collected == totalRecords
+    # is the whole document. `>` here would make the gate unknown for every
+    # library whose history is a whole number of pages, which is every document
+    # Sonarr serves with totalRecords == page * pageSize.
+    missing = write(tmp_path / "missing.json",
+                    a_full_page(1000, {"seriesId": 12}))
+    history = write(tmp_path / "history.json",
+                    a_full_page(1000, a_grabbed(12, "1337x (Prowlarr)")))
+    state = m.demand_from_documents([missing], [history])
+    assert state["known"] is True
+    assert state["indexers"] == {"1337x"}
+
+
+def test_a_truncated_history_document_is_unknown_demand(tmp_path):
+    # Five pages of a thousand, from a history the envelope says holds 7120 --
+    # the pre-fix wrapper's exact walk, and the count it never read.
+    missing = write(tmp_path / "missing.json", a_page({"seriesId": 12}))
+    history = write_pages(
+        tmp_path, "history",
+        [a_full_page(7120, a_grabbed(99, "1337x (Prowlarr)"), page=page)
+         for page in range(1, 6)])
+    state = m.demand_from_documents([missing], history)
+    assert state["known"] is False
+    assert state["indexers"] == frozenset()
+    assert state["error"] == "Sonarr history truncated: 5000 of 7120 records"
+
+
+def test_a_truncated_history_fails_open_and_rotates(tmp_path):
+    # The failure the truncation check exists to prevent, in the direction it
+    # has to fall. The pages in hand show 1337x grabbing series 99 and nothing
+    # for the missing series 12, so a join over them alone would hold the
+    # rotation -- while the grabs that would justify it sit on page six. The
+    # answer is unknown demand: the rotation happens, and the reason names the
+    # document that was read short.
+    missing = write(tmp_path / "missing.json", a_page({"seriesId": 12}))
+    history = write_pages(
+        tmp_path, "history",
+        [a_full_page(7120, a_grabbed(99, "1337x (Prowlarr)"), page=page)
+         for page in range(1, 6)])
+    state = m.demand_from_documents([missing], history)
+    rotate, reason = m.should_rotate([a_blocked()], None, NOW, 6.0,
+                                     demand=state)
+    assert rotate is True
+    assert "1337x show ban evidence" in reason
+    assert "Sonarr demand unknown: Sonarr history truncated: 5000 of 7120 records" in reason
+    assert reason.strip() and "\n" not in reason
+
+
+def test_a_truncated_missing_document_is_unknown_demand(tmp_path):
+    # The other half of the join, and the same rule: an incomplete list of what
+    # is missing is not "nothing is missing".
+    missing = write_pages(tmp_path, "missing",
+                          [a_full_page(4000, {"seriesId": 12}, page=page)
+                           for page in (1, 2)])
+    history = write(tmp_path / "history.json",
+                    a_page(a_grabbed(12, "1337x (Prowlarr)")))
+    state = m.demand_from_documents(missing, [history])
+    assert state["known"] is False
+    assert state["error"] == \
+        "Sonarr missing episodes truncated: 2000 of 4000 records"
+
+
+def test_both_truncated_documents_are_named_in_the_note(tmp_path):
+    missing = write_pages(tmp_path, "missing",
+                          [a_full_page(4000, {"seriesId": 12}, page=page)
+                           for page in (1, 2)])
+    history = write_pages(
+        tmp_path, "history",
+        [a_full_page(3000, a_grabbed(12, "1337x (Prowlarr)"), page=page)
+         for page in (1, 2)])
+    state = m.demand_from_documents(missing, history)
+    assert state["known"] is False
+    assert state["error"] == (
+        "Sonarr missing episodes truncated: 2000 of 4000 records; "
+        "Sonarr history truncated: 2000 of 3000 records")
+
+
+def test_the_largest_total_records_across_the_pages_is_the_one_judged(tmp_path):
+    # Sonarr's count moves while the walk runs -- two more grabs arrived between
+    # page one and page two. The largest claim is the one that says how much of
+    # the document the pages have to cover, so the comparison is against 2600,
+    # not the 2500 page one happened to report first.
+    missing = write(tmp_path / "missing.json", a_page({"seriesId": 12}))
+    history = [
+        write(tmp_path / "history-1.json",
+              a_full_page(2500, a_grabbed(12, "1337x (Prowlarr)"))),
+        write(tmp_path / "history-2.json",
+              a_full_page(2600, a_grabbed(12, "1337x (Prowlarr)"), page=2)),
+    ]
+    state = m.demand_from_documents([missing], history)
+    assert state["known"] is False
+    assert state["error"] == "Sonarr history truncated: 2000 of 2600 records"
+
+
+def test_bare_arrays_are_taken_as_complete(tmp_path):
+    # A caller that hands over the records themselves makes no claim about a
+    # whole document, so there is nothing to be short of. Treating them as
+    # truncated would make every hand-run and every direct caller unknown.
+    missing = write(tmp_path / "missing.json", [{"seriesId": 12}])
+    history = write(tmp_path / "history.json",
+                    [a_grabbed(12, "1337x (Prowlarr)")])
+    state = m.demand_from_documents([missing], [history])
+    assert state["known"] is True
+    assert state["indexers"] == {"1337x"}
+
+
+def test_an_envelope_with_no_usable_count_is_taken_as_complete(tmp_path):
+    # The same rule one step in: an envelope whose totalRecords is missing,
+    # null, negative or not a number claims nothing, and a claim nobody made
+    # cannot be short. What it must NOT do is read as zero, which would report
+    # a truncated document for every page a proxy or a viewer stripped a field
+    # from.
+    missing = write(tmp_path / "missing.json", a_page({"seriesId": 12}))
+    for unusable in (None, "many", -1, True, 1.5, []):
+        history = tmp_path / "history.json"
+        history.write_text(json.dumps({
+            "page": 1, "pageSize": 1000, "totalRecords": unusable,
+            "records": [a_grabbed(12, "1337x (Prowlarr)")]}))
+        state = m.demand_from_documents([missing], [str(history)])
+        assert state["known"] is True, unusable
+        assert state["indexers"] == {"1337x"}, unusable
+
+
+def test_a_banned_indexer_with_demand_rotates():
+    rotate, reason = m.should_rotate([a_blocked()], None, NOW, 6.0,
+                                     demand=a_demand("1337x"))
+    assert rotate is True
+    assert "1337x" in reason
+    assert "no Sonarr demand" not in reason
+
+
+def test_a_banned_indexer_without_demand_holds_with_the_demand_reason():
+    # The whole point of the gate. The IP is banned for this indexer and
+    # nothing here needs it: the rotation is held, and the reason says which
+    # indexer it is not for.
+    rotate, reason = m.should_rotate([a_blocked()], None, NOW, 6.0,
+                                     demand=a_demand())
+    assert rotate is False
+    assert "banned indexers have no Sonarr demand: 1337x" in reason
+    assert "not rotating" in reason
+    assert reason.strip() and "\n" not in reason
+
+
+def test_one_banned_indexer_with_demand_is_enough():
+    # A mixed set rotates, and names the indexer it is not for beside the one
+    # it is: "rotating, and here is what is not part of why".
+    rows = [a_blocked("1337x", True, 7), a_blocked("EZTV", True, 9)]
+    rotate, reason = m.should_rotate(rows, None, NOW, 6.0,
+                                     demand=a_demand("1337x"))
+    assert rotate is True
+    assert "1337x" in reason
+    assert "no Sonarr demand for EZTV" in reason
+    assert reason.strip() and "\n" not in reason
+
+
+def test_the_gate_compares_the_names_the_join_compares():
+    # A row labelled the way Sonarr labels it, and a demand set normalised the
+    # way the join normalises it. Getting one side only right is no demand at
+    # all, which is a silent hold.
+    assert m.should_rotate([a_blocked("EzTv (Prowlarr)", True, 7)], None, NOW,
+                           6.0, demand=a_demand("eztv"))[0] is True
+    assert m.should_rotate([a_blocked("EZTV", True, 7)], None, NOW, 6.0,
+                           demand=a_demand("eztv"))[0] is True
+    assert m.should_rotate([a_blocked("EzTv (Prowlarr) HD", True, 7)], None,
+                           NOW, 6.0, demand=a_demand("eztv"))[0] is False
+
+
+def test_the_demand_gate_does_not_override_the_cooldown():
+    # The ordering, and the reason for it: a cooldown that is still running
+    # holds any rotation at all, demand or no demand, and the reason says the
+    # cooldown rather than Sonarr -- the demand was never consulted.
+    rotate, reason = m.should_rotate([a_blocked()], NOW - timedelta(hours=2),
+                                     NOW, 6.0, demand=a_demand())
+    assert rotate is False
+    assert "cooldown" in reason
+    assert "4.0h left" in reason
+    assert "Sonarr" not in reason
+
+
+def test_the_demand_gate_does_not_override_the_rotator_window():
+    rotate, reason = m.should_rotate([a_blocked()], None, NOW, 6.0,
+                                     EPOCH - 600, demand=a_demand())
+    assert rotate is False
+    assert "re-probe" in reason
+    assert "Sonarr" not in reason
+
+
+def test_the_demand_gate_is_not_consulted_without_ban_evidence():
+    rotate, reason = m.should_rotate([a_blocked(evidence=False)], None, NOW,
+                                     6.0, demand=a_demand())
+    assert rotate is False
+    assert "no ban evidence" in reason
+    assert "Sonarr" not in reason
+
+
+def test_unknown_demand_fails_open_with_a_note():
+    # A Sonarr that cannot be reached must not ground a banned IP: the rotation
+    # still happens, and the reason says the demand half was unknown rather
+    # than leaving the reader to guess.
+    rotate, reason = m.should_rotate([a_blocked()], None, NOW, 6.0,
+                                     demand=a_demand(known=False,
+                                                     error="Sonarr unreachable"))
+    assert rotate is True
+    assert "1337x show ban evidence" in reason
+    assert "Sonarr demand unknown: Sonarr unreachable" in reason
+    assert reason.strip() and "\n" not in reason
+
+
+def test_unknown_demand_does_not_change_a_hold_that_was_already_decided():
+    # Fail open is about not inventing a hold; it is not a reason to decorate
+    # one that the cooldown already justified.
+    before = m.should_rotate([a_blocked()], NOW - timedelta(hours=2), NOW, 6.0)
+    after = m.should_rotate([a_blocked()], NOW - timedelta(hours=2), NOW, 6.0,
+                            demand=a_demand(known=False, error="Sonarr unreachable"))
+    assert after == before
+
+
+def test_no_demand_input_leaves_the_decision_untouched():
+    # The gate cannot decorate a decision it was never given input for: with no
+    # demand argument, every reason is the sentence this module printed before
+    # the gate existed, and the document that pairs with it carries no demand
+    # field at all. That is what makes a pass without Sonarr data comparable
+    # with every pass before it.
+    cases = [
+        ([a_blocked()], None),
+        ([a_blocked()], NOW - timedelta(hours=1)),
+        ([a_blocked()], NOW - timedelta(hours=7)),
+        ([a_blocked()], "garbage"),
+        ([a_blocked(evidence=False)], None),
+        ([a_blocked("1337x", True, 7), a_blocked("YTS", False, 9)], None),
+        ([], None),
+    ]
+    for blocked, last in cases:
+        # Not "two identical calls agree": the demand-free answer has to BE the
+        # pre-gate decision, bit for bit, which is what _decide_ban_evidence is.
+        assert m.should_rotate(blocked, last, NOW, 6.0) == \
+            m._decide_ban_evidence(blocked, last, NOW, 6.0, None,
+                                   m.DEFAULT_ROTATOR_INTERVAL_SECONDS,
+                                   m.DEFAULT_ROTATOR_WINDOW_MINUTES)[:2], blocked
+        _rotate, reason = m.should_rotate(blocked, last, NOW, 6.0)
+        assert "Sonarr" not in reason, blocked
+        assert reason.strip() and "\n" not in reason, blocked
+
+    view = m.decision([a_status()], [an_indexer()], m.empty_state(), NOW, 6.0)
+    assert not [key for key in view if "demand" in key or "banned_" in key]
+
+
+def test_unreadable_demand_is_a_skip_with_a_note_not_a_hold():
+    # Every case where the module would rotate stays a rotation, with the note
+    # that says the demand half was not judged; every case where it had already
+    # decided to hold is untouched, because there was no demand decision to
+    # note.
+    cases = [
+        ([a_blocked()], None),
+        ([a_blocked()], NOW - timedelta(hours=1)),
+        ([a_blocked()], NOW - timedelta(hours=7)),
+        ([a_blocked()], "garbage"),
+        ([a_blocked(evidence=False)], None),
+        ([a_blocked("1337x", True, 7), a_blocked("YTS", False, 9)], None),
+        ([], None),
+    ]
+    for blocked, last in cases:
+        base = m.should_rotate(blocked, last, NOW, 6.0)
+        unknown = m.should_rotate(blocked, last, NOW, 6.0,
+                                  demand=a_demand(known=False))
+        assert unknown[0] == base[0], blocked
+        if base[0]:
+            assert unknown[1].startswith(base[1]), blocked
+            assert "Sonarr demand unknown" in unknown[1], blocked
+        else:
+            assert unknown == base, blocked
+
+
+def test_the_demand_fields_a_known_gate_adds():
+    view = m.decision([a_status(message="Cloudflare error 1006")],
+                      [an_indexer()], m.empty_state(), NOW, 6.0,
+                      demand=a_demand("1337x"))
+    assert view["demand_known"] is True
+    assert view["demand_error"] is None
+    assert view["banned_with_demand"] == ["1337x"]
+    assert view["banned_without_demand"] == []
+
+
+def test_the_demand_fields_an_unknown_gate_adds():
+    # Null, not empty: an unread document is not a list of indexers nothing
+    # needs, and a reader has to be able to tell those apart.
+    view = m.decision([a_status()], [an_indexer()], m.empty_state(), NOW, 6.0,
+                      demand=a_demand(known=False, error="Sonarr unreachable"))
+    assert view["demand_known"] is False
+    assert view["demand_error"] == "Sonarr unreachable"
+    assert view["banned_with_demand"] is None
+    assert view["banned_without_demand"] is None
+
+
+def test_the_demand_document_splits_a_mixed_banned_set():
+    statuses = [a_status(id=4, indexerId=7, message="Cloudflare error 1006"),
+                a_status(id=5, indexerId=9, message="403 Forbidden")]
+    indexers = [an_indexer(7, "1337x"), an_indexer(9, "EZTV")]
+    view = m.decision(statuses, indexers, m.empty_state(), NOW, 6.0,
+                      demand=a_demand("1337x"))
+    assert view["banned_with_demand"] == ["1337x"]
+    assert view["banned_without_demand"] == ["EZTV"]
+    assert view["rotate"] is True
+
+
+def test_main_rotates_on_a_demand_document_that_matches(tmp_path, capsys):
+    statuses = write(tmp_path / "statuses.json",
+                     [live_status(message="Cloudflare error 1006")])
+    indexers = write(tmp_path / "indexers.json", [an_indexer()])
+    missing = write(tmp_path / "missing.json", a_page({"seriesId": 12}))
+    history = write(tmp_path / "history.json", a_page(a_grabbed(12, "1337x (Prowlarr)")))
+
+    assert m.main(["--statuses", statuses, "--indexers", indexers,
+                   "--state", str(tmp_path / "state.json"),
+                   "--demand-missing", missing, "--demand-history", history,
+                   "--json"]) == 0
+    view = json.loads(capsys.readouterr().out)
+    assert view["rotate"] is True
+    assert view["demand_known"] is True
+    assert view["banned_with_demand"] == ["1337x"]
+
+
+def test_main_holds_on_a_demand_document_that_does_not(tmp_path, capsys):
+    statuses = write(tmp_path / "statuses.json",
+                     [live_status(message="Cloudflare error 1006")])
+    missing = write(tmp_path / "missing.json", a_page({"seriesId": 12}))
+    history = write(tmp_path / "history.json", a_page(a_grabbed(99, "EZTV (Prowlarr)")))
+
+    assert m.main(["--statuses", statuses,
+                   "--state", str(tmp_path / "state.json"),
+                   "--demand-missing", missing, "--demand-history", history,
+                   "--json"]) == 0
+    view = json.loads(capsys.readouterr().out)
+    assert view["rotate"] is False
+    assert "banned indexers have no Sonarr demand" in view["reason"]
+    assert view["banned_without_demand"] == ["indexer 7"]
+
+
+def test_main_fails_open_on_a_malformed_demand_document(tmp_path, capsys):
+    statuses = write(tmp_path / "statuses.json",
+                     [live_status(message="Cloudflare error 1006")])
+    missing = write(tmp_path / "missing.json", a_page({"seriesId": 12}))
+    history = tmp_path / "history.json"
+    history.write_text("{ not json")
+
+    assert m.main(["--statuses", statuses,
+                   "--state", str(tmp_path / "state.json"),
+                   "--demand-missing", missing,
+                   "--demand-history", str(history), "--json"]) == 0
+    view = json.loads(capsys.readouterr().out)
+    assert view["rotate"] is True
+    assert view["demand_known"] is False
+    assert view["banned_with_demand"] is None
+    assert "Sonarr demand unknown" in view["reason"]
+
+
+def test_main_notes_a_demand_error_the_wrapper_sent(tmp_path, capsys):
+    # The wrapper's fail-open path: it could not fetch, so it says so and sends
+    # no documents. The decision is the one without the gate, plus the note.
+    statuses = write(tmp_path / "statuses.json",
+                     [live_status(message="Cloudflare error 1006")])
+
+    assert m.main(["--statuses", statuses,
+                   "--state", str(tmp_path / "state.json"),
+                   "--demand-error", "the Sonarr history request failed",
+                   "--json"]) == 0
+    view = json.loads(capsys.readouterr().out)
+    assert view["rotate"] is True
+    assert view["demand_known"] is False
+    assert view["demand_error"] == "the Sonarr history request failed"
+    assert "Sonarr demand unknown: the Sonarr history request failed" in view["reason"]
+
+
+def test_main_with_no_demand_flags_prints_no_demand_fields(tmp_path, capsys):
+    statuses = write(tmp_path / "statuses.json",
+                     [live_status(message="Cloudflare error 1006")])
+    assert m.main(["--statuses", statuses,
+                   "--state", str(tmp_path / "state.json"), "--json"]) == 0
+    view = json.loads(capsys.readouterr().out)
+    assert not [key for key in view if "demand" in key or "banned_" in key]
+
+
+def test_the_text_line_carries_the_demand_summary(tmp_path, capsys):
+    statuses = write(tmp_path / "statuses.json",
+                     [live_status(message="Cloudflare error 1006")])
+    indexers = write(tmp_path / "indexers.json", [an_indexer()])
+    missing = write(tmp_path / "missing.json", a_page({"seriesId": 12}))
+    history = write(tmp_path / "history.json", a_page(a_grabbed(12, "1337x (Prowlarr)")))
+
+    assert m.main(["--statuses", statuses, "--indexers", indexers,
+                   "--state", str(tmp_path / "state.json"),
+                   "--demand-missing", missing, "--demand-history", history]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("rotate: ")
+    assert "Sonarr demand: 1337x" in out
+    assert "no Sonarr demand: none" in out
+
+
+def test_the_verdict_carries_the_demand_summary(tmp_path, capsys):
+    # The wrapper's --verdict path is what writes its log line, so a hold the
+    # gate caused has to say so there too.
+    document = write(tmp_path / "decision.json", {
+        "rotate": False,
+        "reason": "banned indexers have no Sonarr demand: 1337x; not rotating",
+        "demand_known": True,
+        "demand_error": None,
+        "banned_with_demand": [],
+        "banned_without_demand": ["1337x"],
+    })
+    assert m.main(["--verdict", document]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("hold\tbanned indexers have no Sonarr demand")
+    assert "Sonarr demand: none; no Sonarr demand: 1337x" in out
+
+
+def test_the_verdict_carries_an_unknown_demand_note(tmp_path, capsys):
+    document = write(tmp_path / "decision.json", {
+        "rotate": True,
+        "reason": "1337x show ban evidence; rotating",
+        "demand_known": False,
+        "demand_error": "Sonarr unreachable",
+        "banned_with_demand": None,
+        "banned_without_demand": None,
+    })
+    assert m.main(["--verdict", document]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("rotate\t1337x show ban evidence; rotating")
+    assert "Sonarr demand unknown: Sonarr unreachable" in out
+
+
+def test_a_document_that_never_asked_sonarr_renders_no_demand_line(tmp_path, capsys):
+    # The whole fail-open guarantee in one assertion: what --verdict prints for
+    # a decision without demand data is exactly what it printed before the gate
+    # existed.
+    document = write(tmp_path / "decision.json",
+                     {"rotate": True, "reason": "1337x show ban evidence; rotating"})
+    assert m.main(["--verdict", document]) == 0
+    assert capsys.readouterr().out == \
+        "rotate\t1337x show ban evidence; rotating\n"
+
+
+# --- reading one page's envelope ---------------------------------------------
+#
+# The wrapper's paging half. The walk has to know how big the whole document is
+# before it can fetch the right number of pages, and the shell parses no JSON,
+# so the module prints that one integer for it. A document it cannot read is an
+# error rather than a zero: zero is a real answer -- Sonarr saying the document
+# is empty -- and a made-up one would become a hold, while the caller's
+# fail-open path is only reached when this exits non-zero.
+
+
+def test_page_total_mode_prints_the_envelope_count(tmp_path, capsys):
+    page = write(tmp_path / "page.json",
+                 a_page(*(a_grabbed(series, "1337x") for series in range(7))))
+    assert m.main(["--page-total", page]) == 0
+    assert capsys.readouterr().out == "7\n"
+
+
+def test_page_total_mode_prints_a_zero_count(tmp_path, capsys):
+    # Zero is a real answer, and the caller's ceil() is what still fetches page
+    # one for it. Reading it as a failure would skip the gate on a stack whose
+    # missing list happens to be empty.
+    page = write(tmp_path / "page.json", a_page())
+    assert m.main(["--page-total", page]) == 0
+    assert capsys.readouterr().out == "0\n"
+
+
+def test_page_total_mode_reads_a_digit_string_as_its_number(tmp_path, capsys):
+    # The same leniency _as_id has, for the same reason: the document
+    # round-tripped through a viewer comes back with quotes.
+    page = write(tmp_path / "page.json",
+                 {"page": 1, "totalRecords": "7120", "records": []})
+    assert m.main(["--page-total", page]) == 0
+    assert capsys.readouterr().out == "7120\n"
+
+
+@pytest.mark.parametrize("document", [
+    {"page": 1, "pageSize": 1000, "records": []},                   # no field
+    {"page": 1, "pageSize": 1000, "totalRecords": None, "records": []},
+    {"page": 1, "pageSize": 1000, "totalRecords": "many", "records": []},
+    {"page": 1, "pageSize": 1000, "totalRecords": True, "records": []},
+    {"page": 1, "pageSize": 1000, "totalRecords": -1, "records": []},
+    {"page": 1, "pageSize": 1000, "totalRecords": 1.5, "records": []},
+    [{"seriesId": 12}],                                             # a bare array
+    {"records": [{"seriesId": 12}]},
+    "not a document",
+])
+def test_page_total_mode_refuses_a_document_that_is_not_an_envelope(document, tmp_path, capsys):
+    path = write(tmp_path / "page.json", document)
+    assert m.main(["--page-total", path]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "envelope" in captured.err
+
+
+@pytest.mark.parametrize("content", ["", "{ not json", "<html>nope</html>", "[1,"])
+def test_page_total_mode_refuses_a_malformed_document(content, tmp_path, capsys):
+    # An HTML error page served with a 200 is what a proxy in front of Sonarr
+    # produces. It has to be a failure here, or the walk is sized from a
+    # document nobody read.
+    page = tmp_path / "page.json"
+    page.write_text(content)
+    assert m.main(["--page-total", str(page)]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "not JSON" in captured.err
+
+
+def test_page_total_mode_refuses_a_document_it_cannot_open(tmp_path, capsys):
+    assert m.main(["--page-total", str(tmp_path / "nope.json")]) == 2
+    assert "cannot read" in capsys.readouterr().err
+
+
+def test_page_total_mode_reads_stdin_with_a_dash(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(
+        {"page": 1, "pageSize": 1000, "totalRecords": 2963, "records": []})))
+    assert m.main(["--page-total", "-"]) == 0
+    assert capsys.readouterr().out == "2963\n"
+
+
 # --- the state file ----------------------------------------------------------
 
 
