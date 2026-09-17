@@ -1,0 +1,34 @@
+[Unit]
+Description=Turn Stremio library additions into Seerr requests
+Documentation=file:/volume1/docker/arr-stack/scripts/stremio-library-sync.sh
+
+# Nothing is ordered against this. It talks to Stremio's cloud and to Seerr and
+# touches no file either of them is also using, so it neither waits for
+# queue-cleanup nor needs to run ahead of it. A pass that lands while a download
+# sweep is in flight is harmless: it creates at most --max requests, and Seerr
+# decides what to do with them.
+
+[Service]
+Type=oneshot
+
+# STREMIO_AUTH_KEY / SEERR_API_KEY. Read through lib/env-file.sh as well, but
+# supplying the file here is what makes the unit self-contained -- no shell
+# profile, no cron PATH.
+EnvironmentFile=/volume1/docker/arr-stack/.env
+
+# The log directory is created inside ExecStart, in the same shell that opens
+# the redirect. An `ExecStartPre=/bin/mkdir` plus StandardOutput=append:<dir>
+# cannot work and fails at boot: systemd applies the unit's StandardOutput to
+# every process it spawns, ExecStartPre included, so mkdir dies with "Failed to
+# set up standard output: No such file or directory" before it can create the
+# directory the redirect points into. Observed as status=209/STDOUT on
+# queue-cleanup.service, 2026-09-12.
+#
+# `exec` so the script is the process systemd tracks and its exit status is the
+# unit's. `>>` rather than systemd's append, for the same reason.
+#
+# --apply is not optional here. Without it the timer would run the script's
+# default mode forever: it would print what it would request, request nothing,
+# and exit 0. A scheduled job that reports success and does nothing is the exact
+# failure this unit exists to prevent.
+ExecStart=/bin/bash -c 'mkdir -p /volume1/docker/arr-stack/logs && exec /bin/bash /volume1/docker/arr-stack/scripts/stremio-library-sync.sh --apply >> /volume1/docker/arr-stack/logs/stremio-library-sync.log 2>&1'

@@ -1,0 +1,29 @@
+[Unit]
+Description=Pick up Stremio library additions every 10 minutes
+
+[Timer]
+# Monotonic timers only, and deliberately not OnBootSec.
+#
+# OnBootSec measures from the last boot, and on a NAS that has been up for weeks
+# that is always in the past. A unit installed with
+# `systemctl --user enable --now` would then have its first elapse already due
+# and start the service in the same second the schedule was registered.
+# Observed on queue-cleanup, 2026-09-13: unit registered at 23:48:19, log header
+# 23:48:19. OnActiveSec measures from when the timer was activated, so it is the
+# stated delay on a fresh enable and on a timer restart alike.
+#
+# One minute rather than ten: the first pass after an install is the one that
+# baselines the library, and it is worth seeing that line in the log now rather
+# than ten minutes from now.
+OnActiveSec=1min
+OnUnitActiveSec=10min
+Unit=stremio-library-sync.service
+
+# Ten minutes is a latency budget, not a throughput one: a pass creates at most
+# --max requests and the remainder waits for the next one, so a slower cadence
+# would only make a burst drain more slowly. Faster would mean re-reading a
+# 575 KB datastore for nothing, since a person adds titles at human speed.
+# AccuracySec is left at its default: a sweep a minute late costs nothing.
+
+[Install]
+WantedBy=timers.target

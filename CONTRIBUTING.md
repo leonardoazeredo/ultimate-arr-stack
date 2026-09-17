@@ -64,13 +64,14 @@ Internet → Cloudflare Tunnel (or Router Port Forward 80→8080, 443→8443)
 This project uses **separate Docker Compose files** for each layer:
 
 | File | Layer | Purpose |
-|------|-------|---------|
+| ------ | ------- | --------- |
 | `docker-compose.traefik.yml` | Infrastructure | Reverse proxy, SSL, networking |
 | `docker-compose.cloudflared.yml` | Infrastructure | External access via Cloudflare |
 | `docker-compose.arr-stack.yml` | Application | Media services |
 | `docker-compose.utilities.yml` | Optional | Monitoring, disk usage tools |
 
 **Why separate files?**
+
 - Independent lifecycle management
 - One Traefik can serve multiple stacks
 - Easier troubleshooting with isolated logs
@@ -101,7 +102,7 @@ This project uses **separate Docker Compose files** for each layer:
 This project separates public documentation from private configuration:
 
 | Type | Location | Git Tracked | Contains |
-|------|----------|-------------|----------|
+| ------ | ---------- | ------------- | ---------- |
 | **Public docs** | `docs/*.md`, `README.md` | Yes | Generic instructions with placeholders |
 | **Config templates** | `*.example` files | Yes | Templates with `yourdomain.com` placeholders |
 | **Your configs** | `traefik/*.yml`, `.env` | No | Your actual domain, customizations |
@@ -157,6 +158,7 @@ cp traefik/dynamic/vpn-services.yml.example traefik/dynamic/vpn-services.yml
 ```
 
 The actual `.yml` files are gitignored, so:
+
 - `git pull` updates only `.example` files (won't overwrite your config)
 - To get new features, manually merge changes from `.example` to your `.yml`
 
@@ -169,7 +171,7 @@ The actual `.yml` files are gitignored, so:
 This repo includes validation hooks that run on `git commit`:
 
 | Check | Blocks? | Purpose |
-|-------|---------|---------|
+| ------- | --------- | --------- |
 | Secrets | Yes | Detects real API keys, private keys, bcrypt hashes |
 | Env vars | Yes | Ensures compose `${VAR}` are documented in `.env.example` |
 | YAML syntax | Yes | Catches invalid YAML before it breaks deployment |
@@ -210,6 +212,7 @@ rm .git/hooks/pre-commit
 ### SSH-based Checks (NAS .env backup, Uptime monitors)
 
 The last two checks require SSH access to your NAS. They gracefully skip when:
+
 - NAS is not reachable (ping fails)
 - SSH port is blocked/closed
 - SSH authentication fails
@@ -217,11 +220,13 @@ The last two checks require SSH access to your NAS. They gracefully skip when:
 **To enable these checks:**
 
 1. **SSH key authentication** (recommended):
+
    ```bash
    ssh-copy-id your-user@your-nas.local
    ```
 
 2. **Docker group membership** (for Uptime monitors check):
+
    ```bash
    # On NAS - allows docker commands without sudo
    sudo usermod -aG docker your-user
@@ -247,11 +252,13 @@ Every version-changing release follows this order. Doing it as one unbroken flow
 **Every release MUST pass these checks before merging to `main` and tagging. No exceptions.**
 
 1. **Run all BATS tests** (includes image tag validation):
+
    ```bash
    tests/bats-core/bin/bats tests/
    ```
 
 2. **Verify all image tags are pullable on the NAS** — a full tear-down and pull:
+
    ```bash
    # SSH to the NAS, then for each compose file being released:
    cd $NAS_STACK_DIR
@@ -259,9 +266,11 @@ Every version-changing release follows this order. Doing it as one unbroken flow
    docker compose -f docker-compose.traefik.yml pull
    docker compose -f docker-compose.utilities.yml pull
    ```
+
    Every image must pull successfully. Cached images mask bad tags — a fresh `pull` is the only way to be sure.
 
 3. **Bring the stack up** and verify services start:
+
    ```bash
    docker compose -f docker-compose.traefik.yml up -d
    docker compose -f docker-compose.arr-stack.yml up -d
@@ -270,9 +279,11 @@ Every version-changing release follows this order. Doing it as one unbroken flow
    ```
 
 4. **Run E2E tests** — verify all UIs load and API responses are correct:
+
    ```bash
    npm run test:e2e
    ```
+
    This logs into each service, takes screenshots of every dashboard, and asserts root folders and media libraries are present. Every test must pass. Screenshots are saved to `tests/e2e/screenshots/` for visual review.
 
 ### Tagging and Publishing
@@ -327,6 +338,7 @@ scripts/
 ├── indexer-guard.sh              # Rotate the VPN exit IP for a banned indexer Sonarr needs
 ├── queue-cleanup.sh              # Remove stuck items from the Sonarr/Radarr queues
 ├── restart-stack.sh              # Restart a stack without ever using `down`
+├── stremio-library-sync.sh       # Turn a Stremio library addition into a Seerr request
 ├── sync-nas.sh                   # Move the NAS deploy copy onto the local branch
 ├── usenet-blackhole.sh           # Move NZBs between the arrs and TorBox's API
 ├── usenet-blackhole-status.sh    # Render the blackhole's state file as HTML or JSON
@@ -353,11 +365,13 @@ scripts/
     ├── indexer_guard.py        # The indexer guard's decision logic, as an importable module
     ├── usenet_blackhole.py     # The TorBox usenet watcher's logic, as an importable module
     ├── usenet_status.py        # The read-only download view over that watcher's state
-    └── queue_cleanup.py        # The queue cleaner's logic, as an importable module
+    ├── queue_cleanup.py        # The queue cleaner's logic, as an importable module
+    └── stremio_library.py      # The Stremio-to-Seerr bridge's logic, as an importable module
 ```
 <!-- /SCRIPTS-TREE-ORACLE -->
 
 The `common.sh` library provides shared functions used by all checks:
+
 - **NAS config**: Reads hostname/user from `.claude/config.local.md`
 - **Domain config**: Reads domain from `.env` or `.env.nas.backup`
 - **SSH helpers**: Standardized SSH commands with timeouts
