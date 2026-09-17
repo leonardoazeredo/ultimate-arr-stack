@@ -2013,9 +2013,15 @@ def test_the_date_window_is_sent_to_the_arr():
     # A re-release years later carries the same release name, so an unbounded
     # search would happily match last year's grab and fail it. The bound is
     # enforced by the arr; this pins that the parameter is actually sent.
+    #
+    # Two days, not a week. The gap it has to cover is `--timeout-hours`, 24h,
+    # and a week does not work at all: `/api/v3/history/since` over 7 days never
+    # returns on this Sonarr (measured 2026-09-17; 2 days answers in 13s, 7 days
+    # times out past 90s). Every Sonarr report failed on the read alone while
+    # Radarr's smaller history resolved fine.
     api = FakeArrApi({8989: []})
     reporter(api, now=NOW).resolve(RELEASE)
-    assert "date=2026-09-07T12:00:00Z" in api.gets[0]
+    assert "date=2026-09-12T12:00:00Z" in api.gets[0]
 
 
 def test_a_failed_grab_record_is_not_a_candidate():
