@@ -324,7 +324,7 @@ scripts/
 ├── fix-radarr-paths.sh           # Fix Radarr paths after a TRaSH naming reorganize
 ├── fix-sonarr-folders.sh         # Fix Sonarr folder names against the folder format
 ├── gluetun-rotator.sh            # Restart gluetun on a schedule to rotate the VPN exit server
-├── indexer-guard.sh              # Rotate the VPN exit IP when Prowlarr reports a Cloudflare ban
+├── indexer-guard.sh              # Rotate the VPN exit IP for a banned indexer Sonarr needs
 ├── queue-cleanup.sh              # Remove stuck items from the Sonarr/Radarr queues
 ├── restart-stack.sh              # Restart a stack without ever using `down`
 ├── sync-nas.sh                   # Move the NAS deploy copy onto the local branch

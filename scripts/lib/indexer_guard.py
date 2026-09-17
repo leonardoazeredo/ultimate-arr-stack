@@ -65,14 +65,64 @@ about each other.
 
 Nothing here opens that file. The wrapper reads it, and passes the value in.
 
+The demand gate
+---------------
+A banned IP only costs this stack something if an indexer it actually uses is
+behind it. Rotating for an indexer nothing here has ever downloaded from spends
+an outage -- every connection in the stack drops, the arrs re-establish theirs
+-- to fix a search that was never going to be made. So a rotation now needs one
+more fact than ban evidence: demand.
+
+An indexer has demand when Sonarr both needs something and has used that
+indexer for it. Both halves are joins on the series, and both come from Sonarr's
+own documents, fetched by the wrapper:
+
+  * GET /api/v3/wanted/missing?monitored=true -- one record per monitored
+    episode Sonarr is still looking for. It says which series are incomplete
+    right now. Unmonitored and already-downloaded episodes are not in it, so
+    "Sonarr is missing this" is the endpoint's answer, not this module's.
+  * GET /api/v3/history?eventType=1 -- one record per grab, carrying the series
+    it was for and the indexer that supplied it in `data.indexer`. Sonarr's copy
+    of a Prowlarr indexer is named "EZTV (Prowlarr)" where Prowlarr's own
+    document says "EZTV", so one trailing " (Prowlarr)" comes off before the
+    names are compared, and the comparison is case-insensitive after trimming.
+
+Both endpoints are paginated, and the walk follows the documents' own count
+rather than a fixed number of pages: page 1's envelope carries `totalRecords`,
+the size of the whole document, the wrapper asks this module's --page-total mode
+for that one integer, and it fetches only the pages the count requires --
+bounded by its own DEMAND_MAX_PAGES and by one shared time budget for the pass,
+so a slow Sonarr costs one bounded wait rather than one per page. This module
+reads the same count, and that is what stops a short walk from becoming a false
+hold: a document whose pages hold fewer records than the largest totalRecords
+they claim was read short, and demand is UNKNOWN -- fail open, exactly as an
+unreachable Sonarr is -- with a note naming the document and both counts
+("Sonarr history truncated: 5000 of 7120 records"). Judging the join on those
+pages instead would report "no demand" for an indexer whose grabs are all on the
+pages nobody fetched, which holds a banned IP in place while every indexer
+behind it fails. A bare array makes no claim about the whole document and is
+taken as complete.
+
+If that data is absent -- Sonarr unreachable, no API key, a document that is not
+JSON, a walk that stopped short -- the gate is SKIPPED and the decision is the
+one this module made before the gate existed, with a note in the reason and the
+document saying demand was unknown. That direction is deliberate: a Sonarr that
+is down for a minute must not ground a banned IP for every indexer the stack
+does use. The gate is also applied only after the cooldown and the rotator's
+windows have had their say, so it can turn a rotation into a hold and never the
+other way round.
+
 Usage:
   indexer_guard.py [--statuses PATH|-] [--indexers PATH|-] [--state PATH]
                    [--cooldown-hours N] [--rotator-last EPOCH]
                    [--rotator-interval SECONDS]
                    [--rotator-window-minutes MINUTES]
+                   [--demand-missing PATH]... [--demand-history PATH]...
+                   [--demand-error TEXT]
                    [--now TIMESTAMP] [--json]
   indexer_guard.py --state PATH --record-rotation [--now TIMESTAMP]
   indexer_guard.py --verdict PATH|-
+  indexer_guard.py --page-total PATH|-
 
 --statuses defaults to stdin, so the everyday invocation is a pipe:
 
@@ -94,6 +144,31 @@ actor yet. --rotator-interval is that service's own restart interval, and
 --rotator-window-minutes is how close either event has to be to count as
 "about to happen" or "just happened". Both are validated like the cooldown:
 zero and below are refused at the argument.
+
+--demand-missing and --demand-history carry Sonarr's two documents, one page
+per flag: the wrapper fetches GET /api/v3/wanted/missing?monitored=true and
+GET /api/v3/history?eventType=1, writes each page to its own file, and repeats
+the flag for each one. Both families together are one demand input: with only
+one of them there is no join to make, and the gate is skipped. A set of pages
+that holds fewer records than the largest `totalRecords` its envelopes claim is
+a document read short, and that is unknown demand too: a join over part of a
+history is a join that silently under-reports demand, and the difference between
+"this indexer has none" and "this indexer's grabs are on the pages nobody
+fetched" is a rotation that should have happened. --demand-error is the
+wrapper's own note that it could not fetch them at all, and skips the gate the
+same way. Absent every one of these flags, nothing here consults demand and the
+decision is byte-for-byte the one this module made before the gate existed;
+supplied but unusable, they are "demand unknown" -- a skip with a note, never a
+hold.
+
+--page-total prints one Sonarr page envelope's `totalRecords` as an integer and
+exits. It is the wrapper's paging half: the walk needs the size of the whole
+document to know how many pages to fetch, and this script does no JSON parsing
+of its own, so that one integer is read here. A document that is not an envelope
+with a usable count -- a bare array, a missing or non-numeric field, something
+that is not JSON at all -- is an error (exit 2) rather than a zero: the caller
+treats a failure as a Sonarr it could not read and skips the gate, and a zero it
+invented here would instead read as "the document is empty" and become a hold.
 
 --record-rotation writes a rotation into --state and exits; it is the mode the
 wrapper calls once the VPN has been cycled, and it is the only thing here that
@@ -176,6 +251,18 @@ DEFAULT_STATE_PATH = "logs/indexer-guard-state.json"
 # A missing indexer definition still has to be called something in the
 # decision line, and the record's own id is the one label it always has.
 UNKNOWN_INDEXER = "unknown indexer"
+
+# What Sonarr appends to a Prowlarr indexer's name. Prowlarr pushes its
+# indexers into Sonarr with its own name plus this suffix, so the demand join
+# compares "EZTV (Prowlarr)" with Prowlarr's "EZTV". It is matched exactly as
+# Sonarr writes it and only at the END of a name: a "(Prowlarr)" in the middle
+# is part of the name, and a name that merely ends in something similar is not
+# this suffix.
+PROWLARR_SUFFIX = " (Prowlarr)"
+
+# Said in the reason and the document when the wrapper could not say why there
+# is no demand data. Never an empty string: the note has to read as a sentence.
+DEMAND_UNKNOWN = "no Sonarr demand data was supplied"
 
 
 def parse_time(value):
@@ -363,6 +450,115 @@ def blocked_indexers(statuses, indexers, now):
     return rows
 
 
+def normalise_indexer_name(name):
+    """An indexer name as the demand join compares it.
+
+    Sonarr's copy of a Prowlarr indexer is named "EZTV (Prowlarr)"; Prowlarr's
+    own document says "EZTV". One trailing PROWLARR_SUFFIX comes off, the rest
+    is trimmed and case-folded, and the result is what the two documents are
+    joined on -- so " eztv " and "EZTV (Prowlarr)" are the same indexer, and
+    "EZTV (Prowlarr) HD" is not EZTV.
+
+    Anything that is not a string normalises to the empty string, which never
+    matches: a name that is a number or a null is not a name, and returning it
+    unchanged would let it match another nameless record.
+    """
+    if not isinstance(name, str):
+        return ""
+    text = name.strip()
+    if text.endswith(PROWLARR_SUFFIX):
+        text = text[: -len(PROWLARR_SUFFIX)].strip()
+    return text.casefold()
+
+
+def indexers_with_demand(missing_records, history_records):
+    """The normalised names of the indexers Sonarr both needs and has used.
+
+    Demand is a join on the series, and both halves have to hold:
+
+      * `missing_records` -- GET /api/v3/wanted/missing?monitored=true, one
+        record per monitored, missing episode, whose `seriesId` is a series
+        this stack is still looking for. No records means nothing is missing
+        and no indexer has demand.
+      * `history_records` -- GET /api/v3/history?eventType=1, one record per
+        grab, carrying the series it was for and the indexer that supplied it
+        in `data.indexer`.
+
+    An indexer has demand when a grab of its own was for a series that is
+    missing something today. A past grab for a series that is complete now, or
+    a missing episode whose every grab came from somewhere else, is not a
+    reason to spend the stack's connections on a new exit IP.
+
+    Records that are not objects, carry no seriesId, or carry no indexer name
+    are skipped rather than guessed at. Pure: two lists in, a set of normalised
+    names out, no clock and no I/O.
+
+    Whether `history_records` really are grabs is the request's business
+    (`eventType=1`), not this function's: a caller that hands over an
+    unfiltered history document gets a weaker join, not an error.
+
+    Both arguments are the records themselves, or Sonarr's page envelope
+    around them (`{"page", "pageSize", "totalRecords", "records"}`), which is
+    what the wrapper writes to disk -- _page_records reads either.
+    """
+    series = set()
+    for record in _page_records(missing_records):
+        key = _as_id(record.get("seriesId"))
+        if key is not None:
+            series.add(key)
+    if not series:
+        return set()
+
+    names = set()
+    for record in _page_records(history_records):
+        key = _as_id(record.get("seriesId"))
+        if key is None or key not in series:
+            continue
+        data = record.get("data")
+        if not isinstance(data, dict):
+            continue
+        name = normalise_indexer_name(data.get("indexer"))
+        if name:
+            names.add(name)
+    return names
+
+
+def demand_split(rows, demand):
+    """Which of `rows` Sonarr has demand for: (with, without) display names.
+
+    (None, None) means the demand data could not be read at all, and every
+    caller has to treat that as "not known" rather than "nothing has demand":
+    holding a banned IP for every indexer because Sonarr was briefly
+    unreachable is the one fail-closed answer this gate must not give.
+
+    The names are the rows' own labels, in the order they arrived, so a
+    decision document names indexers the way the rest of it does.
+    """
+    if not isinstance(demand, dict) or demand.get("known") is not True:
+        return None, None
+    wanted = demand.get("indexers")
+    if not isinstance(wanted, (set, frozenset, list, tuple)):
+        wanted = ()
+    with_demand, without_demand = [], []
+    for row in rows:
+        label = row.get("name") or UNKNOWN_INDEXER
+        if normalise_indexer_name(label) in wanted:
+            with_demand.append(label)
+        else:
+            without_demand.append(label)
+    return with_demand, without_demand
+
+
+def demand_note(reason, note):
+    """`reason` with a parenthesised note about the demand half of it.
+
+    The note goes after the decision's own clause rather than inside it: the
+    sentence that says what was decided is the one a log is read for, and it
+    has to stay the same sentence with the gate's caveat appended.
+    """
+    return f"{reason} ({note})"
+
+
 def last_rotation_time(value):
     """The recorded last rotation as an aware datetime, or None.
 
@@ -501,14 +697,15 @@ def _rotator_reason(names, hold, minutes):
             f"IP before its ban evidence can be trusted; not rotating")
 
 
-def _decide(blocked, last_rotation, now, cooldown_hours, rotator_last,
-            rotator_interval_seconds, rotator_window_minutes):
-    """should_rotate's whole answer plus which coordination hold applied.
+def _decide_ban_evidence(blocked, last_rotation, now, cooldown_hours,
+                         rotator_last, rotator_interval_seconds,
+                         rotator_window_minutes):
+    """The decision this module made before Sonarr was consulted at all.
 
-    (rotate, reason, hold), with hold one of the ROTATOR_* names or None. The
-    decision document reports the third element and the wrapper only needs the
-    first two, so one function decides both and the two renderers cannot
-    disagree.
+    (rotate, reason, hold): ban evidence, the cooldown, and the rotator's own
+    schedule, in that order of precedence. Everything about the demand gate
+    lives in _decide, which applies it to this answer -- so this half is the
+    behaviour every pass without demand data still gets, unchanged.
     """
     cooldown_hours = _require_positive(cooldown_hours, "cooldown_hours")
     hold, minutes = rotator_hold(rotator_last, now, rotator_interval_seconds,
@@ -554,10 +751,71 @@ def _decide(blocked, last_rotation, now, cooldown_hours, rotator_last,
                    f"{elapsed:.1f}h ago); not rotating"), None
 
 
+def _decide(blocked, last_rotation, now, cooldown_hours, rotator_last,
+            rotator_interval_seconds, rotator_window_minutes, demand=None):
+    """should_rotate's whole answer: the ban/cooldown/rotator decision, gated
+    on Sonarr's demand when there is any demand data.
+
+    (rotate, reason, hold), with hold one of the ROTATOR_* names or None. The
+    decision document reports the third element and the wrapper only needs the
+    first two, so one function decides both and the two renderers cannot
+    disagree.
+
+    The order is the point. Ban evidence, the cooldown and the rotator's
+    windows are decided first, exactly as they were before this gate existed,
+    and the demand gate is applied to that answer and can only ever turn a
+    rotation into a hold -- never the reverse, and never ahead of a hold the
+    cooldown or the rotator already justified. A pass whose cooldown is still
+    running says so; it does not say Sonarr has no demand, because the demand
+    was never consulted.
+
+    `demand` is None when nothing asked Sonarr, and then the answer is the one
+    this module gave before the gate existed. Otherwise it is the dict
+    demand_from_documents builds -- {"known", "indexers", "error"}. Demand that
+    could NOT be read is a skip with a note, not a hold: fail open, because a
+    Sonarr that is unreachable for one pass must not stop the VPN rotating away
+    from an IP that is banned for every indexer this stack does use.
+    """
+    rotate, reason, hold = _decide_ban_evidence(
+        blocked, last_rotation, now, cooldown_hours, rotator_last,
+        rotator_interval_seconds, rotator_window_minutes)
+    if not rotate or demand is None:
+        return rotate, reason, hold
+
+    # The same rows the reason above was built from: a rotation is only ever
+    # decided for indexers whose own text is ban evidence, and those are the
+    # ones the gate asks about.
+    banned = [row for row in blocked or () if isinstance(row, dict)
+              and row.get("ban_evidence") is True]
+    with_demand, without_demand = demand_split(banned, demand)
+    if with_demand is None:
+        error = demand.get("error") if isinstance(demand, dict) else None
+        note = f"Sonarr demand unknown: {error or DEMAND_UNKNOWN}"
+        # Fail open: the rotation this function was already clear to make still
+        # happens. Reading an unread document as "no demand" is the one wrong
+        # direction here -- it would hold a banned IP in place for every
+        # indexer this stack does use, for as long as Sonarr is unhappy.
+        return rotate, demand_note(reason, note), hold
+    if not with_demand:
+        return False, (f"banned indexers have no Sonarr demand: "
+                       f"{', '.join(without_demand) or UNKNOWN_INDEXER}; no "
+                       f"monitored missing episode here was ever grabbed from "
+                       f"them, so a new exit IP would buy nothing; not "
+                       f"rotating"), None
+    if without_demand:
+        # A rotation one of the banned indexers does justify, with the ones it
+        # does not named beside it: "rotating, and here is what is not part of
+        # why" is the same shape as the ban-evidence line above.
+        return rotate, demand_note(
+            reason, f"no Sonarr demand for {', '.join(without_demand)}"), hold
+    return rotate, reason, hold
+
+
 def should_rotate(blocked, last_rotation, now, cooldown_hours=DEFAULT_COOLDOWN_HOURS,
                   rotator_last=None,
                   rotator_interval_seconds=DEFAULT_ROTATOR_INTERVAL_SECONDS,
-                  rotator_window_minutes=DEFAULT_ROTATOR_WINDOW_MINUTES):
+                  rotator_window_minutes=DEFAULT_ROTATOR_WINDOW_MINUTES,
+                  demand=None):
     """Whether to rotate the VPN, and a one-line reason either way.
 
     True needs both halves: at least one blocked indexer whose failure is ban
@@ -583,6 +841,12 @@ def should_rotate(blocked, last_rotation, now, cooldown_hours=DEFAULT_COOLDOWN_H
     `rotator_last` never extends it, and the only rotations it is measured
     from are the ones this guard recorded itself.
 
+    `demand` is the Sonarr half, as demand_from_documents builds it, and is
+    applied last: it can turn a rotation this function would otherwise make
+    into a hold, and it is not consulted at all when the answer is already a
+    hold. None -- the default, and every caller that has no Sonarr data -- is
+    the decision this module made before the gate existed. See _decide.
+
     The boundary is inclusive (`elapsed >= cooldown_hours`): the cooldown is a
     minimum time between rotations, and a rotation exactly on it is a rotation
     that waited. cooldown_hours, and the two rotator numbers, must be finite
@@ -592,7 +856,8 @@ def should_rotate(blocked, last_rotation, now, cooldown_hours=DEFAULT_COOLDOWN_H
     get "every pass may rotate".
     """
     return _decide(blocked, last_rotation, now, cooldown_hours, rotator_last,
-                   rotator_interval_seconds, rotator_window_minutes)[:2]
+                   rotator_interval_seconds, rotator_window_minutes,
+                   demand)[:2]
 
 
 # --- the state file ---------------------------------------------------------
@@ -802,10 +1067,176 @@ def _plain(value):
     return value
 
 
+def _read_documents(paths, label):
+    """One document's pages, read into (records, total, why they could not be).
+
+    `records` is every record from every page, in order. `total` is the largest
+    `totalRecords` among the pages that are envelopes carrying one, or None when
+    no page makes that claim -- a bare array, or a document in any other shape.
+    The largest rather than the first, because a document that grew between two
+    page fetches is a document the walk covered less of than the count on its
+    last page says, and the comparison that matters is against the biggest claim
+    the pages make.
+
+    A page that parsed but holds nothing adds nothing and is not an error: an
+    empty missing-episode document is Sonarr saying nothing is missing, which is
+    a real answer. A page that could not be read at all IS an error -- half a
+    history document is a join that silently under-reports demand, and that
+    reads exactly like an indexer nothing here uses.
+    """
+    records = []
+    total = None
+    for path in paths:
+        document, error = _read_json(path, label)
+        if error:
+            return None, None, error
+        records.extend(_page_records(document))
+        claimed = page_total(document)
+        if claimed is not None and (total is None or claimed > total):
+            total = claimed
+    return records, total, None
+
+
+def _page_records(document):
+    """The records in one Sonarr page, as a list of dicts.
+
+    Sonarr paginates: a page is an object with `page`, `pageSize`,
+    `totalRecords` and a `records` array, and `records` is what every field
+    this module reads lives in. A bare array is accepted as the same records,
+    so a hand-run -- or a test -- can hand over just the rows. Anything else is
+    no records rather than a traceback, the same contract _records has for the
+    documents that are not paginated.
+    """
+    if isinstance(document, dict) and isinstance(document.get("records"),
+                                                  (list, tuple)):
+        return [item for item in document["records"] if isinstance(item, dict)]
+    return _records(document)
+
+
+def page_total(document):
+    """The whole-document record count a Sonarr page envelope carries, or None.
+
+    `totalRecords` is the size of the ENTIRE document, not of the page it
+    arrives on, and it is the one number both halves of the paging contract are
+    built on: the wrapper's --page-total mode hands it to the shell so the walk
+    knows how many pages to fetch, and _truncation_note compares the records
+    that arrived against it to notice a walk that stopped short. Reading it in
+    one function is what keeps those two from disagreeing about what an
+    envelope is.
+
+    None means "no claim about the whole document", and it is the answer for
+    every shape that is not an envelope with a usable count: a bare array is
+    the records themselves, and a document whose totalRecords is missing, null,
+    negative or not a number says nothing about how many there are. All of them
+    are taken as complete rather than truncated -- reading every document nobody
+    vouched for as short would make demand unknown for a caller that handed the
+    records over directly, which is the opposite failure: a rotation for an
+    indexer nothing needs.
+
+    A digit string is accepted as the number it spells, the way _as_id accepts
+    one for an id: the same document round-tripped through a JSON viewer comes
+    back with quotes. A bool is not a count, for the same reason it is not an id
+    in _as_id -- `true` is not one record.
+    """
+    if not isinstance(document, dict):
+        return None
+    total = document.get("totalRecords")
+    if isinstance(total, bool):
+        return None
+    if isinstance(total, int):
+        return total if total >= 0 else None
+    if isinstance(total, str):
+        text = total.strip()
+        if text.isdigit():
+            return int(text)
+    return None
+
+
+def _truncation_note(label, collected, total):
+    """The note that says a document was read short, or None when it was not.
+
+    A note comes back when the pages handed over hold fewer records than the
+    largest totalRecords their envelopes claim, which is a document nobody has
+    all of: the join cannot see the grabs on the pages that were never fetched,
+    and an indexer whose grabs are all there looks exactly like an indexer with
+    no demand at all. That is a false hold, so the caller turns this into
+    unknown demand, which fails open. `total` None -- no envelope claimed
+    anything, a bare array -- is not truncation.
+
+    The wording names the document and both counts, so the log line says how
+    much of it was read rather than only that something was wrong.
+    """
+    if total is None or collected >= total:
+        return None
+    return f"{label} truncated: {collected} of {total} records"
+
+
+def demand_from_documents(missing_paths, history_paths, error=None):
+    """The demand state the CLI's flags describe, or None when there are none.
+
+    None is "nobody asked Sonarr": no demand flag was given at all, and the
+    decision is the one this module made before the gate existed. That is what
+    keeps a pass with no Sonarr data the pass it always was.
+
+    Anything else is a dict: {"known", "indexers", "error"}. It is unknown --
+    `known` False with the reason in `error` -- when the wrapper says it could
+    not fetch (the `error` note), when only one of the two documents was
+    supplied (there is no join to make), when a page cannot be read or is not
+    JSON, or when the pages hold fewer records than their envelopes claim. That
+    last one is a document read short, and the join over it would under-report
+    demand -- see _truncation_note. Unknown is returned rather than raised: the
+    gate is skipped and the decision says so, because a demand check that stops
+    the guard on a timer is worse than no demand check.
+
+    `known` True needs both halves of the join and nothing else -- an empty
+    missing-episode document is a real answer, not a missing one, and it means
+    no indexer has demand.
+    """
+    missing_paths = list(missing_paths or ())
+    history_paths = list(history_paths or ())
+    if error is None and not missing_paths and not history_paths:
+        return None
+
+    def unknown(reason):
+        return {"known": False, "indexers": frozenset(), "error": reason}
+
+    if error is not None:
+        return unknown(error or DEMAND_UNKNOWN)
+    if not missing_paths or not history_paths:
+        return unknown("both Sonarr documents are needed to establish demand")
+
+    missing, missing_total, failure = _read_documents(
+        missing_paths, "the Sonarr missing-episode page")
+    if failure:
+        return unknown(failure)
+    history, history_total, failure = _read_documents(
+        history_paths, "the Sonarr history page")
+    if failure:
+        return unknown(failure)
+
+    # The completeness check, and the only place a walk that stopped early is
+    # recognised. Each set is judged against its own envelopes: pages that
+    # arrived are not evidence about pages that did not, and "the records I
+    # have" is not an answer to "does this indexer have demand" when the
+    # document is bigger than the slice in hand. Both notes are carried when
+    # both sets are short, so the log says which documents were incomplete.
+    truncated = [note for note in (
+        _truncation_note("Sonarr missing episodes", len(missing), missing_total),
+        _truncation_note("Sonarr history", len(history), history_total),
+    ) if note]
+    if truncated:
+        return unknown("; ".join(truncated))
+
+    return {"known": True,
+            "indexers": indexers_with_demand(missing, history),
+            "error": None}
+
+
 def decision(statuses, indexers, state, now, cooldown_hours,
              rotator_last=None,
              rotator_interval_seconds=DEFAULT_ROTATOR_INTERVAL_SECONDS,
-             rotator_window_minutes=DEFAULT_ROTATOR_WINDOW_MINUTES):
+             rotator_window_minutes=DEFAULT_ROTATOR_WINDOW_MINUTES,
+             demand=None):
     """The whole answer as plain data, for either renderer.
 
     Pure, and the only place the two documents meet: everything the CLI prints
@@ -817,14 +1248,23 @@ def decision(statuses, indexers, state, now, cooldown_hours,
     on its own schedule (None when nothing is known), and which of the two
     coordination holds applied. They are derived data -- `reason` remains the
     sentence that says what was decided.
+
+    The demand fields appear only when a demand input was supplied at all, and
+    that is deliberate rather than an omission: with no Sonarr data this
+    document has to be the one it always was, byte for byte, so that a pass
+    without the gate is comparable with every pass before it. When they are
+    there, `banned_with_demand` and `banned_without_demand` name the banned
+    indexers the gate found on each side, and both are null -- not empty --
+    when the demand data could not be read, because an unread document is not
+    a list of indexers nothing needs.
     """
     blocked = blocked_indexers(statuses, indexers, now)
     last_rotation = state.get("last_rotation") if isinstance(state, dict) else None
     rotate, reason, hold = _decide(blocked, last_rotation, now, cooldown_hours,
                                    rotator_last, rotator_interval_seconds,
-                                   rotator_window_minutes)
+                                   rotator_window_minutes, demand)
     last = _epoch_seconds(rotator_last)
-    return {
+    view = {
         "decided_at": now.isoformat(),
         "rotate": rotate,
         "reason": reason,
@@ -839,6 +1279,41 @@ def decision(statuses, indexers, state, now, cooldown_hours,
         "rotator_hold": hold,
         "blocked": blocked,
     }
+    if demand is not None:
+        banned = [row for row in blocked if row.get("ban_evidence") is True]
+        with_demand, without_demand = demand_split(banned, demand)
+        view["demand_known"] = (isinstance(demand, dict)
+                                and demand.get("known") is True)
+        view["demand_error"] = (demand.get("error")
+                                if isinstance(demand, dict) else None)
+        view["banned_with_demand"] = with_demand
+        view["banned_without_demand"] = without_demand
+    return view
+
+
+def demand_lines(view):
+    """The Sonarr half of a decision document, as lines (usually none at all).
+
+    Nothing at all for a document that never consulted Sonarr, which is what
+    keeps both renderers' output identical for every pass without demand data.
+    A document that did consult it has to say what the gate found: which banned
+    indexers Sonarr needs and which it does not, or -- when the data could not
+    be read -- that demand was unknown, because "no demand" and "no answer"
+    are the same hold otherwise and only one of them is a reason to leave a
+    banned IP in place.
+    """
+    if not isinstance(view, dict) or "demand_known" not in view:
+        return []
+    if view.get("demand_known") is True:
+        def names(key):
+            value = view.get(key)
+            if not isinstance(value, (list, tuple)):
+                return "none"
+            return ", ".join(str(item) for item in value) or "none"
+        return [f"  Sonarr demand: {names('banned_with_demand')}; "
+                f"no Sonarr demand: {names('banned_without_demand')}"]
+    return [f"  Sonarr demand unknown: "
+            f"{view.get('demand_error') or DEMAND_UNKNOWN}"]
 
 
 def render_text(view):
@@ -847,12 +1322,16 @@ def render_text(view):
     The reason is the line that matters and is printed for both answers: a
     wrapper's log is read to find out why the VPN did or did not move, and
     "hold" with no reason is indistinguishable from a guard that is broken.
+
+    The demand summary follows the blocked list for a decision that consulted
+    Sonarr; see demand_lines.
     """
     lines = [f"{'rotate' if view['rotate'] else 'hold'}: {view['reason']}"]
     for row in view["blocked"]:
         evidence = ", ban evidence" if row["ban_evidence"] else ""
         lines.append(f"  {row['name']} (id {row['indexer_id']}): "
                      f"{row['hours_remaining']}h of backoff left{evidence}")
+    lines.extend(demand_lines(view))
     return "\n".join(lines)
 
 
@@ -865,20 +1344,30 @@ def verdict_line(view):
     itself. A document with no usable rotate flag or reason is an error rather
     than a hold: a guard that quietly holds when it cannot read its own
     decision is a guard that has stopped working, and nothing would say so.
+
+    A document that consulted Sonarr carries its demand summary on the lines
+    after the verdict, for the same reason the reason itself is carried: the
+    wrapper logs what this returns, and a hold that does not say Sonarr was
+    consulted reads like a hold that never asked. The verdict stays the first
+    line and the reason stays behind the tab, so the wrapper's split is
+    untouched.
     """
     rotate = view.get("rotate") if isinstance(view, dict) else None
     reason = view.get("reason") if isinstance(view, dict) else None
     if rotate not in (True, False) or not isinstance(reason, str):
         return None, "the decision carried no rotate flag and reason"
-    return ("rotate" if rotate else "hold") + "\t" + reason, None
+    lines = [("rotate" if rotate else "hold") + "\t" + reason]
+    lines.extend(demand_lines(view))
+    return "\n".join(lines), None
 
 
 def main(argv=None):
     """Read the two documents and print the decision. Returns the exit status.
 
-    Three modes share the one parser: the default decides, --record-rotation
-    writes the rotation the wrapper has just performed, and --verdict renders
-    a decision document the wrapper already has. argparse owns the argv
+    Four modes share the one parser: the default decides, --record-rotation
+    writes the rotation the wrapper has just performed, --verdict renders a
+    decision document the wrapper already has, and --page-total prints one
+    envelope's record count for the wrapper's paging. argparse owns the argv
     refusals and exits 2 for them, which is caught here and returned, so
     `main()` is callable from a test without a SystemExit to catch -- the
     convention usenet_status.py's main follows.
@@ -918,6 +1407,22 @@ def main(argv=None):
                         metavar="MINUTES",
                         help="how close either rotation has to be, in minutes, "
                              "for the guard to hold (default: %(default)s)")
+    parser.add_argument("--demand-missing", action="append", default=None,
+                        metavar="PATH",
+                        help="GET /api/v3/wanted/missing?monitored=true, one "
+                             "page per flag, as JSON; repeat it for every page "
+                             "(default: none, and the demand gate is skipped)")
+    parser.add_argument("--demand-history", action="append", default=None,
+                        metavar="PATH",
+                        help="GET /api/v3/history?eventType=1, one page per "
+                             "flag, as JSON; repeat it for every page "
+                             "(default: none)")
+    parser.add_argument("--demand-error", default=None, metavar="TEXT",
+                        help="the wrapper's note that it could not establish "
+                             "demand -- a request that failed, a page that is "
+                             "not an envelope, or the pass's time budget spent; "
+                             "the gate is skipped and the reason says demand "
+                             "was unknown (default: none)")
     parser.add_argument("--record-rotation", action="store_true",
                         help="record a rotation in --state and exit, printing "
                              "the new count; the caller must have performed "
@@ -925,6 +1430,11 @@ def main(argv=None):
     parser.add_argument("--verdict", default=None, metavar="PATH",
                         help="a --json decision document, rendered back as one "
                              "rotate/hold line (default: none)")
+    parser.add_argument("--page-total", default=None, metavar="PATH",
+                        help="print one Sonarr page envelope's totalRecords as "
+                             "an integer and exit; a document that is not an "
+                             "envelope with a usable count, or is not JSON, is "
+                             "an error (default: none)")
     parser.add_argument("--now", type=_timestamp_arg, default=None,
                         metavar="TIMESTAMP",
                         help="the moment to act as now, as an ISO timestamp "
@@ -969,6 +1479,22 @@ def main(argv=None):
         print(line)
         return 0
 
+    # The wrapper's paging half: one integer out of an envelope, so the shell
+    # can size its walk without parsing JSON. A document it cannot read is an
+    # error rather than a zero -- see the --page-total help.
+    if args.page_total is not None:
+        document, error = _read_json(args.page_total, "the Sonarr page envelope")
+        if error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 2
+        total = page_total(document)
+        if total is None:
+            print(f"ERROR: {args.page_total} is not a Sonarr page envelope "
+                  f"with a totalRecords count", file=sys.stderr)
+            return 2
+        print(total)
+        return 0
+
     statuses, error = _read_json(args.statuses, "indexerstatus")
     if error:
         print(f"ERROR: {error}", file=sys.stderr)
@@ -980,9 +1506,15 @@ def main(argv=None):
             print(f"ERROR: {error}", file=sys.stderr)
             return 2
 
+    # None when no demand flag was given at all -- and then the decision below
+    # is the one this module made before the gate existed, unchanged.
+    demand = demand_from_documents(args.demand_missing, args.demand_history,
+                                   args.demand_error)
+
     view = decision(statuses, indexers, load_state(args.state),
                     now, args.cooldown_hours, args.rotator_last,
-                    args.rotator_interval, args.rotator_window_minutes)
+                    args.rotator_interval, args.rotator_window_minutes,
+                    demand)
     if args.json:
         print(json.dumps(_plain(view), indent=2, sort_keys=True))
     else:

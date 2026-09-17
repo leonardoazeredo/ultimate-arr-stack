@@ -35,22 +35,41 @@ setup() {
     STATE="$STACK/logs/indexer-guard-state.json"
     ROTATOR_FILE="$STACK/logs/vpn-rotation/last-rotation"
 
-    printf 'PROWLARR_API_KEY=test-key\n' > "$ENV_FILE"
+    printf 'PROWLARR_API_KEY=test-key\nSONARR_API_KEY=test-sonarr-key\n' > "$ENV_FILE"
 
     # One status record in backoff whose own words are ban evidence, and the
     # indexer document that names it: the verdict every rotation test needs.
     STATUSES_JSON="$BATS_TEST_TMPDIR/statuses.json"
     INDEXERS_JSON="$BATS_TEST_TMPDIR/indexers.json"
-    CURL_CALLS="$BATS_TEST_TMPDIR/curl-calls"
+    # Sonarr's two documents, for the demand gate, and the marker that makes
+    # the stub's Sonarr calls fail. The default pair is demand for 1337x; the
+    # helpers below rewrite it.
+    SONARR_MISSING_JSON="$BATS_TEST_TMPDIR/sonarr-missing.json"
+    SONARR_HISTORY_JSON="$BATS_TEST_TMPDIR/sonarr-history.json"
+    SONARR_DOWN="$BATS_TEST_TMPDIR/sonarr-down"
+    SONARR_HISTORY_PAGE2_DOWN="$BATS_TEST_TMPDIR/sonarr-history-page2-down"
+    # Every URL curl was asked for, one per line. The URL travels in the curl
+    # config on stdin, so it is not in any argv and STUB_LOG cannot see it.
+    CURL_URLS="$BATS_TEST_TMPDIR/curl-urls"
     cat > "$STATUSES_JSON" <<'JSON'
 [{"id": 4, "indexerId": 7, "disabledTill": "2099-01-01T00:00:00Z", "message": "Cloudflare error 1006"}]
 JSON
     printf '%s\n' '[{"id": 7, "name": "1337x"}]' > "$INDEXERS_JSON"
-    export STATUSES_JSON INDEXERS_JSON CURL_CALLS
+    sonarr_demand_documents "1337x (Prowlarr)"
+    : > "$CURL_URLS"
+    export STATUSES_JSON INDEXERS_JSON SONARR_MISSING_JSON SONARR_HISTORY_JSON \
+        SONARR_DOWN SONARR_HISTORY_PAGE2_DOWN CURL_URLS
 
-    # The two fetches, in the order the script makes them. The URL travels in
-    # the curl config on stdin, not in the argv, so the call number is what
-    # tells the documents apart.
+    # The Prowlarr and Sonarr fetches, dispatched by the URL in the curl config
+    # on stdin -- not by call order, which could not tell a Sonarr page from
+    # Prowlarr's own indexer document. Only the URL is written to $CURL_URLS:
+    # the config also carries the API key, and one test asserts the key reaches
+    # no argv and no log line.
+    #
+    # The history page 2 arm is first: a document whose envelope needs a second
+    # page, and a marker that makes exactly that one fail -- the partial-walk
+    # case, which has to reach the module as --demand-error rather than as the
+    # page one it did fetch.
     stub_curl '
 out=""
 prev=""
@@ -58,15 +77,32 @@ for a in "$@"; do
   [ "$prev" = "-o" ] && out="$a"
   prev="$a"
 done
-n="$(cat "$CURL_CALLS" 2>/dev/null || echo 0)"
-n=$((n + 1))
-printf "%s" "$n" > "$CURL_CALLS"
-if [ "$n" -eq 1 ]; then
-  cat "$STATUSES_JSON"
-else
-  cat "$INDEXERS_JSON"
-fi > "$out"
+url="$(sed -n "s/^url = \"\(.*\)\"$/\1/p")"
+printf "%s\n" "$url" >> "$CURL_URLS"
+case "$url" in
+  *8989/api/v3/wanted/missing*)
+    [ -f "$SONARR_DOWN" ] && exit 7
+    cat "$SONARR_MISSING_JSON" > "$out" ;;
+  *8989/api/v3/history*page=2*)
+    if [ -f "$SONARR_DOWN" ] || [ -f "$SONARR_HISTORY_PAGE2_DOWN" ]; then exit 7; fi
+    cat "$SONARR_HISTORY_JSON" > "$out" ;;
+  *8989/api/v3/history*)
+    [ -f "$SONARR_DOWN" ] && exit 7
+    cat "$SONARR_HISTORY_JSON" > "$out" ;;
+  *9696/api/v1/indexerstatus*) cat "$STATUSES_JSON" > "$out" ;;
+  *9696/api/v1/indexer*) cat "$INDEXERS_JSON" > "$out" ;;
+  *) exit 22 ;;
+esac
 '
+
+    # python3 is stubbed only so its argv can be read: which demand flags
+    # reached the module is the one thing the decision document cannot show,
+    # because --demand-error and a partial --demand-history render the same way
+    # when the error wins. The stub logs the argv and execs the real
+    # interpreter, so the module still runs and every other test is unaffected.
+    REAL_PYTHON3="$(command -v python3)"
+    export REAL_PYTHON3
+    stub_tool python3 'exec "$REAL_PYTHON3" "$@"'
 
     # A docker that answers the control API. The `ip`-only answer is a
     # parameter so the fallback in gluetun_public_ip has a test of its own;
@@ -76,6 +112,105 @@ fi > "$out"
   *) printf "%s" "{\"status\":\"running\"}" ;;
 esac'
 }
+
+# sonarr_demand_documents <history indexer name>: Sonarr's two pages.
+#
+# One monitored episode missing from series 12, and one grabbed history record
+# for that same series from <name>. The name is written exactly as Sonarr
+# writes it -- "1337x (Prowlarr)", not Prowlarr's "1337x" -- so the default
+# pair exercises the suffix stripping rather than sidestepping it.
+sonarr_demand_documents() {
+    cat > "$SONARR_MISSING_JSON" <<'JSON'
+{"page": 1, "pageSize": 1000, "totalRecords": 1, "records": [{"seriesId": 12, "monitored": true}]}
+JSON
+    printf '{"page": 1, "pageSize": 1000, "totalRecords": 1, "records": [{"seriesId": 12, "eventType": "grabbed", "data": {"indexer": "%s"}}]}\n' \
+        "$1" > "$SONARR_HISTORY_JSON"
+}
+
+# sonarr_no_demand: Sonarr's two pages with nothing in common.
+#
+# Series 12 is missing an episode and series 99 was grabbed from 1337x, so the
+# join finds nothing: the series that needs something was never supplied by the
+# banned indexer. This is the shape the gate exists for.
+sonarr_no_demand() {
+    cat > "$SONARR_MISSING_JSON" <<'JSON'
+{"page": 1, "pageSize": 1000, "totalRecords": 1, "records": [{"seriesId": 12, "monitored": true}]}
+JSON
+    cat > "$SONARR_HISTORY_JSON" <<'JSON'
+{"page": 1, "pageSize": 1000, "totalRecords": 1, "records": [{"seriesId": 99, "eventType": "grabbed", "data": {"indexer": "1337x (Prowlarr)"}}]}
+JSON
+}
+
+# sonarr_many_records: both envelopes claim 1500 records and deliver 1000 each.
+#
+# 1500 records is ceil(1500/1000) = 2 pages, so two requests of each endpoint
+# are the right number and ten are what a walk that ignores totalRecords makes.
+# Two pages of 1000 records also add up to more than the envelope's count, so
+# the module judges the document complete and the gate finds its demand.
+sonarr_many_records() {
+    python3 - "$SONARR_MISSING_JSON" "$SONARR_HISTORY_JSON" <<'PY'
+import json
+import sys
+
+missing_path, history_path = sys.argv[1], sys.argv[2]
+missing = {"page": 1, "pageSize": 1000, "totalRecords": 1500,
+           "records": [{"seriesId": 12, "monitored": True}] * 1000}
+history = {"page": 1, "pageSize": 1000, "totalRecords": 1500,
+           "records": [{"seriesId": 12, "eventType": "grabbed",
+                        "data": {"indexer": "1337x (Prowlarr)"}}] * 1000}
+with open(missing_path, "w", encoding="utf-8") as handle:
+    json.dump(missing, handle)
+with open(history_path, "w", encoding="utf-8") as handle:
+    json.dump(history, handle)
+PY
+}
+
+# sonarr_capped_documents: both envelopes count 21 pages of records.
+#
+# One page past DEMAND_MAX_PAGES, and each page delivers one record, so the
+# pages that fit are nowhere near the document's own count: the module has to
+# report truncation and the pass has to fail open. This is the shape that used
+# to be a false hold -- the fixed walk fetched its five pages, never read
+# totalRecords, and judged the join on a slice.
+sonarr_capped_documents() {
+    python3 - "$SONARR_MISSING_JSON" "$SONARR_HISTORY_JSON" <<'PY'
+import json
+import sys
+
+missing_path, history_path = sys.argv[1], sys.argv[2]
+missing = {"page": 1, "pageSize": 1000, "totalRecords": 21000,
+           "records": [{"seriesId": 12, "monitored": True}]}
+history = {"page": 1, "pageSize": 1000, "totalRecords": 21000,
+           "records": [{"seriesId": 12, "eventType": "grabbed",
+                        "data": {"indexer": "1337x (Prowlarr)"}}]}
+with open(missing_path, "w", encoding="utf-8") as handle:
+    json.dump(missing, handle)
+with open(history_path, "w", encoding="utf-8") as handle:
+    json.dump(history, handle)
+PY
+}
+
+# sonarr_documents_without_envelopes: both documents as bare arrays.
+#
+# Sonarr's real answers are always envelopes. A bare array is what a hand-run
+# passes, and it gives --page-total nothing to read: the wrapper has to treat
+# the page as a Sonarr it could not read and fail open, not as an empty
+# document.
+sonarr_documents_without_envelopes() {
+    printf '%s\n' '[{"seriesId": 12, "monitored": true}]' > "$SONARR_MISSING_JSON"
+    printf '%s\n' '[{"seriesId": 12, "eventType": "grabbed", "data": {"indexer": "1337x (Prowlarr)"}}]' > "$SONARR_HISTORY_JSON"
+}
+
+# curl_max_time: the --max-time the stub was asked for on the first Sonarr
+# missing page, or empty when that request was never made.
+#
+# The Sonarr URL travels in the curl config on stdin, so it is not in any argv;
+# the output path is, and it names the document and the page.
+curl_max_time() {
+    grep "sonarr-missing-1.json" "$STUB_LOG" \
+        | grep -o -- "--max-time [0-9]*" | head -1 | awk '{print $2}'
+}
+
 
 # The same docker stub with an older answer that spells the address `ip`.
 stub_docker_with_ip_key() {
@@ -316,13 +451,9 @@ esac'
     # no rotator schedule for the guard to hold on.
     local value
     for value in 0 00 000; do
-        printf 'PROWLARR_API_KEY=test-key\nGLUETUN_ROTATE_INTERVAL_SECONDS=%s\n' "$value" > "$ENV_FILE"
+        printf 'PROWLARR_API_KEY=test-key\nSONARR_API_KEY=test-sonarr-key\nGLUETUN_ROTATE_INTERVAL_SECONDS=%s\n' "$value" > "$ENV_FILE"
         mkdir -p "$(dirname "$ROTATOR_FILE")"
         printf '%s\n' "$(( $(date +%s) - (21600 - 600) ))" > "$ROTATOR_FILE"
-        # The curl stub counts calls to tell the two fetches apart, so the
-        # counter starts over for each pass rather than serving the indexer
-        # document in place of the status one.
-        rm -f "$CURL_CALLS"
 
         run "$SCRIPT" --state "$STATE"
         assert_success
@@ -411,4 +542,307 @@ esac'
 
     run cat "$ROTATOR_FILE"
     assert_output "1700000000"
+}
+
+# --- the demand gate ---------------------------------------------------------
+#
+# The module's half of the gate -- the join, the name normalisation, the
+# fail-open rule -- is covered in tests/python/test_indexer_guard.py. What is
+# covered here is the shell half: that Sonarr is asked the right questions,
+# that its documents reach the decision, that a Sonarr which cannot answer is a
+# warning rather than a failed pass, and that a pass which already holds on
+# Prowlarr's evidence asks Sonarr nothing at all.
+
+@test "indexer-guard: the demand documents reach the decision" {
+    # The stub's history names 1337x the way Sonarr does -- with the
+    # " (Prowlarr)" suffix -- so the gate finds demand and the pass still
+    # rotates. The demand line comes from the module's --verdict renderer,
+    # which is only reached if the pages the wrapper wrote arrived. One page of
+    # each, because the envelope says each document holds one record.
+    run "$SCRIPT" --dry-run --state "$STATE"
+    assert_success
+    assert_output --partial "rotate:"
+    assert_output --partial "Sonarr demand: 1337x"
+    assert_stub_called curl "sonarr-history-1.json"
+    assert_stub_called curl "sonarr-missing-1.json"
+    assert_stub_not_called curl "sonarr-missing-2.json"
+    assert_stub_not_called curl "sonarr-history-2.json"
+}
+
+@test "indexer-guard: both endpoints are asked for monitored, paged records" {
+    # monitored=true is the request's job, not the module's: the module cannot
+    # tell a monitored missing episode from an unmonitored one, so the filter
+    # has to be on the URL. page/pageSize are what make the answers more than
+    # Sonarr's default page of twenty. How many pages are fetched is the
+    # envelope's own count -- a one-record document is one request.
+    run "$SCRIPT" --dry-run --state "$STATE"
+    assert_success
+
+    grep -q "8989/api/v3/wanted/missing?monitored=true&page=1&pageSize=1000" "$CURL_URLS" || {
+        echo "no wanted/missing page 1 in:"; cat "$CURL_URLS"; return 1
+    }
+    grep -q "8989/api/v3/history?eventType=1&page=1&pageSize=1000" "$CURL_URLS" || {
+        echo "no history page 1 in:"; cat "$CURL_URLS"; return 1
+    }
+    [ "$(grep -c 8989 "$CURL_URLS")" -eq 2 ]
+}
+
+@test "indexer-guard: a 1500-record document is fetched in exactly two pages" {
+    # The early stop, and the whole reason the wrapper asks the module for
+    # totalRecords: 1500 records is two pages of 1000, so two requests of each
+    # endpoint are enough and twenty are waste. The gate still finds its demand
+    # -- both pages of each document arrived, and 1000 + 1000 covers the
+    # envelope's 1500.
+    sonarr_many_records
+
+    run "$SCRIPT" --dry-run --state "$STATE"
+    assert_success
+    assert_output --partial "rotate:"
+    assert_output --partial "Sonarr demand: 1337x"
+
+    local page
+    for page in 1 2; do
+        grep -q "wanted/missing?monitored=true&page=$page&pageSize=1000" "$CURL_URLS" || {
+            echo "no wanted/missing page $page in:"; cat "$CURL_URLS"; return 1
+        }
+        grep -q "history?eventType=1&page=$page&pageSize=1000" "$CURL_URLS" || {
+            echo "no history page $page in:"; cat "$CURL_URLS"; return 1
+        }
+    done
+    ! grep -q "page=3" "$CURL_URLS" || {
+        echo "the walk fetched a page the count did not ask for:"; cat "$CURL_URLS"; return 1
+    }
+    [ "$(grep -c 8989 "$CURL_URLS")" -eq 4 ]
+}
+
+@test "indexer-guard: a document past the page cap stops at it and fails open" {
+    # 21000 records is 21 pages of 1000, one past DEMAND_MAX_PAGES, so the walk
+    # stops at the cap. Every page carries the document's own count, so the
+    # module can see the pages do not cover it: demand unknown, which fails
+    # open. Judging the join on the twenty pages that fit is the false hold
+    # this cap exists to make impossible.
+    sonarr_capped_documents
+
+    run "$SCRIPT" --dry-run --state "$STATE"
+    assert_success
+    assert_output --partial "past the 20-page cap"
+    assert_output --partial "rotate:"
+    assert_output --partial "Sonarr missing episodes truncated:"
+    assert_output --partial "Sonarr history truncated:"
+    assert_output --partial "Sonarr demand unknown: Sonarr missing episodes truncated"
+
+    local page
+    for page in 1 2 20; do
+        grep -q "wanted/missing?monitored=true&page=$page&pageSize=1000" "$CURL_URLS" || {
+            echo "no wanted/missing page $page in:"; cat "$CURL_URLS"; return 1
+        }
+    done
+    ! grep -q "page=21" "$CURL_URLS" || {
+        echo "the walk went past the cap:"; cat "$CURL_URLS"; return 1
+    }
+    [ "$(grep -c "wanted/missing" "$CURL_URLS")" -eq 20 ]
+    [ "$(grep -c "api/v3/history" "$CURL_URLS")" -eq 20 ]
+}
+
+@test "indexer-guard: a first page the module cannot count is a skipped gate" {
+    # --page-total is the walk's only source for how many pages to fetch, and a
+    # bare array has no totalRecords to read. That is a Sonarr this pass could
+    # not read -- fail open -- and the walk stops at page one rather than
+    # falling back to some fixed number of requests.
+    sonarr_documents_without_envelopes
+
+    run "$SCRIPT" --dry-run --state "$STATE"
+    assert_success
+    assert_output --partial "rotate:"
+    assert_output --partial "is not a page envelope"
+    assert_output --partial "Sonarr demand unknown: the Sonarr monitored missing episodes page could not be read"
+    [ "$(grep -c 8989 "$CURL_URLS")" -eq 1 ]
+}
+
+@test "indexer-guard: a history page 2 that fails sends no partial history pages" {
+    # Page one succeeds and its envelope says the document needs a second page;
+    # that one fails. The pass has half a history in hand, and half a history is
+    # a join that under-reports demand -- so the module gets --demand-error and
+    # neither document's page flags, and the pass decides on Prowlarr's evidence
+    # exactly as it would with Sonarr unreachable.
+    sonarr_many_records
+    : > "$SONARR_HISTORY_PAGE2_DOWN"
+
+    run "$SCRIPT" --dry-run --state "$STATE"
+    assert_success
+    assert_output --partial "could not fetch the grabbed history from Sonarr"
+    assert_output --partial "rotate:"
+    assert_output --partial "Sonarr demand unknown: the Sonarr history request failed"
+    assert_stub_called python3 "--demand-error"
+    assert_stub_not_called python3 "--demand-history"
+    assert_stub_not_called python3 "--demand-missing"
+    assert_stub_not_called docker ""
+    assert_nothing_forbidden
+}
+
+@test "indexer-guard: a spent demand budget fails open without a Sonarr request" {
+    # The budget is overridable so a test can spend it without waiting two
+    # minutes, and zero is the deterministic end of that: the first request
+    # would start with nothing left, so it is not made at all. The gate is
+    # skipped with the reason, and the pass completes on Prowlarr's evidence.
+    export INDEXER_GUARD_DEMAND_BUDGET_SECONDS=0
+
+    run "$SCRIPT" --dry-run --state "$STATE"
+    assert_success
+    assert_output --partial "the Sonarr demand fetch exceeded its 0s budget"
+    assert_output --partial "rotate:"
+    assert_output --partial "Sonarr demand unknown: the Sonarr demand fetch exceeded its 0s budget"
+    ! grep -q 8989 "$CURL_URLS" || {
+        echo "Sonarr was called with no budget left:"; cat "$CURL_URLS"; return 1
+    }
+    assert_stub_not_called docker ""
+    assert_nothing_forbidden
+}
+
+@test "indexer-guard: a non-numeric demand budget falls back to the default" {
+    # The override exists for tests, but a typo in it must not take the guard
+    # down: a word would reach the arithmetic in demand_budget_spent, fail
+    # there, and `set -e` would end the pass instead of the gate. The default
+    # applies, the warning names the variable, and the pass still decides.
+    export INDEXER_GUARD_DEMAND_BUDGET_SECONDS=soon
+
+    run "$SCRIPT" --dry-run --state "$STATE"
+    assert_success
+    assert_output --partial "INDEXER_GUARD_DEMAND_BUDGET_SECONDS='soon' is not a whole number of seconds; using 120"
+    assert_output --partial "rotate:"
+}
+
+@test "indexer-guard: a request's timeout is the smaller of 30s and the budget" {
+    # The per-request ceiling is what let ten slow pages stall a pass for five
+    # minutes: the budget clamps every request to what is left of it. Under the
+    # default budget the first page still gets its full 30 seconds; under a
+    # seven-second budget it gets at most seven.
+    local value
+
+    run "$SCRIPT" --dry-run --state "$STATE"
+    assert_success
+    value="$(curl_max_time)"
+    [ -n "$value" ] || fail "no Sonarr request carried a --max-time"
+    if (( value < 28 || value > 30 )); then
+        fail "the default budget gave the first Sonarr page --max-time $value, not 30"
+    fi
+
+    export INDEXER_GUARD_DEMAND_BUDGET_SECONDS=7
+    : > "$CURL_URLS"
+    : > "$STUB_LOG"
+    run "$SCRIPT" --dry-run --state "$STATE"
+    assert_success
+    value="$(curl_max_time)"
+    [ -n "$value" ] || fail "no Sonarr request carried a --max-time"
+    if (( value < 1 || value > 7 )); then
+        fail "a seven-second budget gave the first Sonarr page --max-time $value"
+    fi
+}
+
+@test "indexer-guard: a banned indexer Sonarr has no demand for holds" {
+    # Series 12 is missing an episode and series 99 was grabbed from 1337x, so
+    # nothing Sonarr needs was ever supplied by the banned indexer: a new exit
+    # IP would buy nothing, and the pass holds on the demand reason.
+    sonarr_no_demand
+    run "$SCRIPT" --dry-run --state "$STATE"
+    assert_success
+    assert_output --partial "hold:"
+    assert_output --partial "banned indexers have no Sonarr demand: 1337x"
+    assert_output --partial "no Sonarr demand: 1337x"
+    assert_stub_not_called docker ""
+    assert_nothing_forbidden
+}
+
+@test "indexer-guard: a mix of banned indexers rotates on the one with demand" {
+    # Two banned indexers, one of them with demand: the rotation happens, and
+    # the one it is not for is named rather than silently dropped.
+    cat > "$STATUSES_JSON" <<'JSON'
+[{"id": 4, "indexerId": 7, "disabledTill": "2099-01-01T00:00:00Z", "message": "Cloudflare error 1006"},
+ {"id": 5, "indexerId": 9, "disabledTill": "2099-01-01T00:00:00Z", "message": "403 Forbidden"}]
+JSON
+    printf '%s\n' '[{"id": 7, "name": "1337x"}, {"id": 9, "name": "EZTV"}]' > "$INDEXERS_JSON"
+
+    run "$SCRIPT" --dry-run --state "$STATE"
+    assert_success
+    assert_output --partial "rotate:"
+    assert_output --partial "no Sonarr demand for EZTV"
+}
+
+@test "indexer-guard: a Sonarr that cannot be reached is a warning, not a stop" {
+    # Fail open, and the whole reason it matters: a Sonarr that is down for one
+    # pass must not hold a banned IP in place for every indexer the stack does
+    # use. The warning says the gate was skipped, and the pass rotates on
+    # Prowlarr's evidence exactly as it did before the gate existed.
+    : > "$SONARR_DOWN"
+
+    run "$SCRIPT" --dry-run --state "$STATE"
+    assert_success
+    assert_output --partial "could not fetch the monitored missing episodes from Sonarr"
+    assert_output --partial "rotate:"
+    assert_output --partial "Sonarr demand unknown"
+    assert_stub_not_called docker ""
+    assert_nothing_forbidden
+}
+
+@test "indexer-guard: no Sonarr call is made when no indexer is in backoff" {
+    # The cheap pass, which is nearly every pass: two Prowlarr requests and
+    # nothing else. Sonarr is asked only for a decision that would otherwise
+    # rotate.
+    printf '%s\n' '[]' > "$STATUSES_JSON"
+
+    run "$SCRIPT" --dry-run --state "$STATE"
+    assert_success
+    assert_output --partial "hold:"
+    assert_output --partial "no indexer is in backoff"
+    ! grep -q 8989 "$CURL_URLS" || {
+        echo "Sonarr was called with no indexer in backoff:"; cat "$CURL_URLS"; return 1
+    }
+    grep -q 9696/api/v1/indexerstatus "$CURL_URLS"
+}
+
+@test "indexer-guard: no Sonarr call is made while the cooldown holds" {
+    # The other cheap hold, and the one the ordering was chosen for: the module
+    # decides first, so a pass whose cooldown is still running never reaches
+    # Sonarr at all.
+    printf '{"last_rotation": "%s", "rotations": 1}\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$STATE"
+
+    run "$SCRIPT" --dry-run --state "$STATE"
+    assert_success
+    assert_output --partial "hold:"
+    assert_output --partial "cooldown"
+    ! grep -q 8989 "$CURL_URLS" || {
+        echo "Sonarr was called for a pass inside the cooldown:"; cat "$CURL_URLS"; return 1
+    }
+}
+
+@test "indexer-guard: a missing SONARR_API_KEY skips the gate with a warning" {
+    # The key is needed only for the demand gate, so its absence is not the
+    # PROWLARR_API_KEY situation: the pass continues, and no Sonarr request is
+    # made with an empty key.
+    printf 'PROWLARR_API_KEY=test-key\n' > "$ENV_FILE"
+
+    run "$SCRIPT" --dry-run --state "$STATE"
+    assert_success
+    assert_output --partial "SONARR_API_KEY is not set"
+    assert_output --partial "rotate:"
+    ! grep -q 8989 "$CURL_URLS" || {
+        echo "Sonarr was called without a key:"; cat "$CURL_URLS"; return 1
+    }
+}
+
+@test "indexer-guard: the Sonarr API key reaches no argv and no log line" {
+    # Both keys travel in the curl config on stdin. The stub logs the argv it
+    # was handed, which is where a -H "X-Api-Key: ..." would show up.
+    run "$SCRIPT" --dry-run --state "$STATE"
+    assert_success
+
+    ! grep -q "test-sonarr-key" "$STUB_LOG" || {
+        echo "the Sonarr key is in a stubbed argv:"; cat "$STUB_LOG"; return 1
+    }
+    ! grep -q "test-key" "$STUB_LOG" || {
+        echo "the Prowlarr key is in a stubbed argv:"; cat "$STUB_LOG"; return 1
+    }
+    refute_output --partial "test-sonarr-key"
+    refute_output --partial "test-key"
 }
