@@ -461,6 +461,21 @@ Log in at [web.stremio.com](https://web.stremio.com) again and re-copy
 reports a plausible library size and nothing new, the key is fine and nobody has
 added anything.
 
+**The other way it stops, and the one that already cost ten hours.** A run that
+reports a library size and then ends in a `403` from `v3-cinemeta.strem.io`
+(`error code: 1010`) is neither your key nor rate limiting: it is Cinemeta's
+Cloudflare rule refusing the client's `User-Agent`. Cinemeta redirects to
+`cinemeta-live.strem.io`, and that host blocks urllib's default
+`Python-urllib/3.11` signature while answering any other name. The module sends
+one (`USER_AGENT`) for exactly this reason, so seeing the 403 again means the
+header was dropped in an edit rather than that anything upstream changed.
+
+Measured before the header went in: one failed pass every ten minutes from 00:43
+to 10:52 on 2026-09-18, each dying on the same title and creating no request. A
+failed lookup is now handled per title — the item stays pending and the pass
+carries on — so an unreachable provider costs three lookups and a non-zero exit
+instead of a stalled queue.
+
 What it deliberately does not do:
 
 - **Nothing is deleted.** Removing a title from the Stremio library is not
