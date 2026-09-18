@@ -994,6 +994,171 @@ def test_a_failed_lookup_fails_the_pass(tmp_path):
     assert result == 1
 
 
+# --------------------------------------------------------------------------
+# run(): a metadata lookup that fails must not end the pass
+#
+# The defect these cover is not hypothetical and not quiet. On 2026-09-18
+# Cinemeta started refusing this module's requests, and because `resolve()` was
+# called outside any try the first failure propagated straight out of run():
+# every pass died on the same title, made no request, and logged a 403 naming
+# one library id. Ten hours of that, one pass every ten minutes, no progress.
+# --------------------------------------------------------------------------
+
+def lookup_failures(**errors):
+    """A FakeCinemeta whose named ids raise instead of resolving."""
+    return FakeCinemeta(raises=errors)
+
+
+def test_a_failed_lookup_does_not_stop_the_pass(tmp_path):
+    already_baselined(tmp_path)
+    seerr = FakeSeerr()
+    run_pass(
+        tmp_path,
+        [record("tt1", name="unlookupable", ctime="2026-01-01T00:00:00.000Z"),
+         record("tt2", name="fine", ctime="2026-01-02T00:00:00.000Z")],
+        cinemeta=FakeCinemeta(mapping={"tt2": 22},
+                              raises={"tt1": http_error(403, url="https://cinemeta.test/x")}),
+        seerr=seerr, apply_changes=True)
+
+    # The one behind it still gets its turn.
+    assert seerr.requests == [("movie", 22)]
+    assert state_of(tmp_path)["handled"]["tt2"]["result"] == "requested"
+
+
+def test_a_failed_lookup_leaves_that_item_pending(tmp_path):
+    # Not recorded: a lookup that could not be made is not an answer, so the
+    # title has to be retried rather than remembered as unresolvable forever.
+    already_baselined(tmp_path)
+    run_pass(tmp_path, [record("tt1")],
+             cinemeta=lookup_failures(**{"tt1": http_error(403)}),
+             seerr=FakeSeerr(), apply_changes=True)
+    assert "tt1" not in state_of(tmp_path)["handled"]
+
+
+def test_a_failed_lookup_is_reported_in_the_summary(tmp_path):
+    already_baselined(tmp_path)
+    _, out = run_pass(tmp_path, [record("tt1")],
+                      cinemeta=lookup_failures(**{"tt1": http_error(403)}),
+                      seerr=FakeSeerr(), apply_changes=True)
+    assert "metadata lookup failed" in out.text()
+    assert "1 failed" in out.text()
+
+
+def test_the_pass_stops_after_three_consecutive_lookup_failures(tmp_path):
+    # The breaker, so one pass against a wholly unreachable provider is three
+    # lookups rather than one per pending title.
+    already_baselined(tmp_path)
+    items = capped_items(8)
+    seerr = FakeSeerr()
+    cinemeta = FakeCinemeta(raises={"tt%d" % n: http_error(403) for n in range(1, 9)})
+
+    result, out = run_pass(tmp_path, items, cinemeta=cinemeta, seerr=seerr,
+                           apply_changes=True, max_requests=0)
+
+    assert result == 1
+    assert len(cinemeta.calls) == m.MAX_LOOKUP_FAILURES
+    assert "3 lookups failed in a row" in out.text()
+    assert seerr.requests == []
+
+
+def test_the_lookup_failure_counter_resets_after_a_success(tmp_path):
+    # Otherwise three failures spread across an hour would end a pass that had
+    # been making progress the whole time.
+    already_baselined(tmp_path)
+    seerr = FakeSeerr()
+    cinemeta = FakeCinemeta(
+        mapping={"tt2": 22, "tt4": 44, "tt6": 66},
+        raises={"tt1": http_error(403), "tt3": http_error(403), "tt5": http_error(403),
+                "tt7": http_error(403)})
+
+    result, _ = run_pass(tmp_path, capped_items(7), cinemeta=cinemeta, seerr=seerr,
+                         apply_changes=True, max_requests=0)
+
+    # Four failures, but never three in a row, so the pass runs to the end.
+    assert result == 1
+    assert seerr.requests == [("movie", 22), ("movie", 44), ("movie", 66)]
+    assert len(cinemeta.calls) == 7
+
+
+# --------------------------------------------------------------------------
+# the User-Agent
+#
+# Cinemeta redirects to a host whose Cloudflare rule refuses urllib's default
+# `Python-urllib/3.11` signature with `HTTP 403  error code: 1010`. Measured
+# 2026-09-18: the same URL answers 200 with any other name. Without a
+# User-Agent every lookup fails, which is what killed the sync for ten hours.
+# --------------------------------------------------------------------------
+
+class FakeResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def read(self):
+        return self._payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def capture_headers(monkeypatch, payload=b'{"ok": true}'):
+    """Run one Http.json call and return the headers urllib was given."""
+    seen = {}
+
+    def fake_urlopen(request, timeout=None):
+        seen["headers"] = dict(request.headers)
+        return FakeResponse(payload)
+
+    monkeypatch.setattr(m.urllib.request, "urlopen", fake_urlopen)
+    seen["result"] = m.Http().json("http://example.test/")
+    return seen
+
+
+def lower_headers(headers):
+    return {k.lower(): v for k, v in headers.items()}
+
+
+def test_every_request_carries_a_user_agent(monkeypatch):
+    seen = capture_headers(monkeypatch)
+    assert seen["result"] == {"ok": True}
+    assert lower_headers(seen["headers"])["user-agent"] == m.USER_AGENT
+
+
+def test_the_user_agent_is_not_url_urllibs_default(monkeypatch):
+    # Stated as its own test because "a User-Agent is present" is already true
+    # when urllib supplies its default -- and its default is the thing that is
+    # blocked. Asserting presence alone would pass on the broken version.
+    seen = capture_headers(monkeypatch)
+    ua = lower_headers(seen["headers"])["user-agent"]
+    assert not ua.lower().startswith("python-urllib")
+
+
+def test_a_caller_supplied_user_agent_is_kept(monkeypatch):
+    seen = {}
+
+    def fake_urlopen(request, timeout=None):
+        seen["headers"] = dict(request.headers)
+        return FakeResponse(b"{}")
+
+    monkeypatch.setattr(m.urllib.request, "urlopen", fake_urlopen)
+    m.Http().json("http://example.test/", headers={"User-Agent": "caller/1.0"})
+    assert lower_headers(seen["headers"])["user-agent"] == "caller/1.0"
+
+
+def test_the_user_agent_does_not_displace_the_callers_other_headers(monkeypatch):
+    seen = {}
+
+    def fake_urlopen(request, timeout=None):
+        seen["headers"] = dict(request.headers)
+        return FakeResponse(b"{}")
+
+    monkeypatch.setattr(m.urllib.request, "urlopen", fake_urlopen)
+    m.Http().json("http://example.test/", headers={"X-Api-Key": "secret"})
+    assert lower_headers(seen["headers"])["x-api-key"] == "secret"
+
+
 def test_one_failing_title_does_not_stop_the_others(tmp_path):
     seed(tmp_path, [])
     seerr = FakeSeerr(request_errors={("movie", 11): http_error(500)})

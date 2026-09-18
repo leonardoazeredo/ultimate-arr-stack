@@ -57,96 +57,99 @@ MUTANT_DIR="$ROOT/tests/mutation/.mutants"
 # test in tests/shellcheck.bats derives the uncovered set from field 1 at run
 # time rather than from anything anyone remembered to edit.
 TARGETS=(
-# The third field is a bats `-f` regex, so it is anchored: an unanchored
-# substring would silently widen the oracle as tests are added, and a mutant
-# that then survived would have survived for a reason unrelated to coverage.
-  "scripts/lib/check-secrets.sh:tests/lib-secrets.bats:^secrets: "
-  "scripts/lib/check-env-vars.sh:tests/pre-commit-checks.bats:^check_env_vars "
-  "scripts/lib/check-conflicts.sh:tests/pre-commit-checks.bats:^check_conflicts "
-  "scripts/lib/check-hardcoded-domain.sh:tests/lib-hardcoded-domain.bats:^hardcoded-domain: "
-  "scripts/lib/check-uptime-monitors.sh:tests/lib-uptime-monitors.bats:^uptime-monitors: "
-  "scripts/lib/check-image-versions.sh:tests/lib-image-versions.bats:^image-versions: "
-  "scripts/lib/configure-helpers.sh:tests/lib-configure-helpers.bats:^configure-helpers: "
-  "scripts/lib/check-doc-links.sh:tests/lib-doc-links.bats:^doc-links: "
-  "scripts/lib/check-yaml-syntax.sh:tests/lib-yaml-syntax.bats:^yaml-syntax: "
-  "scripts/lib/check-env-backup.sh:tests/lib-env-backup.bats:^env-backup: "
-  "scripts/lib/check-dns-duplicates.sh:tests/lib-dns-duplicates.bats:^dns-duplicates: "
-  # scripts/lib/common.sh IS here now, and the reason it was not is worth
-  # keeping: it was swept once on the theory that being sourced by three tested
-  # files made it covered, and produced 78 mutants of which 78 survived. Sourced
-  # is not covered. It stayed off this list until it had an oracle of its own,
-  # because a target with no tests contributes only guaranteed survivors, which
-  # say nothing beyond "this file has no tests" - something README.md's derived
-  # no-sweep list already says, for free.
-  "scripts/lib/common.sh:tests/lib-common.bats:^common: "
-  "scripts/lib/check-domains.sh:tests/lib-domains.bats:^domains: "
-  "scripts/restart-stack.sh:tests/restart-stack.bats:^restart-stack: "
-  "setup-hooks.sh:tests/setup-hooks.bats:^setup-hooks: "
-  "scripts/ensure-tailscale-relay-port.sh:tests/ensure-relay-port.bats:^ensure-relay-port: "
-  "scripts/check-vpn.sh:tests/check-vpn.bats:^check-vpn: "
-  "scripts/boot-compose-up.sh:tests/boot-compose-up.bats:^boot-compose-up: "
-  "scripts/check-network.sh:tests/check-network.bats:^check-network: "
-  "scripts/configure-apps.sh:tests/configure-apps.bats:^configure-apps: "
-  "scripts/lib/env-file.sh:tests/lib-env-file.bats:^env-file: "
-  "scripts/queue-cleanup.sh:tests/queue-cleanup.bats:^queue-cleanup: "
-  "scripts/backlog-search.sh:tests/backlog-search.bats:^backlog-search: "
-  "scripts/usenet-blackhole.sh:tests/usenet-blackhole.bats:^usenet-blackhole: "
-  # The Stremio bridge's two halves, each with its own oracle: the wrapper is
-  # driven against a stub python3 by tests/stremio-library-sync.bats, and the
-  # module's decisions are faked in tests/python/test_stremio_library.py.
-  "scripts/stremio-library-sync.sh:tests/stremio-library-sync.bats:^stremio-library-sync: "
-  # The rotator was an inline compose entrypoint until 2026-09-16, which is to
-  # say it had no oracle a generator could be scored against at all. It does
-  # now: tests/gluetun-rotator.bats sources the file and drives the poll.
-  "scripts/gluetun-rotator.sh:tests/gluetun-rotator.bats:^gluetun-rotator: "
-  # Both fixers share tests/fix-arr-paths.bats and both anchor on `^fix-`
-  # rather than on their own half of it, so the one cross-script test in that
-  # file (neither reaches a destructive operation) is part of both oracles
-  # instead of belonging to neither.
-  "scripts/fix-radarr-paths.sh:tests/fix-arr-paths.bats:^fix-"
-  "scripts/fix-sonarr-folders.sh:tests/fix-arr-paths.bats:^fix-"
-  # The Python halves of the fixers, the usenet watcher, the usenet status
-  # view, the backlog search, and the indexer guard. universalmutator's own
-  # python.rules applies here, picked by extension in mutator.sh; the oracle is
-  # pytest, reached through the one bats test that runs it.
-  #
-  # The regex names a single test rather than the file's `^python: ` prefix,
-  # which is the one place this table deliberately narrows instead of widening.
-  # The other three tests in that file assert properties of pytest.sh itself --
-  # that it exits 77 without docker, that every module has a test file -- and no
-  # mutation of a module can make any of them fail. Including them would only
-  # add wall-clock to every one of a few hundred mutants.
-  "scripts/lib/queue_cleanup.py:tests/python-suite.bats:^python: the extracted modules pass"
-  "scripts/lib/fix_radarr_paths.py:tests/python-suite.bats:^python: the extracted modules pass"
-  "scripts/lib/fix_sonarr_folders.py:tests/python-suite.bats:^python: the extracted modules pass"
-  "scripts/lib/usenet_blackhole.py:tests/python-suite.bats:^python: the extracted modules pass"
-  "scripts/lib/backlog_search.py:tests/python-suite.bats:^python: the extracted modules pass"
-  "scripts/lib/usenet_status.py:tests/python-suite.bats:^python: the extracted modules pass"
-  "scripts/lib/indexer_guard.py:tests/python-suite.bats:^python: the extracted modules pass"
-  "scripts/lib/stremio_library.py:tests/python-suite.bats:^python: the extracted modules pass"
-  # The four duc files share one oracle because they are one protocol: the cgi
-  # produces a request marker, the poller consumes it, scan.sh holds the lock
-  # both of them branch on. A mutant in any of them is scored against all of it.
-  "duc-service/app/scan.sh:tests/duc-service.bats:^duc: "
-  "duc-service/app/manual_scan.sh:tests/duc-service.bats:^duc: "
-  "duc-service/app/manual_scan.cgi:tests/duc-service.bats:^duc: "
-  "duc-service/app/startup.sh:tests/duc-service.bats:^duc: "
+	# The third field is a bats `-f` regex, so it is anchored: an unanchored
+	# substring would silently widen the oracle as tests are added, and a mutant
+	# that then survived would have survived for a reason unrelated to coverage.
+	"scripts/lib/check-secrets.sh:tests/lib-secrets.bats:^secrets: "
+	"scripts/lib/check-env-vars.sh:tests/pre-commit-checks.bats:^check_env_vars "
+	"scripts/lib/check-conflicts.sh:tests/pre-commit-checks.bats:^check_conflicts "
+	"scripts/lib/check-hardcoded-domain.sh:tests/lib-hardcoded-domain.bats:^hardcoded-domain: "
+	"scripts/lib/check-uptime-monitors.sh:tests/lib-uptime-monitors.bats:^uptime-monitors: "
+	"scripts/lib/check-image-versions.sh:tests/lib-image-versions.bats:^image-versions: "
+	"scripts/lib/configure-helpers.sh:tests/lib-configure-helpers.bats:^configure-helpers: "
+	"scripts/lib/check-doc-links.sh:tests/lib-doc-links.bats:^doc-links: "
+	"scripts/lib/check-yaml-syntax.sh:tests/lib-yaml-syntax.bats:^yaml-syntax: "
+	"scripts/lib/check-env-backup.sh:tests/lib-env-backup.bats:^env-backup: "
+	"scripts/lib/check-dns-duplicates.sh:tests/lib-dns-duplicates.bats:^dns-duplicates: "
+	# scripts/lib/common.sh IS here now, and the reason it was not is worth
+	# keeping: it was swept once on the theory that being sourced by three tested
+	# files made it covered, and produced 78 mutants of which 78 survived. Sourced
+	# is not covered. It stayed off this list until it had an oracle of its own,
+	# because a target with no tests contributes only guaranteed survivors, which
+	# say nothing beyond "this file has no tests" - something README.md's derived
+	# no-sweep list already says, for free.
+	"scripts/lib/common.sh:tests/lib-common.bats:^common: "
+	"scripts/lib/check-domains.sh:tests/lib-domains.bats:^domains: "
+	"scripts/restart-stack.sh:tests/restart-stack.bats:^restart-stack: "
+	"setup-hooks.sh:tests/setup-hooks.bats:^setup-hooks: "
+	"scripts/ensure-tailscale-relay-port.sh:tests/ensure-relay-port.bats:^ensure-relay-port: "
+	"scripts/check-vpn.sh:tests/check-vpn.bats:^check-vpn: "
+	"scripts/boot-compose-up.sh:tests/boot-compose-up.bats:^boot-compose-up: "
+	"scripts/check-network.sh:tests/check-network.bats:^check-network: "
+	"scripts/configure-apps.sh:tests/configure-apps.bats:^configure-apps: "
+	"scripts/lib/env-file.sh:tests/lib-env-file.bats:^env-file: "
+	"scripts/queue-cleanup.sh:tests/queue-cleanup.bats:^queue-cleanup: "
+	"scripts/backlog-search.sh:tests/backlog-search.bats:^backlog-search: "
+	"scripts/usenet-blackhole.sh:tests/usenet-blackhole.bats:^usenet-blackhole: "
+	# The Stremio bridge's two halves, each with its own oracle: the wrapper is
+	# driven against a stub python3 by tests/stremio-library-sync.bats, and the
+	# module's decisions are faked in tests/python/test_stremio_library.py.
+	"scripts/stremio-library-sync.sh:tests/stremio-library-sync.bats:^stremio-library-sync: "
+	# The rotator was an inline compose entrypoint until 2026-09-16, which is to
+	# say it had no oracle a generator could be scored against at all. It does
+	# now: tests/gluetun-rotator.bats sources the file and drives the poll.
+	"scripts/gluetun-rotator.sh:tests/gluetun-rotator.bats:^gluetun-rotator: "
+	# Both fixers share tests/fix-arr-paths.bats and both anchor on `^fix-`
+	# rather than on their own half of it, so the one cross-script test in that
+	# file (neither reaches a destructive operation) is part of both oracles
+	# instead of belonging to neither.
+	"scripts/fix-radarr-paths.sh:tests/fix-arr-paths.bats:^fix-"
+	"scripts/fix-sonarr-folders.sh:tests/fix-arr-paths.bats:^fix-"
+	# The Python halves of the fixers, the usenet watcher, the usenet status
+	# view, the backlog search, and the indexer guard. universalmutator's own
+	# python.rules applies here, picked by extension in mutator.sh; the oracle is
+	# pytest, reached through the one bats test that runs it.
+	#
+	# The regex names a single test rather than the file's `^python: ` prefix,
+	# which is the one place this table deliberately narrows instead of widening.
+	# The other three tests in that file assert properties of pytest.sh itself --
+	# that it exits 77 without docker, that every module has a test file -- and no
+	# mutation of a module can make any of them fail. Including them would only
+	# add wall-clock to every one of a few hundred mutants.
+	"scripts/lib/queue_cleanup.py:tests/python-suite.bats:^python: the extracted modules pass"
+	"scripts/lib/fix_radarr_paths.py:tests/python-suite.bats:^python: the extracted modules pass"
+	"scripts/lib/fix_sonarr_folders.py:tests/python-suite.bats:^python: the extracted modules pass"
+	"scripts/lib/usenet_blackhole.py:tests/python-suite.bats:^python: the extracted modules pass"
+	"scripts/lib/backlog_search.py:tests/python-suite.bats:^python: the extracted modules pass"
+	"scripts/lib/usenet_status.py:tests/python-suite.bats:^python: the extracted modules pass"
+	"scripts/lib/indexer_guard.py:tests/python-suite.bats:^python: the extracted modules pass"
+	"scripts/lib/stremio_library.py:tests/python-suite.bats:^python: the extracted modules pass"
+	# The four duc files share one oracle because they are one protocol: the cgi
+	# produces a request marker, the poller consumes it, scan.sh holds the lock
+	# both of them branch on. A mutant in any of them is scored against all of it.
+	"duc-service/app/scan.sh:tests/duc-service.bats:^duc: "
+	"duc-service/app/manual_scan.sh:tests/duc-service.bats:^duc: "
+	"duc-service/app/manual_scan.cgi:tests/duc-service.bats:^duc: "
+	"duc-service/app/startup.sh:tests/duc-service.bats:^duc: "
 )
 
 FILTER=""
 while getopts "k:" opt; do
-    case "$opt" in
-        k) FILTER="$OPTARG" ;;
-        *) echo "usage: $0 [-k <substring>] [target ...]" >&2; exit 2 ;;
-    esac
+	case "$opt" in
+	k) FILTER="$OPTARG" ;;
+	*)
+		echo "usage: $0 [-k <substring>] [target ...]" >&2
+		exit 2
+		;;
+	esac
 done
 shift $((OPTIND - 1))
 
 if [[ $# -gt 0 ]]; then
-    SELECTED=("$@")
+	SELECTED=("$@")
 else
-    SELECTED=()
-    for t in "${TARGETS[@]}"; do SELECTED+=("${t%%:*}"); done
+	SELECTED=()
+	for t in "${TARGETS[@]}"; do SELECTED+=("${t%%:*}"); done
 fi
 
 # Apply -k HERE, not only in the sweep loop below. The dirty-tree guard that
@@ -161,9 +164,9 @@ fi
 # over-broad precondition does not merely block a run, it can launder itself
 # into a false measurement downstream.
 if [[ -n "$FILTER" ]]; then
-    _kept=()
-    for t in "${SELECTED[@]}"; do [[ "$t" == *"$FILTER"* ]] && _kept+=("$t"); done
-    SELECTED=(${_kept+"${_kept[@]}"})
+	_kept=()
+	for t in "${SELECTED[@]}"; do [[ "$t" == *"$FILTER"* ]] && _kept+=("$t"); done
+	SELECTED=(${_kept+"${_kept[@]}"})
 fi
 
 # This overwrites tracked files in place. On a dirty tree a failed restore is
@@ -177,21 +180,21 @@ cd "$ROOT" || exit 2
 DIRTY=""
 [[ ${#SELECTED[@]} -gt 0 ]] && DIRTY="$(git status --porcelain -- "${SELECTED[@]}" 2>/dev/null)"
 if [[ -n "$DIRTY" ]]; then
-    echo "run-generated: refusing to start - these targets have uncommitted changes:" >&2
-    sed 's/^/  /' <<<"$DIRTY" >&2
-    echo "run-generated: this script overwrites them in place. Commit or stash first." >&2
-    exit 2
+	echo "run-generated: refusing to start - these targets have uncommitted changes:" >&2
+	sed 's/^/  /' <<<"$DIRTY" >&2
+	echo "run-generated: this script overwrites them in place. Commit or stash first." >&2
+	exit 2
 fi
 
 oracle_for() {
-    local want="$1" t
-    for t in "${TARGETS[@]}"; do
-        [[ "${t%%:*}" == "$want" ]] || continue
-        local rest="${t#*:}"
-        printf '%s\t%s\n' "${rest%%:*}" "${rest#*:}"
-        return 0
-    done
-    return 1
+	local want="$1" t
+	for t in "${TARGETS[@]}"; do
+		[[ "${t%%:*}" == "$want" ]] || continue
+		local rest="${t#*:}"
+		printf '%s\t%s\n' "${rest%%:*}" "${rest#*:}"
+		return 0
+	done
+	return 1
 }
 
 # Describe a mutant as `<line>\t<old> ==> <new>`.
@@ -207,134 +210,156 @@ oracle_for() {
 # ` ==> ` is universalmutator's own rule syntax, reused here so a ledger row
 # reads the same way the rule that produced it does.
 describe() {
-    local orig="$1" mut="$2" out line text
-    out="$(diff --unchanged-line-format= --old-line-format='%dn|%L ==> ' \
-        --new-line-format='%L' "$orig" "$mut" 2>/dev/null \
-        | head -2 | tr -d '\n' \
-        | sed 's/[[:space:]]\{1,\}/ /g; s/^ //; s/ $//')"
-    line="${out%%|*}"
-    text="${out#*|}"
-    [[ "$line" =~ ^[0-9]+$ ]] || { line="?"; text="$out"; }
-    printf '%s\t%s\n' "$line" "$text"
+	local orig="$1" mut="$2" out line text
+	out="$(diff --unchanged-line-format= --old-line-format='%dn|%L ==> ' \
+		--new-line-format='%L' "$orig" "$mut" 2>/dev/null |
+		head -2 | tr -d '\n' |
+		sed 's/[[:space:]]\{1,\}/ /g; s/^ //; s/ $//')"
+	line="${out%%|*}"
+	text="${out#*|}"
+	[[ "$line" =~ ^[0-9]+$ ]] || {
+		line="?"
+		text="$out"
+	}
+	printf '%s\t%s\n' "$line" "$text"
 }
 
-TOTAL=0; KILLED=0; SURVIVED=0; ERRORED=0; SKIPPED=0; TIMEDOUT=0
+TOTAL=0
+KILLED=0
+SURVIVED=0
+ERRORED=0
+SKIPPED=0
+TIMEDOUT=0
 declare -a NEW_SURVIVORS=()
 # Targets this run actually swept to completion. The ledger is rewritten only
 # for these; rows belonging to any other target are carried through untouched.
 declare -A SWEPT=()
 
 for target in "${SELECTED[@]}"; do
-    if [[ -n "$FILTER" && "$target" != *"$FILTER"* ]]; then continue; fi
+	if [[ -n "$FILTER" && "$target" != *"$FILTER"* ]]; then continue; fi
 
-    map="$(oracle_for "$target")" || {
-        echo "ERROR  $target has no oracle in the TARGETS map - skipping" >&2
-        ERRORED=$((ERRORED + 1)); continue
-    }
-    batsfile="${map%%$'\t'*}"; testre="${map#*$'\t'}"
+	map="$(oracle_for "$target")" || {
+		echo "ERROR  $target has no oracle in the TARGETS map - skipping" >&2
+		ERRORED=$((ERRORED + 1))
+		continue
+	}
+	batsfile="${map%%$'\t'*}"
+	testre="${map#*$'\t'}"
 
-    if [[ ! -f "$ROOT/$target" ]]; then
-        echo "ERROR  no such target: $target" >&2
-        ERRORED=$((ERRORED + 1)); continue
-    fi
+	if [[ ! -f "$ROOT/$target" ]]; then
+		echo "ERROR  no such target: $target" >&2
+		ERRORED=$((ERRORED + 1))
+		continue
+	fi
 
-    echo "== $target  (oracle: $(basename "$batsfile") -f '$testre')"
+	echo "== $target  (oracle: $(basename "$batsfile") -f '$testre')"
 
-    # Control, once per target rather than once per mutant. A suite that is
-    # already red would score every mutant KILLED and report a perfect sweep.
-    control_start=$SECONDS
-    res=$(run_tests "$ROOT/$batsfile" "$testre"); read -r st count skipped <<<"$res"
-    budget=$(oracle_budget $(( SECONDS - control_start )))
-    if [[ "$count" -eq 0 ]]; then
-        echo "   ERROR: -f '$testre' matched NO tests. bats exits 0 having run"
-        echo "          nothing, which reads exactly like a pass. Fix the regex."
-        ERRORED=$((ERRORED + 1)); continue
-    fi
-    if [[ "$st" -ne 0 ]]; then
-        echo "   ERROR: the oracle is already failing unmutated - every mutant"
-        echo "          would score KILLED. Fix the tests first."
-        ERRORED=$((ERRORED + 1)); continue
-    fi
+	# Control, once per target rather than once per mutant. A suite that is
+	# already red would score every mutant KILLED and report a perfect sweep.
+	control_start=$SECONDS
+	res=$(run_tests "$ROOT/$batsfile" "$testre")
+	read -r st count skipped <<<"$res"
+	budget=$(oracle_budget $((SECONDS - control_start)))
+	if [[ "$count" -eq 0 ]]; then
+		echo "   ERROR: -f '$testre' matched NO tests. bats exits 0 having run"
+		echo "          nothing, which reads exactly like a pass. Fix the regex."
+		ERRORED=$((ERRORED + 1))
+		continue
+	fi
+	if [[ "$st" -ne 0 ]]; then
+		echo "   ERROR: the oracle is already failing unmutated - every mutant"
+		echo "          would score KILLED. Fix the tests first."
+		ERRORED=$((ERRORED + 1))
+		continue
+	fi
 
-    # The whole oracle skipping is not a pass. TAP spells a skip as
-    # `ok N name # skip reason`, so an oracle that skipped entirely exits 0 and
-    # every mutant it never examined would be scored SURVIVED -- a coverage gap
-    # invented out of an environment condition and filed against a test that
-    # never executed. run-mutations.sh has refused to judge this case since §8 of
-    # docs/TEST-HARDENING-LOG.md recorded it; this half shares run_tests, which
-    # returns the skip count for exactly this reason, and was not reading it.
-    #
-    # Refusing here, before generation, also means a host that cannot judge a
-    # target never pays to generate its mutants.
-    if [[ "$skipped" -eq "$count" ]] && [[ "$count" -gt 0 ]]; then
-        echo "   SKIP: all $count oracle test(s) skipped, so it cannot judge any mutant:"
-        grep -m1 -E '^ok [0-9]+ .*# skip' "$WORK/last-output.txt" | sed 's/^/        | /'
-        SKIPPED=$((SKIPPED + 1)); continue
-    fi
+	# The whole oracle skipping is not a pass. TAP spells a skip as
+	# `ok N name # skip reason`, so an oracle that skipped entirely exits 0 and
+	# every mutant it never examined would be scored SURVIVED -- a coverage gap
+	# invented out of an environment condition and filed against a test that
+	# never executed. run-mutations.sh has refused to judge this case since §8 of
+	# docs/TEST-HARDENING-LOG.md recorded it; this half shares run_tests, which
+	# returns the skip count for exactly this reason, and was not reading it.
+	#
+	# Refusing here, before generation, also means a host that cannot judge a
+	# target never pays to generate its mutants.
+	if [[ "$skipped" -eq "$count" ]] && [[ "$count" -gt 0 ]]; then
+		echo "   SKIP: all $count oracle test(s) skipped, so it cannot judge any mutant:"
+		grep -m1 -E '^ok [0-9]+ .*# skip' "$WORK/last-output.txt" | sed 's/^/        | /'
+		SKIPPED=$((SKIPPED + 1))
+		continue
+	fi
 
-    outdir="$MUTANT_DIR/$(printf '%s' "$target" | tr -c 'A-Za-z0-9._-' '_')"
-    rm -rf "$outdir"
-    gen="$("$ROOT/tests/mutation/mutator.sh" "$ROOT/$target" "$outdir")"
-    genst=$?
-    if [[ "$genst" -eq 77 ]]; then
-        echo "   SKIP: no usable docker daemon to generate mutants in"
-        SKIPPED=$((SKIPPED + 1)); continue
-    fi
-    if [[ "$genst" -ne 0 ]]; then
-        echo "   ERROR: mutant generation failed"
-        ERRORED=$((ERRORED + 1)); continue
-    fi
-    echo "   $gen, $count oracle test(s)"
-    SWEPT["$target"]=1
+	outdir="$MUTANT_DIR/$(printf '%s' "$target" | tr -c 'A-Za-z0-9._-' '_')"
+	rm -rf "$outdir"
+	gen="$("$ROOT/tests/mutation/mutator.sh" "$ROOT/$target" "$outdir")"
+	genst=$?
+	if [[ "$genst" -eq 77 ]]; then
+		echo "   SKIP: no usable docker daemon to generate mutants in"
+		SKIPPED=$((SKIPPED + 1))
+		continue
+	fi
+	if [[ "$genst" -ne 0 ]]; then
+		echo "   ERROR: mutant generation failed"
+		ERRORED=$((ERRORED + 1))
+		continue
+	fi
+	echo "   $gen, $count oracle test(s)"
+	SWEPT["$target"]=1
 
-    for mutant in "$outdir"/*; do
-        [[ -f "$mutant" ]] || continue
-        TOTAL=$((TOTAL + 1))
+	for mutant in "$outdir"/*; do
+		[[ -f "$mutant" ]] || continue
+		TOTAL=$((TOTAL + 1))
 
-        take_backup "$ROOT/$target" "gen-$(basename "$target")-$(basename "$mutant")" || {
-            echo "   ERROR: could not copy $target aside"
-            ERRORED=$((ERRORED + 1)); continue
-        }
-        backup="$BACKUP_PATH"
-        desc="$(describe "$backup" "$mutant")"
+		take_backup "$ROOT/$target" "gen-$(basename "$target")-$(basename "$mutant")" || {
+			echo "   ERROR: could not copy $target aside"
+			ERRORED=$((ERRORED + 1))
+			continue
+		}
+		backup="$BACKUP_PATH"
+		desc="$(describe "$backup" "$mutant")"
 
-        cp "$mutant" "$ROOT/$target" 2>/dev/null || true
-        # The mutation must actually have landed. A no-op mutant scores KILLED
-        # or SURVIVED on the unmutated file either way, and both answers are
-        # lies -- this is the same assertion the corpus runner makes, and the
-        # reason it exists at all.
-        if cmp -s "$backup" "$ROOT/$target"; then
-            echo "   ERROR: mutant $(basename "$mutant") changed nothing"
-            ERRORED=$((ERRORED + 1)); restore_current || exit 3; continue
-        fi
+		cp "$mutant" "$ROOT/$target" 2>/dev/null || true
+		# The mutation must actually have landed. A no-op mutant scores KILLED
+		# or SURVIVED on the unmutated file either way, and both answers are
+		# lies -- this is the same assertion the corpus runner makes, and the
+		# reason it exists at all.
+		if cmp -s "$backup" "$ROOT/$target"; then
+			echo "   ERROR: mutant $(basename "$mutant") changed nothing"
+			ERRORED=$((ERRORED + 1))
+			restore_current || exit 3
+			continue
+		fi
 
-        res=$(run_tests "$ROOT/$batsfile" "$testre" "$budget"); read -r st mcount mskipped <<<"$res"
+		res=$(run_tests "$ROOT/$batsfile" "$testre" "$budget")
+		read -r st mcount mskipped <<<"$res"
 
-        # Restore before classifying. Stop the whole run if it failed: mutating
-        # the next target on top of a tree we could not put back turns one
-        # recoverable problem into an unrecoverable one.
-        restore_current || exit 3
+		# Restore before classifying. Stop the whole run if it failed: mutating
+		# the next target on top of a tree we could not put back turns one
+		# recoverable problem into an unrecoverable one.
+		restore_current || exit 3
 
-        if [[ "$st" -eq 124 ]]; then
-            # Counted as a kill -- the oracle demonstrably did not pass -- but
-            # named, because a hang and a clean red are the same status here and
-            # very different problems. The tally reports them separately so a
-            # sweep whose wall-clock quietly went up says why.
-            KILLED=$((KILLED + 1)); TIMEDOUT=$((TIMEDOUT + 1))
-            echo "   KILLED (oracle hit the ${budget}s budget)  $desc"
-        elif [[ "$st" -ne 0 ]]; then
-            KILLED=$((KILLED + 1))
-        elif [[ "$mskipped" -eq "$mcount" ]] && [[ "$mcount" -gt 0 ]]; then
-            # Same reasoning as the control run, per mutant: an oracle whose every
-            # test skipped did not judge this mutant, so it is not a finding.
-            SKIPPED=$((SKIPPED + 1))
-            echo "   SKIPPED (the whole oracle skipped on this mutant)  $desc"
-        else
-            SURVIVED=$((SURVIVED + 1))
-            NEW_SURVIVORS+=("$target"$'\t'"$desc")
-            echo "   SURVIVED  $desc"
-        fi
-    done
+		if [[ "$st" -eq 124 ]]; then
+			# Counted as a kill -- the oracle demonstrably did not pass -- but
+			# named, because a hang and a clean red are the same status here and
+			# very different problems. The tally reports them separately so a
+			# sweep whose wall-clock quietly went up says why.
+			KILLED=$((KILLED + 1))
+			TIMEDOUT=$((TIMEDOUT + 1))
+			echo "   KILLED (oracle hit the ${budget}s budget)  $desc"
+		elif [[ "$st" -ne 0 ]]; then
+			KILLED=$((KILLED + 1))
+		elif [[ "$mskipped" -eq "$mcount" ]] && [[ "$mcount" -gt 0 ]]; then
+			# Same reasoning as the control run, per mutant: an oracle whose every
+			# test skipped did not judge this mutant, so it is not a finding.
+			SKIPPED=$((SKIPPED + 1))
+			echo "   SKIPPED (the whole oracle skipped on this mutant)  $desc"
+		else
+			SURVIVED=$((SURVIVED + 1))
+			NEW_SURVIVORS+=("$target"$'\t'"$desc")
+			echo "   SURVIVED  $desc"
+		fi
+	done
 done
 
 # --- ledger ------------------------------------------------------------------
@@ -354,56 +379,58 @@ done
 # for a swept target keeps its verdict if the same mutation is still found.
 # Identity is (file, mutation text) -- never the line number, see describe().
 {
-    echo "# Survivors of ./tests/mutation/run-generated.sh -- mutants the suite did NOT kill."
-    echo "# verdict: real-gap | equivalent | wontfix | unreviewed"
-    echo "# A real-gap gets a test written, and then a corpus entry so the new test is"
-    echo "# itself proved capable of failing. An equivalent mutant changes text without"
-    echo "# changing behaviour and can never be killed by anything - it is not a defect."
-    echo "#"
-    echo "# Rows are keyed on (file, mutation); the line number is informational and may"
-    echo "# be stale. Only targets swept by the last run are rewritten."
-    printf '#file\tline\tmutation\tverdict\tnote\n'
-} > "$WORK/ledger.tsv"
+	echo "# Survivors of ./tests/mutation/run-generated.sh -- mutants the suite did NOT kill."
+	echo "# verdict: real-gap | equivalent | wontfix | unreviewed"
+	echo "# A real-gap gets a test written, and then a corpus entry so the new test is"
+	echo "# itself proved capable of failing. An equivalent mutant changes text without"
+	echo "# changing behaviour and can never be killed by anything - it is not a defect."
+	echo "#"
+	echo "# Rows are keyed on (file, mutation); the line number is informational and may"
+	echo "# be stale. Only targets swept by the last run are rewritten."
+	printf '#file\tline\tmutation\tverdict\tnote\n'
+} >"$WORK/ledger.tsv"
 
 declare -A KNOWN=()
 declare -a CARRIED=()
 if [[ -f "$LEDGER" ]]; then
-    while IFS=$'\t' read -r f l m v n; do
-        [[ "$f" == \#* || -z "$f" ]] && continue
-        if [[ -n "${SWEPT[$f]+set}" ]]; then
-            KNOWN["$f"$'\t'"$m"]="$v"$'\t'"$n"
-        else
-            # Not swept this run: carried through exactly as it was.
-            CARRIED+=("$f"$'\t'"$l"$'\t'"$m"$'\t'"$v"$'\t'"$n")
-        fi
-    done < "$LEDGER"
+	while IFS=$'\t' read -r f l m v n; do
+		[[ "$f" == \#* || -z "$f" ]] && continue
+		if [[ -n "${SWEPT[$f]+set}" ]]; then
+			KNOWN["$f"$'\t'"$m"]="$v"$'\t'"$n"
+		else
+			# Not swept this run: carried through exactly as it was.
+			CARRIED+=("$f"$'\t'"$l"$'\t'"$m"$'\t'"$v"$'\t'"$n")
+		fi
+	done <"$LEDGER"
 fi
 
 {
-    for c in ${CARRIED+"${CARRIED[@]}"}; do printf '%s\n' "$c"; done
-    for s in ${NEW_SURVIVORS+"${NEW_SURVIVORS[@]}"}; do
-        # s is already file<TAB>line<TAB>mutation
-        f="${s%%$'\t'*}"; rest="${s#*$'\t'}"; m="${rest#*$'\t'}"
-        if [[ -n "${KNOWN[$f$'\t'$m]+set}" ]]; then
-            printf '%s\t%s\n' "$s" "${KNOWN[$f$'\t'$m]}"
-        else
-            printf '%s\tunreviewed\t\n' "$s"
-        fi
-    done
-} | sort >> "$WORK/ledger.tsv"
+	for c in ${CARRIED+"${CARRIED[@]}"}; do printf '%s\n' "$c"; done
+	for s in ${NEW_SURVIVORS+"${NEW_SURVIVORS[@]}"}; do
+		# s is already file<TAB>line<TAB>mutation
+		f="${s%%$'\t'*}"
+		rest="${s#*$'\t'}"
+		m="${rest#*$'\t'}"
+		if [[ -n "${KNOWN[$f$'\t'$m]+set}" ]]; then
+			printf '%s\t%s\n' "$s" "${KNOWN[$f$'\t'$m]}"
+		else
+			printf '%s\tunreviewed\t\n' "$s"
+		fi
+	done
+} | sort >>"$WORK/ledger.tsv"
 
 cp "$WORK/ledger.tsv" "$LEDGER"
 
 echo
 echo "killed $KILLED / $TOTAL   survived $SURVIVED   errored $ERRORED   skipped $SKIPPED"
 if [[ "$TIMEDOUT" -gt 0 ]]; then
-    # Not folded into the line above. These are counted as kills, but they are
-    # the reason a sweep's wall-clock moves, and a number nobody prints is a
-    # number nobody notices.
-    echo "  of those, $TIMEDOUT hit the oracle time budget rather than failing outright"
+	# Not folded into the line above. These are counted as kills, but they are
+	# the reason a sweep's wall-clock moves, and a number nobody prints is a
+	# number nobody notices.
+	echo "  of those, $TIMEDOUT hit the oracle time budget rather than failing outright"
 fi
 if [[ "$SURVIVED" -gt 0 ]]; then
-    echo "ledger: $LEDGER  (survivors are findings to triage, not failures)"
+	echo "ledger: $LEDGER  (survivors are findings to triage, not failures)"
 fi
 # Always 0 -- see the header. run-mutations.sh is the blocking gate.
 exit 0
