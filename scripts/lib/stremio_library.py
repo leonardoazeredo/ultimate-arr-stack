@@ -110,6 +110,31 @@ DEFAULT_MAX_REQUESTS = 3
 
 REQUEST_TIMEOUT = 30
 
+# Every request carries a User-Agent, and it is load-bearing rather than
+# manners. On 2026-09-18 `v3-cinemeta.strem.io` began answering 307 to
+# `cinemeta-live.strem.io`, and that host refuses urllib's default
+# `Python-urllib/3.11` signature with `HTTP 403  error code: 1010` -- a
+# Cloudflare signature block, not a rate limit and not an entitlement. The same
+# URL returns 200 with any other name, the honest one below included, so there
+# is nothing to impersonate.
+#
+# Without this, every metadata lookup fails, and the sync does not degrade -- it
+# stops. Measured: the first version of this module sent no User-Agent and sat
+# dead for ten hours from 00:43 to 10:52 on 2026-09-18, one failed pass every
+# ten minutes, having stopped on the first title it could not look up. See
+# MAX_LOOKUP_FAILURES for the other half of that failure.
+USER_AGENT = "arr-stack-stremio-library-sync/1.0"
+
+# How many metadata lookups may fail in a row before a pass gives up.
+#
+# One unlookupable title must not end a pass: it stays pending and is retried,
+# and the pass moves to the next one. But a provider that is down altogether
+# would otherwise turn one pass into one lookup per pending title -- 145 of them
+# on this library -- every ten minutes. Three in a row reads as "the provider is
+# unreachable" rather than "this title is odd", so the pass stops there and
+# exits non-zero, leaving everything not yet acted on pending for the next one.
+MAX_LOOKUP_FAILURES = 3
+
 # MediaInfo.status, as the Seerr API describes the field: 1 UNKNOWN, 2 PENDING,
 # 3 PROCESSING, 4 PARTIALLY_AVAILABLE, 5 AVAILABLE, 6 DELETED. Only 5 stops a
 # request. Status 4 is deliberately not on that list: a series you own one
@@ -165,6 +190,10 @@ class Http:
     def json(self, url, method="GET", headers=None, data=None):
         body = None
         hdrs = dict(headers or {})
+        # Every caller gets the User-Agent, and a caller that sets its own keeps
+        # it. See USER_AGENT above: this is the difference between a working
+        # metadata lookup and `HTTP 403  error code: 1010`.
+        hdrs.setdefault("User-Agent", USER_AGENT)
         if data is not None:
             body = json.dumps(data).encode()
             hdrs["Content-Type"] = "application/json"
@@ -488,15 +517,36 @@ def run(stremio, cinemeta, seerr, state_path, apply_changes=False,
         pending = pending[:max_requests]
 
     requested = skipped = failed = 0
+    lookup_failures = 0
 
     for entry in pending:
         label = "%s (%s)" % (entry["name"] or "?", entry["id"])
 
-        resolved = resolve(entry, cinemeta)
+        try:
+            resolved = resolve(entry, cinemeta)
+        except HttpError as err:
+            # A lookup that could not be made is not an answer, and it must not
+            # end the pass: the next pass retries, and the titles behind this one
+            # still get their turn. This used to propagate, which is what turned
+            # a Cloudflare block on one title into a dead sync on 2026-09-18 --
+            # ten hours of identical failures, no progress, and the only line in
+            # the log naming a single library id rather than the provider.
+            out("  FAIL     %s: metadata lookup failed (%s)" % (label, err))
+            failed += 1
+            lookup_failures += 1
+            if lookup_failures >= MAX_LOOKUP_FAILURES:
+                out("  stopping: %d lookups failed in a row, which reads as the meta "
+                    "provider being unreachable rather than one odd title. "
+                    "Everything not acted on stays pending for the next pass."
+                    % lookup_failures)
+                break
+            continue
+        lookup_failures = 0
+
         if resolved is None:
             # Recorded, so the next pass does not re-resolve it every ten
-            # minutes forever. A transient failure raises instead and lands in
-            # the handler below, which leaves the item pending.
+            # minutes forever. A transient failure raises and is handled above,
+            # which leaves the item pending.
             out("  skip     %s: no TMDB id could be resolved" % label)
             state["handled"][entry["id"]] = {
                 "name": entry["name"], "type": entry["type"],
