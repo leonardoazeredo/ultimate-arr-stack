@@ -60,46 +60,46 @@ VERBOSE=false
 MAX_REQUESTS=""
 
 while [[ $# -gt 0 ]]; do
-	case "$1" in
-	--apply) APPLY=true ;;
-	--backfill) BACKFILL=true ;;
-	--verbose | -v) VERBOSE=true ;;
-	--max)
-		if [[ $# -lt 2 ]]; then
-			echo "ERROR: --max needs a number" >&2
-			exit 2
-		fi
-		MAX_REQUESTS="$2"
-		shift
-		;;
-	--max=*) MAX_REQUESTS="${1#*=}" ;;
-	--help | -h)
-		# The leading comment block, printed verbatim, stopping at the first line
-		# that is not a comment. Not a fixed `sed -n '3,55p'` range, which is the
-		# form usenet-blackhole.sh uses and has had to edit four times, once
-		# because the range printed a line of code. awk stops on the boundary
-		# instead of on a count, so adding a paragraph above cannot break it.
-		awk 'NR == 1 { next } /^#/ { header = 1; sub(/^# ?/, ""); print; next } header { exit }' "$0"
-		exit 0
-		;;
-	*)
-		echo "ERROR: unrecognised argument: $1" >&2
-		exit 2
-		;;
-	esac
-	shift
+  case "$1" in
+    --apply) APPLY=true ;;
+    --backfill) BACKFILL=true ;;
+    --verbose|-v) VERBOSE=true ;;
+    --max)
+      if [[ $# -lt 2 ]]; then
+        echo "ERROR: --max needs a number" >&2
+        exit 2
+      fi
+      MAX_REQUESTS="$2"
+      shift
+      ;;
+    --max=*) MAX_REQUESTS="${1#*=}" ;;
+    --help|-h)
+      # The leading comment block, printed verbatim, stopping at the first line
+      # that is not a comment. Not a fixed `sed -n '3,55p'` range, which is the
+      # form usenet-blackhole.sh uses and has had to edit four times, once
+      # because the range printed a line of code. awk stops on the boundary
+      # instead of on a count, so adding a paragraph above cannot break it.
+      awk 'NR == 1 { next } /^#/ { header = 1; sub(/^# ?/, ""); print; next } header { exit }' "$0"
+      exit 0
+      ;;
+    *)
+      echo "ERROR: unrecognised argument: $1" >&2
+      exit 2
+      ;;
+  esac
+  shift
 done
 
 # Digits only, so the empty string, a negative and "1.5" are refused here rather
 # than reaching python as a ValueError traceback or, worse, reaching the slice
 # that bounds the pass as a number it reads differently from what was typed.
 if [[ -n "$MAX_REQUESTS" ]]; then
-	case "$MAX_REQUESTS" in
-	'' | *[!0-9]*)
-		echo "ERROR: --max must be a whole number, got '$MAX_REQUESTS'" >&2
-		exit 2
-		;;
-	esac
+  case "$MAX_REQUESTS" in
+    ''|*[!0-9]*)
+      echo "ERROR: --max must be a whole number, got '$MAX_REQUESTS'" >&2
+      exit 2
+      ;;
+  esac
 fi
 
 STREMIO_KEY=$(env_value "$ENV_FILE" STREMIO_AUTH_KEY || true)
@@ -114,37 +114,37 @@ log() { echo "[stremio-library-sync] $1"; }
 # with an `error` body rather than a 401, so the failure has to be named before
 # the request is made rather than after.
 if [[ -z "$STREMIO_KEY" ]]; then
-	log "ERROR: STREMIO_AUTH_KEY is not set in $ENV_FILE"
-	log "       The sync cannot read the library without it."
-	exit 1
+  log "ERROR: STREMIO_AUTH_KEY is not set in $ENV_FILE"
+  log "       The sync cannot read the library without it."
+  exit 1
 fi
 
 if [[ -z "$SEERR_KEY" ]]; then
-	log "ERROR: SEERR_API_KEY is not set in $ENV_FILE"
-	log "       Requests would be rejected; see Seerr Settings > General."
-	exit 1
+  log "ERROR: SEERR_API_KEY is not set in $ENV_FILE"
+  log "       Requests would be rejected; see Seerr Settings > General."
+  exit 1
 fi
 
 echo ""
 echo "========================================"
 echo "Stremio library sync — $(date '+%Y-%m-%d %H:%M:%S')"
 if $APPLY; then
-	echo "Mode: APPLYING (create Seerr requests)"
+  echo "Mode: APPLYING (create Seerr requests)"
 else
-	echo "Mode: DRY RUN (use --apply to create requests)"
+  echo "Mode: DRY RUN (use --apply to create requests)"
 fi
 # Printed in both modes. "Backfilling" and "picking up new additions" are
 # otherwise indistinguishable in a log that had a queue to work through, and the
 # difference is the whole reason this is a flag rather than the default.
 if $BACKFILL && [[ ! -f "$STATE_PATH" ]]; then
-	echo "Backfill: ON (a first run will treat every library item as new)"
+  echo "Backfill: ON (a first run will treat every library item as new)"
 fi
 # The cap is printed even when it did nothing this pass, because "capped" and
 # "nothing to do" look identical in the summary line otherwise.
 if [[ -n "$MAX_REQUESTS" ]]; then
-	echo "Per-pass cap: $MAX_REQUESTS"
+  echo "Per-pass cap: $MAX_REQUESTS"
 else
-	echo "Per-pass cap: default"
+  echo "Per-pass cap: default"
 fi
 echo "========================================"
 
@@ -169,22 +169,22 @@ if [[ -n "$MAX_REQUESTS" ]]; then PY_ARGS+=(--max "$MAX_REQUESTS"); fi
 # empty array is an unbound variable in bash before 4.4, and /bin/bash on macOS
 # is 3.2.
 if ! STREMIO_AUTH_KEY="$STREMIO_KEY" \
-	SEERR_API_KEY="$SEERR_KEY" \
-	python3 "${SCRIPT_DIR}/lib/stremio_library.py" "$STATE_PATH" \
-	${PY_ARGS[@]+"${PY_ARGS[@]}"}; then
-	echo "ERROR: the stremio library sync pass exited non-zero." >&2
-	exit 1
+        SEERR_API_KEY="$SEERR_KEY" \
+        python3 "${SCRIPT_DIR}/lib/stremio_library.py" "$STATE_PATH" \
+        ${PY_ARGS[@]+"${PY_ARGS[@]}"}; then
+  echo "ERROR: the stremio library sync pass exited non-zero." >&2
+  exit 1
 fi
 
 # Trim the log, but only on a real run: a dry run must not be the thing that
 # changes what the operator is reading. Same rule as queue-cleanup.sh.
 if $APPLY && [[ -f "$LOG_FILE" ]]; then
-	LINES=$(wc -l <"$LOG_FILE" 2>/dev/null || echo 0)
-	if [[ "$LINES" -gt "$MAX_LOG_LINES" ]]; then
-		TMPLOG=$(mktemp "${LOG_FILE}.XXXXXX")
-		trap 'rm -f "$TMPLOG"' EXIT
-		tail -n "$MAX_LOG_LINES" "$LOG_FILE" >"$TMPLOG"
-		mv "$TMPLOG" "$LOG_FILE"
-		trap - EXIT
-	fi
+  LINES=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+  if [[ "$LINES" -gt "$MAX_LOG_LINES" ]]; then
+    TMPLOG=$(mktemp "${LOG_FILE}.XXXXXX")
+    trap 'rm -f "$TMPLOG"' EXIT
+    tail -n "$MAX_LOG_LINES" "$LOG_FILE" > "$TMPLOG"
+    mv "$TMPLOG" "$LOG_FILE"
+    trap - EXIT
+  fi
 fi
