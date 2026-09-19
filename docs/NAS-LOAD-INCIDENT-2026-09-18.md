@@ -116,10 +116,14 @@ Three guards, committed to `fix/nas-load-protection`:
 - [`scripts/usenet-blackhole.sh`](../scripts/usenet-blackhole.sh) — refuses to
   start a pass while the host is already I/O-stalled, reading PSI's `full avg10`
   and tripping at 20%, against a measured healthy baseline of 1.86%. It fails
-  open, and announces every state that leaves the gate inert. A skipped pass is
-  visible in the pass log, `logs/usenet-blackhole.log`; the usenet status page
-  shows nothing, because a skipped pass writes neither the state file nor the
-  failed log.
+  open, and announces every state that leaves the gate inert. A skipped pass
+  leaves a line in the pass log, `logs/usenet-blackhole.log`, and one in
+  `logs/usenet-blackhole-skipped.log`; the status page reads the second and says
+  "last pass skipped: host I/O stalled … N in a row" above the table. It has to
+  say it there: the state file and the failed log the page otherwise renders are
+  both written by the pass the gate refused to start, so a long stall leaves
+  every in-flight job looking `stalled` under a fresh `Generated` timestamp with
+  the reason appearing nowhere.
 - [`duc-service/app/startup.sh`](../duc-service/app/startup.sh) — skips the
   start-up re-index when the index is younger than 20 hours, so `restart: always`
   stops meaning "re-walk 2.9 Tb".

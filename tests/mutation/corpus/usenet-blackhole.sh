@@ -496,3 +496,37 @@ mutation pressure-gate-reading-unvalidated \
   --test "usenet-blackhole: a malformed PSI reading is announced and runs the pass unprotected" \
   --why "accepting every reading is the one path in this guard that fails CLOSED. awk compares a non-numeric \`seen\` as a string and \"garbage\" >= 20 is true, so a reading that is not a measurement trips the gate, skips the pass, and quotes the garbage back as a pressure figure -- a stack that has silently stopped downloading on a host the operator has no reason to look at. A truncated read is enough to produce one, and the pass log is the only place it would show" \
   --apply 'sed -i.bak "s@HOST_PRESSURE_USABLE=false@HOST_PRESSURE_USABLE=true@" "$F" && rm -f "$F.bak"'
+
+# --- the skip trace the status page reads ---------------------------------
+#
+# The gate exits before python, so a skipped pass writes neither of the two
+# files scripts/usenet-blackhole-status.sh renders. It appends to a third one
+# instead, and that is the only place "nothing is being polled" appears: the
+# stall clock is derived at render time, so without it a long stall paints every
+# in-flight job `stalled` under a freshly stamped `Generated` and reads as a
+# stack full of dead downloads.
+#
+# Two writers, one file, and the second is the half that is easy to leave out:
+# the file has to be cleared when a pass runs, or the page goes on saying passes
+# are being skipped on a host that recovered hours ago.
+
+mutation pressure-gate-skip-not-recorded \
+  --file scripts/usenet-blackhole.sh \
+  --bats tests/usenet-blackhole.bats \
+  --test "usenet-blackhole: a skipped pass leaves a trace the status page can read" \
+  --why "the skip is invisible without this line. The gate exits before python, so neither the state file nor the failed log is written, and usenet.lan shows a fresh timestamp over jobs whose stall clock keeps climbing -- the whole page describing a fault that is in fact the protection working" \
+  --apply 'sed -i.bak "/^  record_skipped_pass /d" "$F" && rm -f "$F.bak"'
+
+mutation pressure-gate-skip-record-outlives-the-pass \
+  --file scripts/usenet-blackhole.sh \
+  --bats tests/usenet-blackhole.bats \
+  --test "usenet-blackhole: the skip trace counts the run and clears when a pass runs" \
+  --why "a trace that is never cleared turns the page into a permanent claim that the last pass was skipped. The run length also stops meaning anything: it becomes the number of skips since the file was created rather than the current run, on a host that may have been passing normally for days" \
+  --apply 'sed -i.bak "/^rm -f \"\$SKIP_PATH\"\$/d" "$F" && rm -f "$F.bak"'
+
+mutation status-drop-the-skip-notice \
+  --file scripts/lib/usenet_status.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "the shell half records the skip and the renderer half has to show it; a page that reads the file and prints nothing is the same page as before the fix -- twelve jobs painted \`stalled\` with a fresh \`Generated\` timestamp and no reason anywhere. The JSON keeps the record either way, so only a renderer test notices" \
+  --apply 'sed -i.bak "s@^    if not isinstance(skipped, dict):\$@    if True:@" "$F" && rm -f "$F.bak"'

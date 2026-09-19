@@ -13,9 +13,14 @@ set -euo pipefail
 # This renders that state file as an HTML page (the default) or as JSON, over
 # the same data: release names, how far along each one is, how long since its
 # progress last moved, which ones are stalled or complete, and the tail of the
-# failure log. It reads and nothing else -- no TorBox call, no arr call, no API
-# key, and .env is never opened -- so it is safe to run at any time, including
-# while a pass is mid-fetch.
+# failure log. It also reads the pressure gate's skip sidecar, and says so at
+# the top of the page when the last pass was refused: a page showing jobs
+# `stalled` under a fresh timestamp means something different when no pass has
+# run to poll them, and that is otherwise invisible from here.
+#
+# It reads and nothing else -- no TorBox call, no arr call, no API key, and .env
+# is never opened -- so it is safe to run at any time, including while a pass is
+# mid-fetch.
 #
 # Usage:
 #   ./scripts/usenet-blackhole-status.sh                    # HTML on stdout
@@ -36,6 +41,9 @@ set -euo pipefail
 # `--stall-hours N` and `--stall-hours=N` forms; a value that is not a number
 # above zero is refused with exit 2 rather than passed to the module.
 #
+# --state, --failed-log and --skipped-log name the three files this reads. All
+# three default to the paths scripts/usenet-blackhole.sh writes them to.
+#
 # The banner goes to stderr, not stdout, which is where this differs from its
 # siblings: stdout is the document here, and a banner line in front of a JSON
 # body is a JSON parse error.
@@ -49,11 +57,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NAS_STACK_DIR="$(dirname "$SCRIPT_DIR")"
 
-# The two files scripts/usenet-blackhole.sh writes. Same names, same directory,
-# derived the same way -- the two halves of this stack have to be looking at one
-# state file, and a second copy of the path is how they stop being.
+# The three files scripts/usenet-blackhole.sh writes. Same names, same
+# directory, derived the same way -- the two halves of this stack have to be
+# looking at one state file, and a second copy of the path is how they stop
+# being. The skip sidecar is the pressure gate's, which is the same script.
 STATE_PATH="$NAS_STACK_DIR/logs/usenet-blackhole-state.json"
 FAILED_LOG="$NAS_STACK_DIR/logs/usenet-blackhole-failed.log"
+SKIPPED_LOG="$NAS_STACK_DIR/logs/usenet-blackhole-skipped.log"
 
 # HTML by default: the JSON is the machine-readable half, and a person who runs
 # this by hand without arguments is asking to see what is downloading.
@@ -105,6 +115,15 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --failed-log=*) FAILED_LOG="${1#*=}" ;;
+    --skipped-log)
+      if [[ $# -lt 2 ]]; then
+        echo "ERROR: --skipped-log needs a path" >&2
+        exit 2
+      fi
+      SKIPPED_LOG="$2"
+      shift
+      ;;
+    --skipped-log=*) SKIPPED_LOG="${1#*=}" ;;
     --stall-hours)
       if [[ $# -lt 2 ]]; then
         echo "ERROR: --stall-hours needs a number" >&2
@@ -121,10 +140,10 @@ while [[ $# -gt 0 ]]; do
       # last comment line: one line further and --help prints the SCRIPT_DIR
       # assignment below it, which is how this shipped in
       # scripts/usenet-blackhole.sh until a bats test started asserting on it.
-      # Line 47 is the `#` under the read-only warning; the range moves
+      # Line 55 is the `#` under the read-only warning; the range moves
       # whenever a line is added to the header above. It was 3,38 until
-      # --stall-hours went in.
-      sed -n '3,47p' "$0" | sed 's/^# \{0,1\}//'
+      # --stall-hours went in, and 3,47 until --skipped-log did.
+      sed -n '3,55p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
@@ -150,6 +169,10 @@ if [[ -z "$STATE_PATH" ]]; then
 fi
 if [[ -z "$FAILED_LOG" ]]; then
   echo "ERROR: --failed-log needs a path" >&2
+  exit 2
+fi
+if [[ -z "$SKIPPED_LOG" ]]; then
+  echo "ERROR: --skipped-log needs a path" >&2
   exit 2
 fi
 
@@ -192,6 +215,7 @@ echo "Usenet Blackhole Status — $(date '+%Y-%m-%d %H:%M:%S')" >&2
 echo "Format: $FORMAT" >&2
 echo "State:  $STATE_PATH" >&2
 echo "Log:    $FAILED_LOG" >&2
+echo "Skips:  $SKIPPED_LOG" >&2
 echo "Stall:  no progress for ${STALL_HOURS}h" >&2
 if [[ -n "$OUTPUT" ]]; then
   echo "Output: $OUTPUT" >&2
@@ -200,22 +224,22 @@ else
 fi
 echo "========================================" >&2
 
-# The three positional arguments the module takes, in its own order, plus the
+# The four positional arguments the module takes, in its own order, plus the
 # stall threshold as its own flag -- the module pulls that out of argv wherever
-# it appears, so the positional order the module has always had is unchanged. No
-# credential is among them and none is read: there is nothing here for
-# /proc/<pid>/cmdline to expose, which is the one thing this script gets for
-# free by being read-only.
+# it appears, so the positional order the module has always had is unchanged,
+# and the skip sidecar is appended to it rather than inserted. No credential is
+# among them and none is read: there is nothing here for /proc/<pid>/cmdline to
+# expose, which is the one thing this script gets for free by being read-only.
 #
 # exec, so python3 replaces this shell and its exit status is the script's --
 # `if ! python3 ...; then exit 1` would flatten "bad format" (2) and "crashed"
 # (1) into the same answer for whatever is calling this.
 if [[ -n "$OUTPUT" ]]; then
   exec python3 "${SCRIPT_DIR}/lib/usenet_status.py" \
-    "$FORMAT" "$STATE_PATH" "$FAILED_LOG" \
+    "$FORMAT" "$STATE_PATH" "$FAILED_LOG" "$SKIPPED_LOG" \
     --stall-hours "$STALL_HOURS" > "$OUTPUT"
 fi
 
 exec python3 "${SCRIPT_DIR}/lib/usenet_status.py" \
-  "$FORMAT" "$STATE_PATH" "$FAILED_LOG" \
+  "$FORMAT" "$STATE_PATH" "$FAILED_LOG" "$SKIPPED_LOG" \
   --stall-hours "$STALL_HOURS"

@@ -88,6 +88,20 @@ FAILED_LOG="$NAS_STACK_DIR/logs/usenet-blackhole-failed.log"
 LOG_FILE="$NAS_STACK_DIR/logs/usenet-blackhole.log"
 MAX_LOG_LINES=1000
 
+# What the pressure gate below leaves behind when it refuses to start a pass.
+#
+# A sidecar rather than a field in the state file: that file is the Python
+# half's, written on a resume contract, and a second writer on it is a coupling
+# trap -- the gate would have to read-modify-write around a process it does not
+# control, on the one file whose loss costs in-flight jobs.
+#
+# One line per skipped pass, appended while the host reads as stalled and
+# REMOVED the moment a pass is allowed through. So the line count is the current
+# run of skipped passes, and the file's absence means the last pass ran.
+# scripts/lib/usenet_status.py renders it; scripts/usenet-blackhole-status.sh
+# passes the path along.
+SKIP_PATH="${USENET_SKIP_PATH:-$NAS_STACK_DIR/logs/usenet-blackhole-skipped.log}"
+
 # A job that never completes is invisible to a blackhole client -- the arr sees
 # only what appears in the watch folder -- so this bound is what turns a stuck
 # release into a log line someone can act on.
@@ -251,6 +265,20 @@ MAX_INFLIGHT=$((10#$MAX_INFLIGHT))
 
 log() { echo "[usenet-blackhole] $1"; }
 
+# One line per pass the pressure gate refuses to start: when, at what reading,
+# against which limit. Appended by the gate and deleted by it as soon as a pass
+# is allowed through.
+#
+# This is the only place the reason a pass is not running can appear. The status
+# page renders the state file and the failed log, and a skipped pass writes to
+# neither -- so without this the page shows jobs ageing under a fresh timestamp
+# and says nothing about why nothing is being polled. `|| true` because a
+# download pass must not fail over a line of bookkeeping.
+record_skipped_pass() {
+  printf '%s\t%s\t%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$1" "$PSI_IO_LIMIT" \
+    >> "$SKIP_PATH" 2>/dev/null || true
+}
+
 echo ""
 echo "========================================"
 echo "Usenet Blackhole — $(date '+%Y-%m-%d %H:%M:%S')"
@@ -339,10 +367,12 @@ if $REPORT_DRY_RUN; then PY_ARGS+=(--report-dry-run); fi
 # at load 58 with io full avg10 between 78% and 81% for hours; every container
 # accepted a TCP connection and answered nothing.
 #
-# A skipped pass is visible in the pass log, which the unit redirects to
-# logs/usenet-blackhole.log -- not on the usenet status page.
-# scripts/usenet-blackhole-status.sh renders the state file and the failed log,
-# and a skipped pass writes to neither.
+# A skipped pass leaves a trace in two places, and it has to: the pass log, which
+# the unit redirects to logs/usenet-blackhole.log, and the sidecar above, which
+# is the only one of the two usenet.lan reads. The status page renders the state
+# file and the failed log, and a skipped pass writes to neither -- so without
+# the sidecar the page shows jobs ageing under a freshly stamped `Generated`
+# with nothing anywhere saying that no pass has run to poll them.
 #
 # Fails OPEN, and says so out loud. Four states leave this guard inert: a
 # kernel built without PSI (or a container that cannot read /proc/pressure), an
@@ -381,9 +411,16 @@ elif [[ "$HOST_PRESSURE_USABLE" != "true" ]]; then
   echo "[pressure-gate] the I/O pressure reading '${HOST_PRESSURE}' is not a number, so nothing can be compared against the limit; this pass runs unprotected"
 elif awk -v seen="$HOST_PRESSURE" -v limit="$PSI_IO_LIMIT" \
      'BEGIN { exit !(seen >= limit) }'; then
+  record_skipped_pass "$HOST_PRESSURE"
   echo "[pressure-gate] host I/O is stalled (io full avg10=${HOST_PRESSURE}%, limit ${PSI_IO_LIMIT}%); skipping this pass"
   exit 0
 fi
+
+# A pass is about to run, so whatever run of skipped passes was recorded is
+# over. Removing the file rather than truncating it keeps one answer for "the
+# last pass ran": no file at all, which is also the ordinary state of a stack
+# that has never skipped one.
+rm -f "$SKIP_PATH"
 
 if ! TORBOX_API_KEY="$TORBOX_KEY" \
         SONARR_API_KEY="$SONARR_KEY" \

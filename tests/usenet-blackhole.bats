@@ -610,6 +610,42 @@ keyed_env() {
     [ -f "$WORK/argv" ]
 }
 
+@test "usenet-blackhole: a skipped pass leaves a trace the status page can read" {
+    # The gate exits before python, so a skipped pass writes neither the state
+    # file nor the failed log -- the only two files the status page renders.
+    # Without the sidecar, usenet.lan shows jobs ageing under a fresh
+    # timestamp, painting every one of them `stalled`, with the actual reason
+    # visible nowhere.
+    keyed_env
+    stub_python
+    run env "PATH=$WORK/bin:$PATH" "PSI_IO_PATH=$(psi_fixture 95.00)" \
+        "USENET_SKIP_PATH=$WORK/skipped.log" "$RUN" --apply
+    assert_success
+    [ -f "$WORK/skipped.log" ] || fail "the gate skipped the pass and recorded nothing"
+    run cat "$WORK/skipped.log"
+    assert_output --partial "95.00"
+    # The limit travels with it, so the page can show the reading against the
+    # bound it crossed rather than a bare percentage.
+    assert_output --partial "20"
+}
+
+@test "usenet-blackhole: the skip trace counts the run and clears when a pass runs" {
+    # "N in a row" is the line count, and the file's absence is what says the
+    # last pass ran. A trace that outlives the skip would leave the page
+    # claiming passes are being skipped on a host that recovered hours ago.
+    keyed_env
+    stub_python
+    local skip="$WORK/skipped.log"
+    run env "PATH=$WORK/bin:$PATH" "PSI_IO_PATH=$(psi_fixture 95.00)" "USENET_SKIP_PATH=$skip" "$RUN" --apply
+    run env "PATH=$WORK/bin:$PATH" "PSI_IO_PATH=$(psi_fixture 96.00)" "USENET_SKIP_PATH=$skip" "$RUN" --apply
+    [ "$(wc -l < "$skip" | tr -d ' ')" -eq 2 ] \
+        || fail "two skipped passes should be two lines, got $(wc -l < "$skip")"
+    run env "PATH=$WORK/bin:$PATH" "PSI_IO_PATH=$(psi_fixture 1.90)" "USENET_SKIP_PATH=$skip" "$RUN" --apply
+    assert_success
+    [ ! -f "$skip" ] \
+        || fail "a pass that ran left the previous run of skips behind, so the page would go on claiming the last pass was skipped"
+}
+
 @test "usenet-blackhole: the gate is the only thing that changes when pressure crosses the limit" {
     # Same run, same fixture, one hundredth apart. Without this, a gate that
     # always skipped -- or never did -- would pass the three tests above.
