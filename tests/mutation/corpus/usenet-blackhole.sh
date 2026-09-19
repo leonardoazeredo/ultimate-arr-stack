@@ -475,3 +475,17 @@ mutation pressure-gate-reads-some-not-full \
   --test "usenet-blackhole: a stalled host skips the pass before python runs" \
   --why "reading PSI's \`some\` instead of \`full\` inverts the guard's purpose: \`some\` counts a single stalled task and runs high on a merely busy box, so the pass would skip on healthy hosts and the stack would silently stop downloading -- the failure mode the fail-open test exists to prevent, arriving from the other direction" \
   --apply 'sed -i.bak "s@\$1 == \"full\"@\$1 == \"some\"@" "$F" && rm -f "$F.bak"'
+
+mutation pressure-gate-failopen-silent \
+  --file scripts/usenet-blackhole.sh \
+  --bats tests/usenet-blackhole.bats \
+  --test "usenet-blackhole: no PSI on the host means the gate fails open" \
+  --why "an unreadable PSI reading that announces nothing is indistinguishable in the pass log from a guard that ran and found the host calm. Both leave the stack unprotected on a host the operator believes is being watched -- and the unreadable case is the one that hits every macOS box and every kernel built without PSI, which is where the first version of this gate silently did nothing" \
+  --apply 'sed -i.bak "/elif \[\[ -z \"\$HOST_PRESSURE\" \]\]/,/no readable I\/O pressure reading/d" "$F" && rm -f "$F.bak"'
+
+mutation pressure-gate-limit-unvalidated \
+  --file scripts/usenet-blackhole.sh \
+  --bats tests/usenet-blackhole.bats \
+  --test "usenet-blackhole: a malformed PSI limit is announced and runs the pass unprotected" \
+  --why "the case block accepting every value is the same as dropping it: awk then compares the limit as a string, \"95.00\" >= \"abc\" is false, and a host with a stalled reading runs the pass while PSI_IO_LIMIT says it is bounded. The gate looks armed and the limit is the thing that was wrong, so nothing downstream notices" \
+  --apply 'sed -i.bak "s@PSI_IO_LIMIT_USABLE=false@PSI_IO_LIMIT_USABLE=true@" "$F" && rm -f "$F.bak"'

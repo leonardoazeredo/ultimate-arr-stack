@@ -339,14 +339,36 @@ if $REPORT_DRY_RUN; then PY_ARGS+=(--report-dry-run); fi
 # at load 58 with io full avg10 between 78% and 81% for hours; every container
 # accepted a TCP connection and answered nothing.
 #
-# Fails OPEN, deliberately. A kernel built without PSI, or a container that
-# cannot read /proc/pressure, must not become a stack that silently stops
-# downloading -- and "the guard ran and found nothing" and "the guard could not
-# run" must not be the same observable result.
+# A skipped pass is visible in the pass log, which the unit redirects to
+# logs/usenet-blackhole.log -- not on the usenet status page.
+# scripts/usenet-blackhole-status.sh renders the state file and the failed log,
+# and a skipped pass writes to neither.
+#
+# Fails OPEN, and says so out loud. Three states leave this guard inert: a
+# kernel built without PSI (or a container that cannot read /proc/pressure), an
+# unreadable PSI file, and a PSI_IO_LIMIT that is not a number -- awk compares
+# that last one as a string, where "95.00" >= "abc" is false, so the gate never
+# trips on a host that looks protected. Each is announced, because "the guard ran
+# and found nothing" and "the guard could not run" must not be the same
+# observable result -- and then the pass runs anyway, because a guard that cannot
+# read its own input must not be the thing that stops the stack downloading.
+#
+# The case pattern is the script's existing numeric idiom, the same one
+# --timeout-hours and --stall-hours refuse with; a second style of number check
+# here would be one more thing to keep in step.
+PSI_IO_LIMIT_USABLE=true
+case "$PSI_IO_LIMIT" in
+  ''|*[!0-9.]*|*.*.*) PSI_IO_LIMIT_USABLE=false ;;
+  *) PSI_IO_LIMIT_USABLE=true ;;
+esac
+
 HOST_PRESSURE="$(psi_io_full_avg10 || true)"
-if [[ -n "$HOST_PRESSURE" ]] &&
-   awk -v seen="$HOST_PRESSURE" -v limit="$PSI_IO_LIMIT" \
-       'BEGIN { exit !(seen >= limit) }'; then
+if [[ "$PSI_IO_LIMIT_USABLE" != "true" ]]; then
+  echo "[pressure-gate] PSI_IO_LIMIT='${PSI_IO_LIMIT}' is not a number, so nothing can be bounded; this pass runs unprotected"
+elif [[ -z "$HOST_PRESSURE" ]]; then
+  echo "[pressure-gate] no readable I/O pressure reading at ${PSI_IO_PATH:-/proc/pressure/io}; this pass runs unprotected"
+elif awk -v seen="$HOST_PRESSURE" -v limit="$PSI_IO_LIMIT" \
+     'BEGIN { exit !(seen >= limit) }'; then
   echo "[pressure-gate] host I/O is stalled (io full avg10=${HOST_PRESSURE}%, limit ${PSI_IO_LIMIT}%); skipping this pass"
   exit 0
 fi

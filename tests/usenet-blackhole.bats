@@ -30,6 +30,25 @@ setup() {
     WATCH="$WORK/data/usenet/blackhole/complete"
     STAGING="$WORK/data/usenet/blackhole/staging"
     KEYFILE="$WORK/key"
+    # Every test in this file starts from a readable, healthy PSI reading.
+    #
+    # Without this the gate reads the host's own /proc/pressure/io, which does
+    # not exist on macOS -- so leaving it unset was invisible on the machine this
+    # suite was written on. It does exist on Linux, and Linux is where the suite
+    # actually runs: CI is ubuntu-latest and so is pi1. A host whose io full
+    # avg10 sits at or above the limit at that moment would skip the pass before
+    # python, failing every stub_python test below; and run-mutations.sh runs its
+    # control run first, so it would score ERRORED and then report a FALSE KILLED
+    # for every pre-existing entry against this file. Coverage inflated by an
+    # environment condition is the exact failure the mutation corpus exists to
+    # prevent.
+    #
+    # psi_fixture is defined in the pressure-gate section at the bottom; this is
+    # a call at test time, after the whole file is sourced, so the definition is
+    # already there. The pressure-gate tests override this through `env`, which
+    # wins over the exported value.
+    psi_fixture 1.90 > /dev/null
+    export PSI_IO_PATH="$WORK/pressure-io"
 }
 
 # A python3 that records how it was called instead of running anything. Used to
@@ -540,13 +559,30 @@ keyed_env() {
 @test "usenet-blackhole: no PSI on the host means the gate fails open" {
     # macOS, and any kernel built without PSI, have no /proc/pressure/io. A gate
     # that blocked there would stop the stack downloading on every machine the
-    # suite runs on, and would do it silently -- which is the failure mode this
-    # repo keeps being bitten by.
+    # suite runs on. The silence was the second half of the bug: an unreadable
+    # reading and a calm one looked identical in the log, so an inert guard read
+    # as a working one. Announced, and then the pass runs.
     keyed_env
     stub_python
     run env "PATH=$WORK/bin:$PATH" "PSI_IO_PATH=$WORK/does-not-exist" "$RUN" --apply
     assert_success
-    refute_output --partial "pressure-gate"
+    refute_output --partial "host I/O is stalled"
+    assert_output --partial "runs unprotected"
+    [ -f "$WORK/argv" ]
+}
+
+@test "usenet-blackhole: a malformed PSI limit is announced and runs the pass unprotected" {
+    # awk compares a non-numeric limit as a string, and "95.00" >= "abc" is
+    # false -- so without the case check the gate never trips and the host looks
+    # protected while nothing bounds it. The reading here is a stalled one on
+    # purpose: the point is that the pass runs anyway, not that it was never at
+    # risk.
+    keyed_env
+    stub_python
+    run env "PATH=$WORK/bin:$PATH" "PSI_IO_PATH=$(psi_fixture 95.00)" "PSI_IO_LIMIT=abc" "$RUN" --apply
+    assert_success
+    assert_output --partial "PSI_IO_LIMIT='abc' is not a number"
+    refute_output --partial "host I/O is stalled"
     [ -f "$WORK/argv" ]
 }
 
