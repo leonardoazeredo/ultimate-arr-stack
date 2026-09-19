@@ -160,7 +160,7 @@ Each phase ends at a **gate**. A gate has pass criteria and a rollback trigger. 
 
 Nothing changes for any client in this phase.
 
-- [ ] **0.0 Create the directories the rest of this phase writes into.**
+- [x] **0.0 Create the directories the rest of this phase writes into.**
 
 ```bash
 mkdir -p router/backup
@@ -168,7 +168,7 @@ mkdir -p router/backup
 
 `router/` and `router/backup/` do not exist today, and 0.1's redirect target does not create itself. Without this, 0.1 writes nothing and exits without an error anyone is told to look for.
 
-- [ ] **0.1 Capture the router's DNS state.**
+- [x] **0.1 Capture the router's DNS state.**
 
 ```bash
 ssh pi@pi1 'ssh arr-stack-router sh -s' <<'EOF' > router/backup/2026-09-19-dns-state.txt
@@ -190,7 +190,9 @@ test -s router/backup/2026-09-19-redirect.txt || { echo "redirect capture failed
 
 The assertion that closes open question 2 is that `dns_enabled` appears exactly once in `/etc/firewall.dns_order` — line 31, gating `adg_handle_dns`. If a second consumer shows up, the file has changed under this plan and the flip in 6.2 is no longer a single-variable change.
 
-- [ ] **0.2 Back up the AdGuard Home config and data, outside the repo.**
+**Redact the ProtonVPN WireGuard private key before committing `2026-09-19-dns-state.txt`.** `uci show network` includes `network.protonvpn.private_key`, and this file is committed. Replace that one value in place, leave the surrounding structure readable, and say in a header why the line is redacted. A private key in a git repository is not undoable by a later commit, and this repo's own suite scans tracked files for exactly this. The line was the only credential in the capture; the firewall, dhcp and adguardhome sections carry none.
+
+- [x] **0.2 Back up the AdGuard Home config and data, outside the repo.**
 
 ```bash
 ssh pi@pi1 'ssh arr-stack-router tar czf - /etc/AdGuardHome' > ~/agh-backup-2026-09-19.tgz
@@ -198,9 +200,9 @@ ssh pi@pi1 'ssh arr-stack-router tar czf - /etc/AdGuardHome' > ~/agh-backup-2026
 
 Deliberately outside the repo. `config.yaml` currently holds `users: []`, so no credential is committed today, but it will hold an admin hash from Phase 2 onward. Committing it into a repo whose test suite scans for secrets is a needless hazard.
 
-- [ ] **0.3 Record the baseline answer matrix.** Every resolver question this migration is judged on, answered by the NAS Pi-hole today. Commit as `tests/fixtures/dns-baseline.txt`. This file is the oracle for Phase 3's parity test. `tests/fixtures/` already exists.
+- [x] **0.3 Record the baseline answer matrix.** Every resolver question this migration is judged on, answered by the NAS Pi-hole today. Commit as `tests/fixtures/dns-baseline.txt`. This file is the oracle for Phase 3's parity test. `tests/fixtures/` already exists.
 
-- [ ] **0.4 Write `scripts/dns-rollback.sh`** — one command that returns every pool to the NAS resolver. It must:
+- [x] **0.4 Write `scripts/dns-rollback.sh`** — one command that returns every pool to the NAS resolver. It must:
 
 ```
 for pool in lan vlan10 vlan20 vlan30; do
@@ -231,7 +233,7 @@ done
 dig +short +time=2 +tries=1 example.com @192.168.110.246 >/dev/null || { echo "NAS resolver down"; exit 1; }
 ```
 
-- [ ] **0.5 Prove the rollback kit works — on a copy, not on production.**
+- [x] **0.5 Prove the rollback kit works — on a copy, not on production.**
 
 It is **not** a no-op at baseline: it rewrites `dhcp_option` on four pools (changing the UCI representation from a string to a list), commits three config files, reloads dnsmasq and reloads the firewall, which flushes DNS conntrack. Running it "for real before any change" is itself a production change.
 
@@ -239,7 +241,9 @@ Rehearse it on a scratch copy of `/etc/config` with the `uci` calls pointed at a
 
 Per repo convention this lives in `tests/mutation/corpus/`, with a red test proving the guard can fail.
 
-**Gate 0.** `router/backup/` exists and holds a non-empty capture. Baseline matrix committed and passing against the NAS resolver. Rollback script covers four pools, reloads dnsmasq, and fails when a pool is left un-reverted. `git status` clean, NAS on `main`.
+**The scratch config dir must be passed as `uci -c <dir>`, never as the `UCI_CONFIG_DIR` environment variable.** Measured 2026-09-19: this build's uci accepts `UCI_CONFIG_DIR`, does not honour it, and writes to the live `/etc/config`. A rehearsal written that way is a production change wearing a rehearsal's name — it was tried, it wrote `dhcp.lan.dhcp_option` in production, and the production file's md5 was checked before and after to establish it. `uci -c <dir>` on the same copy did not touch production. The rollback script therefore takes `UCI_CONF` and routes every uci call through `-c`; a mutation in the corpus removes that and the test catches it.
+
+**Gate 0.** `router/backup/` exists and holds a non-empty capture. Baseline matrix committed and passing against the NAS resolver (50/50 rows as of 2026-09-19). Rollback script covers four pools, reloads dnsmasq, and fails when a pool is left un-reverted — all four properties proven by a mutation in `tests/mutation/corpus/dns.sh` that reintroduces the defect and turns the named test red. `git status` clean, NAS on `main`.
 
 ---
 

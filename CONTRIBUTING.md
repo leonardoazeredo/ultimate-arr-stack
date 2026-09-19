@@ -331,6 +331,8 @@ scripts/
 ├── configure-apps.sh             # Configure the arr apps over their APIs
 ├── detect-credential-drift.sh    # Detect the credential-propagation bug class
 ├── detect-vpn-zombies.sh         # Detect containers left on a stale netns binding
+├── dns-matrix-check.sh           # Check the DNS baseline matrix against one resolver
+├── dns-rollback.sh               # Return every DHCP pool to the NAS resolver
 ├── ensure-tailscale-relay-port.sh # Re-apply node 1's relay-server-port pref
 ├── fix-radarr-paths.sh           # Fix Radarr paths after a TRaSH naming reorganize
 ├── fix-sonarr-folders.sh         # Fix Sonarr folder names against the folder format
@@ -354,6 +356,7 @@ scripts/
     ├── check-env-backup.sh     # Compare .env.nas.backup with NAS
     ├── check-uptime-monitors.sh   # Verify Uptime Kuma monitors
     ├── check-dns-duplicates.sh # Detect duplicate .lan domains
+    ├── dns-matrix.sh           # Evaluate the DNS baseline matrix against a resolver
     ├── check-domains.sh        # Verify domain accessibility
     ├── check-doc-links.sh      # Resolve internal markdown links
     ├── check-image-versions.sh # Check for stale Docker image tags

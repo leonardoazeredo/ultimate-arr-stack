@@ -1,0 +1,109 @@
+# Rollback kit rehearsal — 2026-09-19
+
+Evidence for Phase 0.5 of
+`docs/superpowers/plans/2026-09-19-dns-adguard-router-migration.md`.
+
+Nothing here changed production. The production `/etc/config/dhcp` md5 was
+`cec026d65a9b751e830472bc6c30ba48` before and after every run below.
+
+## What was run
+
+`scripts/dns-rollback.sh` was transferred to the router as
+`/tmp/dns-rollback-rehearsal.sh` and syntax-checked with `sh -n`, which passed
+under busybox v1.33.2 ash. That matters on its own: the bats tests exercise the
+script under bash, and bash is not the shell it will actually run in.
+
+A scratch copy of `/etc/config` was seeded to the state Phase 5 leaves behind —
+each pool pointed at its own VLAN's router address — and the script was run
+against it twice: once with `DRY_RUN=1`, once for real with
+`DNSMASQ_INIT=true FIREWALL_INIT=true` so no live service was reloaded.
+
+```
+--- scratch seeded (post-Phase-5 stand-in) ---
+  lan = 6,192.168.8.1
+  vlan10 = 6,192.168.110.1
+  vlan20 = 6,192.168.120.1
+  vlan30 = 6,192.168.130.1
+
+=== DRY_RUN rehearsal ===
+DRY-RUN: uci -c /tmp/dns-reh-config -q delete dhcp.lan.dhcp_option
+DRY-RUN: uci -c /tmp/dns-reh-config add_list dhcp.lan.dhcp_option=6,192.168.110.246
+DRY-RUN: uci -c /tmp/dns-reh-config -q delete dhcp.vlan10.dhcp_option
+DRY-RUN: uci -c /tmp/dns-reh-config add_list dhcp.vlan10.dhcp_option=6,192.168.110.246
+DRY-RUN: uci -c /tmp/dns-reh-config -q delete dhcp.vlan20.dhcp_option
+DRY-RUN: uci -c /tmp/dns-reh-config add_list dhcp.vlan20.dhcp_option=6,192.168.110.246
+DRY-RUN: uci -c /tmp/dns-reh-config -q delete dhcp.vlan30.dhcp_option
+DRY-RUN: uci -c /tmp/dns-reh-config add_list dhcp.vlan30.dhcp_option=6,192.168.110.246
+DRY-RUN: uci -c /tmp/dns-reh-config set adguardhome.config.dns_enabled=0
+DRY-RUN: uci -c /tmp/dns-reh-config set adguardhome.config.enabled=0
+DRY-RUN: uci -c /tmp/dns-reh-config commit dhcp
+DRY-RUN: uci -c /tmp/dns-reh-config commit adguardhome
+DRY-RUN: uci -c /tmp/dns-reh-config commit firewall
+DRY-RUN: true reload
+DRY-RUN: true reload
+DRY-RUN complete: nothing was changed.
+dry-run exit=0
+
+=== for real, scratch config dir only, reloads disabled ===
+ok: lan advertises 192.168.110.246
+ok: vlan10 advertises 192.168.110.246
+ok: vlan20 advertises 192.168.110.246
+ok: vlan30 advertises 192.168.110.246
+ok: 192.168.110.246 answers
+OK: every pool in 'lan vlan10 vlan20 vlan30' advertises 192.168.110.246, and AdGuard Home is out of the path.
+real exit=0
+
+=== scratch after ===
+  lan = 6,192.168.110.246
+  vlan10 = 6,192.168.110.246
+  vlan20 = 6,192.168.110.246
+  vlan30 = 6,192.168.110.246
+
+PRODUCTION UNTOUCHED (md5 cec026d65a9b751e830472bc6c30ba48)
+  live lan = 6,192.168.110.246
+  live vlan10 = 6,192.168.110.246
+  live vlan20 = 6,192.168.110.246
+  live vlan30 = 6,192.168.110.246
+```
+
+## The one thing this cost, and what it changed in the plan
+
+The first attempt at the scratch-dir rehearsal used the `UCI_CONFIG_DIR`
+environment variable, because that is what the name suggests. This build's uci
+accepts the variable and ignores it:
+
+```
+scratch says : 6,10.9.9.9
+production   : 6,10.9.9.9
+!!! PRODUCTION CHANGED: cec026d65a9b751e830472bc6c30ba48 -> c8966a7ac64b2c8c7262fbbf3a2a9f57
+```
+
+That wrote `dhcp.lan.dhcp_option=6,10.9.9.9` into live `/etc/config/dhcp`. It was
+reverted with a single `uci set` plus `uci commit dhcp`, and the revert is
+verified two ways: every `dhcp.*` key in `uci show dhcp` is identical to the
+Phase 0.1 capture in `router/backup/2026-09-19-dns-state.txt`, and the file's md5
+is back to `cec026d65a9b751e830472bc6c30ba48`.
+
+No client saw it. `uci commit` reloads nothing — the property this plan already
+documents — so dnsmasq kept serving its generated config from 00:07:33:
+
+```
+/var/etc/dnsmasq.conf.cfg01411c
+44:dhcp-option=lan,6,192.168.110.246
+48:dhcp-option=vlan10,6,192.168.110.246
+50:dhcp-option=vlan20,6,192.168.110.246
+52:dhcp-option=vlan30,6,192.168.110.246
+```
+
+dnsmasq was PID 32215 throughout, unchanged from the Phase 0.1 capture.
+
+`uci -c <dir>` on the same scratch copy did not touch production, and the script
+now passes `-c` on every call through its `UCI_CONF` variable. The correction is
+recorded in Phase 0.5 and in the plan's amendment section.
+
+## What this does not cover
+
+This is the rehearsal, not the real rollback. The plan's rung-1 run happens
+during Phase 5's window, before any pool is moved, and it is the one that
+reloads dnsmasq and the firewall for real. Nothing here has reloaded a live
+service.

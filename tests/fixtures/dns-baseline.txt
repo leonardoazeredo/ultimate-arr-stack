@@ -1,0 +1,79 @@
+# DNS baseline answer matrix — the oracle for the AdGuard Home migration.
+#
+# Measured 2026-09-19 from 192.168.120.135 (vlan20) against the NAS Pi-hole at
+# 192.168.110.246, with dig +time=3 +tries=1, over both transports.
+# Consumed by scripts/dns-parity.sh (3.6) and the Phase 6 acceptance run (6.3).
+#
+# Columns are TAB-separated: name, qtype, transport, expectation, note
+#
+# expectation is one of:
+#   <address>   the answer set must contain exactly this address, order-free
+#   ANY         at least one address record must come back; the value is not
+#               compared, because these are load-balanced names that hand out a
+#               different edge on every query
+#   BLOCKED     the answer must be 0.0.0.0 (Pi-hole's NULL blocking mode today)
+#   NXDOMAIN    the name must not resolve
+#   NODATA      NOERROR with an empty answer section
+#
+# A note containing ALLOW-DIFF marks a difference the parity harness may excuse,
+# and the note has to say why. Every other row must match.
+
+# --- public names: resolution itself, both transports ---
+example.com	A	udp	ANY	load-balanced; Cloudflare hands out a different edge per query
+example.com	A	tcp	ANY	the same over TCP — a TCP-only probe passes while UDP is broken
+example.com	AAAA	udp	ANY	AAAA still comes from upstream; address=/lan/:: does not touch it
+cloudflare.com	A	udp	ANY	second public name, different operator, same load-balancing caveat
+
+# --- the 18 .lan hostnames 3.2 migrates, A and AAAA ---
+jellyfin.lan	A	udp	192.168.110.250	Traefik macvlan rewrite
+seerr.lan	A	udp	192.168.110.250	Traefik macvlan rewrite
+jellyseerr.lan	A	udp	192.168.110.250	Traefik macvlan rewrite
+jellyseer.lan	A	udp	192.168.110.250	Traefik macvlan rewrite
+sonarr.lan	A	udp	192.168.110.250	Traefik macvlan rewrite
+radarr.lan	A	udp	192.168.110.250	Traefik macvlan rewrite
+prowlarr.lan	A	udp	192.168.110.250	Traefik macvlan rewrite
+bazarr.lan	A	udp	192.168.110.250	Traefik macvlan rewrite
+sabnzbd.lan	A	udp	192.168.110.250	Traefik macvlan rewrite
+traefik.lan	A	udp	192.168.110.250	Traefik macvlan rewrite
+pihole.lan	A	udp	192.168.110.250	Traefik macvlan rewrite; retired with the service in 8.4 and 9.4
+uptime.lan	A	udp	192.168.110.250	Traefik macvlan rewrite
+duc.lan	A	udp	192.168.110.250	Traefik macvlan rewrite
+beszel.lan	A	udp	192.168.110.250	Traefik macvlan rewrite
+homepage.lan	A	udp	192.168.110.250	Traefik macvlan rewrite
+usenet.lan	A	udp	192.168.110.250	Traefik macvlan rewrite
+stremio.lan	A	udp	192.168.110.250	Traefik macvlan rewrite
+magnetio.lan	A	udp	192.168.110.250	Traefik macvlan rewrite
+jellyfin.lan	A	tcp	192.168.110.250	TCP transport for a .lan name
+sonarr.lan	A	tcp	192.168.110.250	TCP transport for a .lan name
+traefik.lan	A	tcp	192.168.110.250	TCP transport for a .lan name
+jellyfin.lan	AAAA	udp	::	address=/lan/:: — musl and Alpine treat AAAA NXDOMAIN as a hard failure
+seerr.lan	AAAA	udp	::	address=/lan/:: — musl and Alpine treat AAAA NXDOMAIN as a hard failure
+jellyseerr.lan	AAAA	udp	::	address=/lan/:: — musl and Alpine treat AAAA NXDOMAIN as a hard failure
+jellyseer.lan	AAAA	udp	::	address=/lan/:: — musl and Alpine treat AAAA NXDOMAIN as a hard failure
+sonarr.lan	AAAA	udp	::	address=/lan/:: — musl and Alpine treat AAAA NXDOMAIN as a hard failure
+radarr.lan	AAAA	udp	::	address=/lan/:: — musl and Alpine treat AAAA NXDOMAIN as a hard failure
+prowlarr.lan	AAAA	udp	::	address=/lan/:: — musl and Alpine treat AAAA NXDOMAIN as a hard failure
+bazarr.lan	AAAA	udp	::	address=/lan/:: — musl and Alpine treat AAAA NXDOMAIN as a hard failure
+sabnzbd.lan	AAAA	udp	::	address=/lan/:: — musl and Alpine treat AAAA NXDOMAIN as a hard failure
+traefik.lan	AAAA	udp	::	address=/lan/:: — musl and Alpine treat AAAA NXDOMAIN as a hard failure
+pihole.lan	AAAA	udp	::	address=/lan/:: — musl and Alpine treat AAAA NXDOMAIN as a hard failure
+uptime.lan	AAAA	udp	::	address=/lan/:: — musl and Alpine treat AAAA NXDOMAIN as a hard failure
+duc.lan	AAAA	udp	::	address=/lan/:: — musl and Alpine treat AAAA NXDOMAIN as a hard failure
+beszel.lan	AAAA	udp	::	address=/lan/:: — musl and Alpine treat AAAA NXDOMAIN as a hard failure
+homepage.lan	AAAA	udp	::	address=/lan/:: — musl and Alpine treat AAAA NXDOMAIN as a hard failure
+usenet.lan	AAAA	udp	::	address=/lan/:: — musl and Alpine treat AAAA NXDOMAIN as a hard failure
+stremio.lan	AAAA	udp	::	address=/lan/:: — musl and Alpine treat AAAA NXDOMAIN as a hard failure
+magnetio.lan	AAAA	udp	::	address=/lan/:: — musl and Alpine treat AAAA NXDOMAIN as a hard failure
+
+# --- blocklist hits: both resolvers must block these, or Gate 3 fails ---
+doubleclick.net	A	udp	BLOCKED	StevenBlack list on Pi-hole today; AdGuard must match. A mismatch here is a Gate 3 failure, NOT an allowed difference
+doubleclick.net	A	tcp	BLOCKED	the same over TCP — the transport trap for port 53
+googleadservices.com	A	udp	BLOCKED	second blocklist hit, different list entry
+googlesyndication.com	A	udp	BLOCKED	third blocklist hit
+
+# --- negative controls ---
+does-not-exist-zzz.invalid	A	udp	NXDOMAIN	control: a name that must not resolve
+nope.lan	A	udp	NODATA	local=/lan/ answers locally, and no rewrite exists for this name
+
+# --- deliberate differences, named rather than waved through ---
+ads.doubleclick.net	A	udp	NXDOMAIN	ALLOW-DIFF: upstream NXDOMAIN, not a blocklist hit. AdGuard may answer differently; the row is here to make that visible instead of silent
