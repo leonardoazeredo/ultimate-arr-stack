@@ -98,14 +98,24 @@ re-asks, and each re-ask spends the same 60-per-hour budget. The ceiling on
 this path is therefore the provider's two limits, not the link speed — and the
 retry pattern makes the second one worse than it needs to be.
 
-`--max-inflight N` puts an operator-set ceiling below that ten, and it ships
-off (`0`). The provider's ten is a limit, not a target: measured over the
-retained window, nine of the ten slots were held by jobs 3-21h old while only 4
-of 50 submissions were ever fetched, so the question is whether six concurrent
-jobs complete more of themselves than ten do. Run it at 6 for a measured window
-and compare fetch rates before keeping any value: a ceiling set too low trades
-wasted slots for idle ones. Reaching the ceiling spends no
-`createusenetdownload` call, because the check runs before the upload.
+`--max-inflight N` puts an operator-set ceiling below that ten. It lives in two
+places and they do not have the same value:
+
+- **The script's default is `0`, off.** That is a rollout state, not a
+  recommendation — it is what the flag does when nothing passes it.
+- **The shipped unit's resting state is `6`.** `scripts/usenet-blackhole.service`
+  runs `--apply --report-failures --max-inflight 6`, and that unit is what the
+  two-minute timer executes, so the stack does **not** run uncapped.
+
+6 is chosen to sit below the provider's ten-slot limit, not because it measured
+better. **The comparison this file used to demand — fetch rates at 6 against 10
+over a measured window — has not been run.** The evidence for wanting a ceiling
+is the retained window: nine of the ten slots were held by jobs 3-21h old while
+only 4 of 50 submissions were ever fetched, and on 2026-09-18 an uncapped pass
+submitted 46 jobs in one hour and left 60 incomplete. Neither of those says six
+is the right number. A ceiling set too low trades wasted slots for idle ones,
+and nothing here establishes that 6 is above that point. Reaching the ceiling
+spends no `createusenetdownload` call, because the check runs before the upload.
 
 **Download links open for three hours.** Long enough to start, not long enough
 to store. The docs are explicit that CDN links are not permanent and that

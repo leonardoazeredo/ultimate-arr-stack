@@ -374,9 +374,9 @@ mutation usenet-blackhole-delete-failure-stops-the-pass \
 # TorBox's ten slots are a limit, not a target. Measured over the retained
 # window: nine of the ten were held by jobs 3-21h old while only 4 of 50
 # submissions were ever fetched. `--max-inflight N` stops submitting for the
-# pass once N jobs are in flight, and it ships off (0), because the point is to
-# measure the fetch rate at 6 against 10 before any value is kept -- a ceiling
-# set too low trades wasted slots for idle ones.
+# pass once N jobs are in flight, and the module's own default is 0 -- the flag
+# has to do nothing until an operator asks otherwise, and the unit asks for 6.
+# A ceiling set too low trades wasted slots for idle ones.
 #
 # Every entry here leaves the flag looking present and working while it is not.
 # The dangerous direction is the off-by-one and the ignored check: both look

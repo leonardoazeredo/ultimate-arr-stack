@@ -33,13 +33,13 @@ set -euo pipefail
 # bounded by --timeout-hours, which stays the outer limit for genuinely large
 # downloads; a record with no progress field at all falls back to that bound.
 #
-# --max-inflight (default 0, off) stops submitting for the pass once that many
-# jobs are in flight, below TorBox's own ten. Measured over the retained window:
-# nine of the ten slots were held by jobs 3-21h old while only 4 of 50
-# submissions were ever fetched, so the question is whether fewer concurrent
-# jobs complete more of themselves. Measure the fetch rate at 6 against 10
-# before keeping a value -- a ceiling set too low trades wasted slots for idle
-# ones. Reaching it costs no TorBox call: the check runs before the upload.
+# --max-inflight (default 0 here, 6 in the shipped unit) stops submitting for the
+# pass once that many jobs are in flight, below TorBox's own ten. 0 is only what
+# this flag does when nothing passes one: scripts/usenet-blackhole.service runs
+# the pass with --max-inflight 6, so the stack does not run uncapped. 6 sits
+# below the ten rather than at a measured optimum -- the fetch-rate comparison at
+# 6 against 10 has not been run. Reaching the ceiling costs no TorBox call: the
+# check runs before the upload.
 #
 # Scheduled by usenet-blackhole.timer, every 2 minutes. Running it by hand is
 # how you see what it would do first.
@@ -115,11 +115,18 @@ DEFAULT_TIMEOUT_HOURS=24
 DEFAULT_STALL_HOURS=4
 
 # The operator's ceiling on jobs in flight, below the ten concurrent slots
-# TorBox itself allows. Off by default, because the only ceiling measured so far
-# is the provider's: nine of its ten slots were held by jobs 3-21h old while 4
-# of 50 submissions were ever fetched, and whether a lower ceiling completes
-# more of them is the measurement this exists to make. Off is what ships; a
-# value is kept only after the fetch rate at 6 and at 10 have been compared.
+# TorBox itself allows. 0 here is a rollout state, not the stack's resting state:
+# scripts/usenet-blackhole.service passes --max-inflight 6, and that unit is what
+# the timer runs. Do not read this default as "the stack is uncapped" -- it was
+# read that way once, in docs/TORBOX-API.md, against a unit that had already been
+# capped.
+#
+# 6 is a limit chosen to sit below the provider's, not a measured optimum. The
+# evidence for wanting a ceiling is that nine of the ten slots were held by jobs
+# 3-21h old while 4 of 50 submissions were ever fetched, and that an uncapped
+# pass submitted 46 jobs in one hour on 2026-09-18 while 60 sat incomplete.
+# Neither says six is the right number: the fetch rate at 6 against 10 has not
+# been compared.
 DEFAULT_MAX_INFLIGHT=0
 
 # io full avg10 at or above which a pass refuses to start. The reading and the

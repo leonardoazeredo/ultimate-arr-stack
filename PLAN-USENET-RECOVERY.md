@@ -6,7 +6,8 @@ the NAS on 2026-09-17, where the running service's log shows the repeating
 `Failure reporting: ON (POST /api/v3/history/failed)` banner across multiple
 passes and the state file's ledger holds accepted failure reports. Phase 2 items
 3 (the stall rule, `--stall-hours`, default 4) and 4 (the in-flight ceiling,
-`--max-inflight`, default 0) both shipped. Phase 2 items 1-2 are closed as
+`--max-inflight`, whose script default is still 0 but whose shipped unit sets 6)
+both shipped. Phase 2 items 1-2 are closed as
 unbuildable (finding below). Phase 3's baseline is recorded and the decision is
 deliberately deferred (finding below). Plan written 2026-09-15 11:30 BST;
 Phase 0 finding added 12:05; closeout findings added 2026-09-17.
