@@ -15,6 +15,15 @@ MANUAL_SCAN_SH="${DUC_MANUAL_SCAN_SH:-/manual_scan.sh}"
 # so a test that drives that loop has to point it at a path it can bind a socket
 # in. The default is the path the image uses.
 FCGI_SOCKET="${DUC_FCGI_SOCKET:-/var/run/fcgiwrap.socket}"
+# The index this reads to decide whether a start-up scan is worth running, and
+# how old it may be before one is. Same convention as the seams above: the
+# image sets neither, so the container uses these defaults.
+#
+# 20 hours, not 24: the daily cron is `0 4 * * *`, so an index is at most 24
+# hours old and normally much younger. 20 leaves room for a cron run that
+# started late without letting a genuinely stale index through.
+INDEX_DB="${DUC_INDEX_DB:-/database/duc.db}"
+STARTUP_SCAN_MAX_AGE_HOURS="${DUC_STARTUP_SCAN_MAX_AGE_HOURS:-20}"
 FALLBACK_SCHEDULE="0 0 * * *"
 
 # A cron schedule is exactly five whitespace-separated fields on exactly one
@@ -62,15 +71,38 @@ start_webserver() {
     nginx
 }
 
+# Is a start-up scan worth running?
+#
+# The start-up scan exists for a first run with no index at all. It used to run
+# on every container start, which made `restart: always` a loaded gun: on
+# 2026-09-18 duc restarted at 23:07 while the NAS was already I/O-starved and
+# immediately walked 2.9 Tb / 842.4K files / 139.8K directories again, adding to
+# the stall it was suffering from. A fresh index is a warm start.
+#
+# Returns 0 when a scan is needed, 1 when the index is fresh enough to skip.
+# Fails towards scanning: an index that is missing, unreadable, or whose age
+# cannot be determined gets a scan, which is the behaviour that shipped before
+# this function existed.
+startup_scan_needed() {
+    local age_minutes
+    [[ -f "$INDEX_DB" ]] || return 0
+    age_minutes=$(( STARTUP_SCAN_MAX_AGE_HOURS * 60 ))
+    [[ -z "$(find "$INDEX_DB" -mmin -"$age_minutes" 2>/dev/null)" ]]
+}
+
 main() {
     touch "$LOG_FILE"
 
-    echo "Starting initial recursive scan"
-    echo "This may take a while..."
-    echo "Now: $(date)"
-    "$SCAN_SH" || echo "Initial scan failed (exit $?)" | tee -a "$LOG_FILE"
-    echo "Now: $(date)"
-    echo "Scan complete"
+    if startup_scan_needed; then
+        echo "Starting initial recursive scan"
+        echo "This may take a while..."
+        echo "Now: $(date)"
+        "$SCAN_SH" || echo "Initial scan failed (exit $?)" | tee -a "$LOG_FILE"
+        echo "Now: $(date)"
+        echo "Scan complete"
+    else
+        echo "Index is newer than ${STARTUP_SCAN_MAX_AGE_HOURS}h; skipping the initial scan"
+    fi
 
     local schedule="${SCHEDULE:-}"
     if ! valid_schedule "$schedule"; then

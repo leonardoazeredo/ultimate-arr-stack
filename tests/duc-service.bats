@@ -26,6 +26,15 @@ setup() {
     mkdir -p "$WORK"
 
     export DUC_LOG_FILE="$WORK/duc.log"
+    # Pinned here, not only in the tests that read it: main() now decides
+    # whether to run its initial scan by looking at the index, and the image's
+    # default is /database/duc.db - a real file on the NAS, and on any host that
+    # has run the container. Unpinned, the two main() tests below would read
+    # that host state instead of the throwaway tree: a fresh index there skips
+    # the initial scan they assert on, and the whole file goes red for a reason
+    # nothing in it mentions. The path does not exist unless a test creates it,
+    # which keeps main() on the no-index branch those two tests were written for.
+    export DUC_INDEX_DB="$WORK/duc.db"
     export DUC_LOCK_DIR="$WORK/scan.lock"
     export DUC_REQUEST_DIR="$WORK/scan_requested"
     export DUC_SCAN_ROOT="$WORK/scan"
@@ -454,4 +463,53 @@ run_main() {
     assert_failure
     assert_output --partial "Creating cron schedule: 0 4 * * *"
     refute_output --partial "webserver started"
+}
+
+# --- startup.sh: the start-up scan -----------------------------------------
+
+@test "duc: startup scans when there is no index yet" {
+    export DUC_INDEX_DB="$WORK/duc.db"
+    rm -f "$DUC_INDEX_DB"
+    startup startup_scan_needed
+    assert_success
+}
+
+@test "duc: startup skips the scan when the index is fresh" {
+    # The incident case: restart: always brought duc up at 23:07 on 2026-09-18
+    # while the NAS was already I/O-starved, and it walked 842.4K files again
+    # for nothing. The daily cron is what keeps the index current.
+    export DUC_INDEX_DB="$WORK/duc.db"
+    : > "$DUC_INDEX_DB"
+    startup startup_scan_needed
+    assert_failure
+}
+
+@test "duc: startup scans again once the index is older than the window" {
+    export DUC_INDEX_DB="$WORK/duc.db"
+    : > "$DUC_INDEX_DB"
+    touch -t 202001010000 "$DUC_INDEX_DB"
+    startup startup_scan_needed
+    assert_success
+}
+
+@test "duc: the freshness window comes from the environment, not a literal" {
+    export DUC_INDEX_DB="$WORK/duc.db"
+    : > "$DUC_INDEX_DB"
+    touch -t 202001010000 "$DUC_INDEX_DB"
+    export DUC_STARTUP_SCAN_MAX_AGE_HOURS=999999
+    startup startup_scan_needed
+    assert_failure
+}
+
+@test "duc: main() branches on the start-up scan decision" {
+    # The four tests above prove the decision is right; this one proves it is
+    # WIRED. Without it, deleting the branch in main() restores the
+    # scan-on-every-restart defect of 2026-09-18 and every other test stays
+    # green, because they call startup_scan_needed directly. `declare -f` rather
+    # than running main(): the BASH_SOURCE guard at the bottom of startup.sh
+    # means sourcing defines main without executing it, and main() blocks on
+    # start_webserver anyway.
+    run bash -c 'source "$1"; declare -f main' _ "$APP/startup.sh"
+    assert_success
+    assert_output --partial 'if startup_scan_needed; then'
 }

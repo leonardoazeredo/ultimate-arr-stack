@@ -143,3 +143,51 @@ mutation duc-webserver-socket-wait-inverted \
   --test "duc: start_webserver returns as soon as the socket is up" \
   --why "inverts the wait for the fcgiwrap socket, which is severe in both directions. With the socket up the loop spins instead of returning, so the chmod and nginx are never reached and the container serves no web UI at all; with it absent the loop is skipped, the chmod finds no socket, and errexit kills the function before nginx - the same dead UI, arrived at from the other side" \
   --apply 'perl -pi -e '"'"'s{while ! \[ -S "\$FCGI_SOCKET" \]}{while [ -S "\$FCGI_SOCKET" ]}'"'"' "$F"'
+
+# --- duc startup.sh: the start-up scan ------------------------------------
+#
+# The five below pin the decision that keeps `restart: always` from re-walking
+# all of /volume1 on every restart. The last two are the ones that matter most:
+# every other entry here calls startup_scan_needed directly, so without them
+# deleting or inverting the branch in main() restores the 2026-09-18 defect with
+# the whole suite still green.
+#
+# All five apply with `sed -i.bak … && rm -f "$F.bak"`: a bare `sed -i` on this
+# macOS host reads the script as the -i suffix and edits nothing, which the
+# runner scores as "changed NOTHING" rather than as a pass - see
+# tests/mutation/README.md.
+
+mutation duc-index-missing-treated-fresh \
+  --file duc-service/app/startup.sh \
+  --bats tests/duc-service.bats \
+  --test "duc: startup scans when there is no index yet" \
+  --why "treating a missing index as fresh is the first-run defect: a container started against an empty volume never builds an index, every page of the UI is empty, and nothing in the log says why" \
+  --apply 'sed -i.bak "s@\[\[ -f \"\$INDEX_DB\" \]\] || return 0@[[ -f \"\$INDEX_DB\" ]] || return 1@" "$F" && rm -f "$F.bak"'
+
+mutation duc-staleness-compared-backwards \
+  --file duc-service/app/startup.sh \
+  --bats tests/duc-service.bats \
+  --test "duc: startup scans again once the index is older than the window" \
+  --why "comparing the age the wrong way round skips the scan on a stale index and runs it on a fresh one -- the guard exactly backwards; it also fails the fresh-index test, so both directions of the decision are pinned" \
+  --apply 'sed -i.bak "s@-mmin -\"\$age_minutes\"@-mmin +\"\$age_minutes\"@" "$F" && rm -f "$F.bak"'
+
+mutation duc-freshness-window-hardcoded \
+  --file duc-service/app/startup.sh \
+  --bats tests/duc-service.bats \
+  --test "duc: the freshness window comes from the environment, not a literal" \
+  --why "hardcoding the window makes the seam inert, so the number cannot be tuned on a host whose cron cadence differs and the test above silently stops testing anything" \
+  --apply 'sed -i.bak "s@age_minutes=\$(( STARTUP_SCAN_MAX_AGE_HOURS \* 60 ))@age_minutes=1200@" "$F" && rm -f "$F.bak"'
+
+mutation duc-startup-branch-removed \
+  --file duc-service/app/startup.sh \
+  --bats tests/duc-service.bats \
+  --test "duc: main\(\) branches on the start-up scan decision" \
+  --why "deleting the branch restores the unconditional start-up scan, which with restart: always is the defect of 2026-09-18 -- and no behavioural test notices, because they all call the decision function directly" \
+  --apply 'sed -i.bak "s@if startup_scan_needed; then@if true; then@" "$F" && rm -f "$F.bak"'
+
+mutation duc-startup-branch-inverted \
+  --file duc-service/app/startup.sh \
+  --bats tests/duc-service.bats \
+  --test "duc: main\(\) branches on the start-up scan decision" \
+  --why "inverting the branch scans only when the index is fresh and never when it is stale -- the opposite of the intent, reached by a one-character edit" \
+  --apply 'sed -i.bak "s@if startup_scan_needed; then@if ! startup_scan_needed; then@" "$F" && rm -f "$F.bak"'
