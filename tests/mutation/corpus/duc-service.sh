@@ -226,3 +226,20 @@ mutation duc-pressure-fails-closed \
   --test "duc: no readable pressure reading leaves the scan to the index age" \
   --why "treating a reading this cannot judge as a stalled host is the guard failing CLOSED. /proc/pressure/io does not exist on macOS or on any kernel built without PSI, so this is not a rare input -- and the failure is silent in the direction that matters: a container on such a host comes up, serves an empty UI, and never builds the index it would need to fill it" \
   --apply 'sed -i.bak "s@\[\[ -n \"\$reading\" \]\] || return 1@[[ -n \"\$reading\" ]] || return 0@" "$F" && rm -f "$F.bak"'
+
+# --- startup.sh: the index path, and the file duc actually reads ------------
+#
+# startup.sh decides from $INDEX_DB whether to skip the start-up scan; `duc`
+# itself writes wherever ducrc's `database` line says, which the image installs
+# as /etc/ducrc (duc-service/Dockerfile). Nothing else in the suite compares
+# them: tests/duc-service.bats pins DUC_INDEX_DB, so the default is exercised
+# nowhere else. Drift there is invisible in the worst way -- `[[ -f "$INDEX_DB" ]]`
+# is false forever and the guard quietly goes back to scanning on every restart,
+# with all 39 tests green.
+
+mutation duc-index-default-drifts-from-ducrc \
+  --file duc-service/app/startup.sh \
+  --bats tests/duc-service.bats \
+  --test "duc: the index the guard defaults to is the one duc actually writes" \
+  --why "a default index path that is not the one duc writes makes the freshness check permanently false, so every restart re-walks 2.9 Tb / 842.4K files and the guard reads as if it were working the whole time. The two values live in different files and neither one is checked against the other anywhere else in this suite" \
+  --apply 'sed -i.bak "/^INDEX_DB=/ s@/database/duc.db@/var/lib/duc.db@" "$F" && rm -f "$F.bak"'

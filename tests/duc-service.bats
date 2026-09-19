@@ -615,3 +615,19 @@ stale_index() {
     assert_success
     assert_output --partial "deciding on index age alone"
 }
+
+@test "duc: the index the guard defaults to is the one duc actually writes" {
+    # INDEX_DB decides whether a start-up scan is skipped; ducrc is what `duc`
+    # itself reads, via /etc/ducrc in the image (duc-service/Dockerfile). If the
+    # two ever drift, `[[ -f "$INDEX_DB" ]]` is false forever, the guard
+    # silently reverts to scanning the whole volume on every restart, and every
+    # other test in this file stays green -- they all pin DUC_INDEX_DB, so the
+    # default is exercised nowhere else.
+    local default_path ducrc_path
+    default_path="$(env -u DUC_INDEX_DB bash -c 'source "$1"; printf "%s" "$INDEX_DB"' \
+        _ "$APP/startup.sh")"
+    ducrc_path="$(awk '$1 == "database" { print $2; exit }' "$APP/ducrc")"
+    [ -n "$ducrc_path" ] || fail "ducrc has no database line to compare against"
+    [ "$default_path" = "$ducrc_path" ] \
+        || fail "startup.sh defaults INDEX_DB to '$default_path' but duc writes '$ducrc_path'"
+}
