@@ -1,5 +1,12 @@
 # Troubleshooting
 
+## Everything Is Unreachable At Once
+
+If the whole stack looks unreachable at once — `.lan` names resolve, ports accept
+connections, and nothing ever answers — read
+[NAS load incident, 2026-09-18](NAS-LOAD-INCIDENT-2026-09-18.md) before
+re-deriving it. That is a host-level I/O stall, not a DNS or proxy fault.
+
 ## Gluetun: Harmless Log Noise on Startup
 
 **Symptom:** Two scary-looking lines in `docker logs gluetun` even though the VPN appears to be working:
