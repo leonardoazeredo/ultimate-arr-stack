@@ -245,3 +245,69 @@ mutation adguard-stage-writes-the-plaintext-password \
   --test "adguard-stage: the user is written and a real login is required to pass" \
   --why "Writes the plaintext password where the bcrypt hash belongs. AdGuard cannot authenticate against it, so the router ends up with a credential nobody can use and a config file holding a secret in the clear" \
   --apply 'perl -0pi -e "s/-v h=\"\x24ADMIN_PASSWORD_HASH\"/-v h=\"\x24ADMIN_PASSWORD\"/" "$F"'
+
+# --- scripts/lib/check-dns-divergence.sh ------------------------------------
+#
+# The migration deliberately holds the same .lan names in two stores, because a
+# firewall flag decides which one answers: AdGuard Home's DNS rewrites (3.2) and
+# the router's dnsmasq `address` records (4.1). A name added to one side only is
+# a latent bug - nothing looks wrong until dns_enabled flips, and by then the
+# name is answered by the wrong store or by neither. Each mutation below keeps
+# the guard printing a verdict while removing the one rule that would have
+# caught it, which is the failure this file exists to make visible.
+
+mutation dns-divergence-address-not-compared \
+  --file scripts/lib/check-dns-divergence.sh \
+  --bats tests/lib-dns-divergence.bats \
+  --test "dns-divergence: the same name on a different address fails" \
+  --why "Stops comparing the address each store gives for a name held in both. The name sets still have to agree, so the guard reports a clean comparison while AdGuard and the router's dnsmasq answer the same hostname with different addresses - the silent half of the divergence, and the worse one, because after the flip the name still resolves and only goes somewhere else" \
+  --apply 'perl -0pi -e "s/elif \[\[ \"\x24repo_address\" != \"\x24capture_address\" \]\]; then/elif false; then/" "$F"'
+
+mutation dns-divergence-empty-capture-is-a-verdict \
+  --file scripts/lib/check-dns-divergence.sh \
+  --bats tests/lib-dns-divergence.bats \
+  --test "dns-divergence: a capture that parsed no names is not a pass and is not a divergence" \
+  --why "Removes the guard on a capture that parsed no hostnames. Every name in the repo-side record then comes back as missing from AdGuard, so a read that produced nothing is reported as a divergence - the same defect as an all-clear manufactured from an empty read, with the sign flipped" \
+  --apply 'perl -0pi -e "s/if \[\[ -z \"\x24capture_names\" \]\]; then/if false; then/" "$F"'
+
+mutation dns-divergence-adguard-side-ignored \
+  --file scripts/lib/check-dns-divergence.sh \
+  --bats tests/lib-dns-divergence.bats \
+  --test "dns-divergence: a name only in the AdGuard rewrite list fails" \
+  --why "Empties the AdGuard-side name list, so the comparison only ever walks the names the repo-side record holds. A rewrite added to AdGuard and not to the router's dnsmasq address list goes unnoticed until dns_enabled flips and the name stops resolving through dnsmasq - the state Gate 3 exists to catch while nothing is answering from it yet" \
+  --apply 'perl -0pi -e "s/capture_names=\x24\(printf .%s. \"\x24capture_entries\" \| cut -f1 \| grep \. \|\| true\)/capture_names=\"\"/" "$F"'
+
+# --- scripts/lib/dns-parity.sh ----------------------------------------------
+#
+# The parity harness reports whether two resolvers can be swapped for one
+# another, and Gate 3's pass condition is "zero unexplained differences". Every
+# mutation below is a way of reporting that while the two resolvers disagree -
+# the failure mode the whole harness exists to prevent, and the one a reader of
+# a green report has no way to notice.
+#
+# The two warnings in these diffs are deliberate. The status comparison is
+# written as `"$1" != "$3"` and the ALLOW-DIFF refusal as `!= ERROR`: in both
+# cases the mutation removes a guard clause from an `&&` chain or a `[[ ]]`, so
+# `set -e` inspection in the diff is doing exactly what the mutant intends.
+
+mutation dns-parity-answer-only-comparison \
+  --file scripts/lib/dns-parity.sh \
+  --bats tests/lib-dns-parity.bats \
+  --test "dns-parity: a status mutation \\(NXDOMAIN vs NODATA\\) is an unexplained difference" \
+  --why "Drops the status comparison and compares only the answer section, so two results with empty answers are equal whatever their statuses. That is exactly the row Gate 3 has to surface: an unknown .lan name is NODATA on the NAS Pi-hole, because address=/lan/:: gives dnsmasq local data for the zone, and NXDOMAIN on the router, because local=/lan/ makes dnsmasq authoritative with none. The two answer sections are both empty, so this mutant reports parity on the one row the router/nas migration is expected to differ on" \
+  --apply 'perl -0pi -e "s/    \[\[ \"\x241\" != \"\x243\" \]\] && return 0\n//" "$F"'
+
+mutation dns-parity-excuses-everything \
+  --file scripts/lib/dns-parity.sh \
+  --bats tests/lib-dns-parity.bats \
+  --test "dns-parity: a deliberate difference without the marker is not excused" \
+  --why "Makes the ALLOW-DIFF marker unnecessary: every difference is excused, so one marker anywhere in the fixture sanctions the whole matrix. The fixture header says a deliberate difference has to be named; a harness that reports nothing unexplained because something unrelated was named turns Gate 3 into a formality, and the difference that should have failed is the one nobody sees. The replacement is anchored on the excusal function's own body - a bare 'return 1' to 'return 0' hits the parser's first bounds check instead, changes nothing observable, and survives as an equivalent mutant" \
+  --apply 'perl -0pi -0777 -e "s/dns_parity_row_excused\(\) \{\n.*?\n\}/dns_parity_row_excused() {\n    return 0\n}/s" "$F"'
+
+mutation dns-parity-both-error-is-agreement \
+  --file scripts/lib/dns-parity.sh \
+  --bats tests/lib-dns-parity.bats \
+  --test "dns-parity: both resolvers unreachable is a no-oracle skip, not a difference" \
+  --why "Turns the all-ERROR guard into its opposite, so a run where nothing was reached stops being a reported skip and becomes a matrix of differences. Two unreachable resolvers are not evidence that they disagree, and a report that says they do sends the reader after a configuration difference that was never observed - while the real cause (a dead jump host, a wrong address) is the text that got buried" \
+  --apply 'perl -0pi -e "s/if \[\[ \"\x24errors_a\" -eq \"\x24rows\" && \"\x24errors_b\" -eq \"\x24rows\" \]\]; then/if false; then/" "$F"'
+

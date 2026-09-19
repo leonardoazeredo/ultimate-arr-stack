@@ -333,19 +333,55 @@ Do **not** attempt `dig @192.168.x.1 -p 3053` from a client on `vlan10`, `vlan20
 
 ### Phase 3 — Configure AdGuard Home to parity
 
-- [ ] **3.1 Replace the plain upstreams** (`8.8.8.8`, `9.9.9.9`) with DoH/DoT. This is what `dnscrypt-proxy` provided before; do not retire it until this is proven.
+**How this phase can be executed, because the obvious route is closed.** AdGuard's HTTP API is not usable on this build. GL.iNet patches the binary: `/control/*` is wrapped in `authMiddlewareGLiNet` (the binary carries that symbol, along with `checkToken` and `tokenDate`), and it does not honour AdGuard's own `agh_session` cookie. Measured 2026-09-19 from the router against `127.0.0.1:3000`:
 
-- [ ] **3.2 Add all 19 `.lan` records as DNS rewrites**, pointing at Traefik's macvlan `192.168.110.250`.
+- `POST /control/login` → **200**, `webapi: successful login user=admin ip=127.0.0.1`, and a valid `Set-Cookie`;
+- every following request carrying that cookie → **401**, with the server logging `auth: no authentication cookie`. The cookie is provably sent: curl's verbose output shows `> Cookie: agh_session=…`.
+- `curl -u admin:…` → **401**. No `WWW-Authenticate` header is offered.
 
-- [ ] **3.3 Reproduce the AAAA behaviour** for `.lan` so musl/Alpine clients keep working. Open question 3 decides whether this is a configuration change or a design problem, and it is answered here, not in Phase 6.
+So the API is gated by the router's own auth, not by the `users:` entry, and no token is obtainable without reverse-engineering that middleware. **`/etc/AdGuardHome/config.yaml` is the configuration path**: transform it off-box (the router has no bash, python, perl or PyYAML), push it back, validate with `/usr/bin/AdGuardHome --check-config`, and restart.
 
-- [ ] **3.4 Add blocklists**, and record the chosen lists in `docs/`.
+This also softens Phase 2's premise, and the correction is worth keeping: with `users: []` the *API* was never open, because GL.iNet's middleware refuses everything without its token. The credential is still correct to set — the browser UI needs it, and defense in depth is not a thing to skip on a device that answers DNS for the house — but the exposure was narrower than "anything on the maintenance VLAN can rewrite any domain".
 
-- [ ] **3.5 Add the duplicate guard for the new topology.** The repo's rule is not to define a domain in two places (`docs/LOCAL-DNS.md:63`). This plan deliberately breaks that rule by holding the 19 names in both AdGuard rewrites (3.2) and dnsmasq `address` records (4.1), because `dns_enabled` decides which one answers. Write the check that catches divergence, in the spirit of `scripts/lib/check-dns-duplicates.sh`. Note that script compares the NAS's `02-local-dns.conf` against `pihole.toml` inside the container — it is not, and never was, a router-vs-AdGuard check, so retiring it in 8.6 removes nothing that covered this.
+Restarting AdGuard is free during this phase: `dns_enabled='0'`, so no client is asking it anything.
 
-- [ ] **3.6 Run the parity harness.** A script that sends the committed baseline matrix to **both** resolvers — the NAS Pi-hole and AdGuard Home — and diffs the answers. AdGuard Home is queried from pi1 on 3053; the NAS from anywhere. Commit as `scripts/dns-parity.sh`, with a bats test that proves it reports a mismatch when one is introduced.
+- [x] **3.1 Replace the plain upstreams** (`8.8.8.8`, `9.9.9.9`) with DoH/DoT. This is what `dnscrypt-proxy` provided before; do not retire it until this is proven.
+
+- [x] **3.2 Add all 19 `.lan` records as DNS rewrites**, pointing at Traefik's macvlan `192.168.110.250`.
+
+- [x] **3.3 Reproduce the AAAA behaviour** for `.lan` so musl/Alpine clients keep working. Open question 3 decides whether this is a configuration change or a design problem, and it is answered here, not in Phase 6.
+
+- [x] **3.4 Add blocklists**, and record the chosen lists in `docs/`.
+
+- [x] **3.5 Add the duplicate guard for the new topology.** The repo's rule is not to define a domain in two places (`docs/LOCAL-DNS.md:63`). This plan deliberately breaks that rule by holding the 19 names in both AdGuard rewrites (3.2) and dnsmasq `address` records (4.1), because `dns_enabled` decides which one answers. Write the check that catches divergence, in the spirit of `scripts/lib/check-dns-duplicates.sh`. Note that script compares the NAS's `02-local-dns.conf` against `pihole.toml` inside the container — it is not, and never was, a router-vs-AdGuard check, so retiring it in 8.6 removes nothing that covered this.
+
+- [x] **3.6 Run the parity harness.** A script that sends the committed baseline matrix to **both** resolvers — the NAS Pi-hole and AdGuard Home — and diffs the answers. AdGuard Home is queried from pi1 on 3053; the NAS from anywhere. Commit as `scripts/dns-parity.sh`, with a bats test that proves it reports a mismatch when one is introduced.
 
 **Gate 3.** `./scripts/dns-parity.sh` reports zero unexplained differences across the full matrix, including the blocked-name and `.lan` rows. Differences that are deliberate (a different CDN edge for a load-balanced name) must be named and allowed explicitly in the fixture, not waved through. The duplicate guard from 3.5 fails when a name is added to one store only. Rollback trigger: parity cannot be reached for `.lan` or blocked names → leave `enabled='1'`, `dns_enabled='0'`; no client impact.
+
+### Phase 3 outcome, 2026-09-19
+
+**Gate 3 passes.** `./scripts/dns-parity.sh 192.168.110.246:53 jump=pi@pi1.local:192.168.8.1:3053` reports **50 rows compared, 0 unexplained, 20 excused**. The same command before the configuration landed reported 41 unexplained, which is the measure of what this phase did.
+
+Applied to the router by `scripts/adguard-configure.sh` — idempotent, and a second run reports "no change" and restarts nothing, which also proves AdGuard does not reserialise `config.yaml` on start:
+
+- **3.1** upstreams are `https://dns.quad9.net/dns-query` and `https://cloudflare-dns.com/dns-query`; `bootstrap_dns` stays on plain Quad9 addresses, because bootstrapping cannot itself be encrypted.
+- **3.2** 18 `.lan` rewrites, one per hostname in `pihole/dnsmasq.d/02-local-dns.conf.example`, all answering Traefik's macvlan. Names are parsed from that file rather than hardcoded, and the apex `lan` is skipped.
+- **3.4** StevenBlack's hosts list added — the same list the NAS uses, so a blocked name stays blocked — alongside the AdGuard DNS filter. Recorded in `docs/LOCAL-DNS.md`.
+
+**3.3 needed no configuration change, and that is the answer to open question 3.** A rewrite makes AdGuard answer AAAA with `NOERROR` and no answer (NODATA), not NXDOMAIN. musl's failure mode is AAAA *NXDOMAIN*; NODATA is not that, so `::` does not have to be reproduced. Measured on the router, same question to both resolvers:
+
+```
+sonarr.lan A     AdGuard :3053 -> 192.168.110.250     NAS :53 -> 192.168.110.250
+sonarr.lan AAAA  AdGuard :3053 -> NOERROR <empty>     NAS :53 -> NOERROR ::
+```
+
+**Two differences are named, not suppressed.** 18 `.lan` AAAA rows (NAS `::` vs AdGuard NODATA) and `nope.lan` (NAS NODATA vs AdGuard NXDOMAIN) carry `ALLOW-DIFF` with the reason attached. Reproducing `::` would have imported a hack that hands a dual-stack client the unspecified address, which `connect()` maps to loopback. NODATA is the better answer and both keep musl working.
+
+**One gap is left open on purpose.** Reaching that NXDOMAIN means AdGuard asks a public resolver for unknown `.lan` names, which the NAS never did. `bogus_nxdomain: [lan]` answers those locally and closes it. It is not in this phase: it would not change the parity result, and it is a privacy improvement rather than a correctness one. It belongs before the Phase 6 flip, and it is recorded in `docs/LOCAL-DNS.md` as a follow-up rather than smoothed over.
+
+**The duplicate guard is not yet wired into anything.** `scripts/lib/check-dns-divergence.sh` is run by hand; against the live rewrites and the repo record it reports 18 vs 18 and 0 divergences. Its natural home is 8.6, where it replaces `check-dns-duplicates.sh` and `check-domains.sh` in the pre-commit checks as those are retired.
+
 
 ---
 
@@ -499,7 +535,9 @@ Access for the router rungs does not depend on DNS working: SSH by IP via pi1 on
    
    So 3.2 alone is not enough. Phase 3 needs either an upstream pointing at a dnsmasq instance on a secondary port (which restores lease names and local records together) or the rewrites **plus** an AdGuard equivalent of `local=/lan/` — `bogus_nxdomain` with `lan` on it, so unknown `.lan` names are answered locally instead of being asked of Google. Decide this in 3.2/3.3, not later: it changes what 3.6's parity run compares.
 2. **What does `dns_enabled` do beyond the redirect?** Closed in Phase 0 by reading `/etc/firewall.dns_order` in full; line 31 is the only consumer found so far.
-3. **What does AdGuard Home return for AAAA on a rewrite?** Decides whether 3.3 is a configuration change or a design problem. Test with an Alpine/musl container, which is the client that cares.
+3. **What does AdGuard Home return for AAAA on a rewrite?** **NODATA** — `NOERROR` with an empty answer section, measured on the router against the staged AdGuard (`dig sonarr.lan AAAA @127.0.0.1 -p 3053`). So 3.3 is neither a configuration change nor a design problem: musl's failure mode is AAAA *NXDOMAIN*, NODATA is not that, and `address=/lan/::` does not need reproducing. The NXDOMAIN case is the name that does **not** exist, not the one that does.
+
+   The end-to-end proof still has to be made with a real musl client, and it cannot be made yet: `tests/alpine-dns-aaaa.bats` points a container at the router's `:53`, which `dns_enabled='0'` still routes to dnsmasq, and dnsmasq has no `.lan` records until 4.1. A `--dns` flag cannot be pointed at `:3053`, because getaddrinfo only ever uses port 53. That test goes green at Phase 4, and 6.3 re-runs it when AdGuard actually serves the port. Until then the NODATA measurement above is the evidence, and it is the right shape: the resolver answer is what changed, and it is no longer NXDOMAIN.
 4. **Does GL.iNet's firmware upgrade preserve `/etc/AdGuardHome`?** If not, 0.2's backup plus a documented restore is load-bearing, not a nicety.
 5. **Should the router keep a second resolver as a floor?** dnsmasq on `:53` already is exactly that, which is why the Phase 7 watchdog can fall back rather than fail.
 

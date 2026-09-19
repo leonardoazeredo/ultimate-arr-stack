@@ -139,6 +139,53 @@ Two consequences worth keeping:
 
 **Upstream is encrypted.** The NAS Pi-hole forwards to `dnscrypt-proxy` at `172.20.0.6#5053` (set 2026-09-10, which is what `scripts/configure-apps.sh` has always prescribed), rather than sending plaintext to `8.8.8.8`. Verify with `docker exec pihole pihole-FTL --config dns.upstreams`.
 
+### AdGuard Home on the router (staged 2026-09-19, not yet serving)
+
+The house's DNS is moving off the NAS onto the router, so that the NAS can be
+powered off without taking internet access with it. AdGuard Home runs on
+`arr-stack-router`, listening on `:3053`, and is **not in the query path yet** —
+`adguardhome.config.dns_enabled='0'` means every client still asks dnsmasq on
+`:53`. Phase 6 of the migration plan is the flip.
+
+Its configuration is written by `scripts/adguard-configure.sh`, which transforms
+`/etc/AdGuardHome/config.yaml` here (the router has no bash, python, perl or
+PyYAML), pushes it, runs `AdGuardHome --check-config`, backs up the old file and
+restarts. It is idempotent: a second run reports "no change" and restarts
+nothing. **The AdGuard HTTP API is not usable on this build** — GL.iNet wraps
+`/control/*` in its own auth middleware, which ignores AdGuard's session cookie
+— so the config file is the only route.
+
+**Encrypted upstreams:** `https://dns.quad9.net/dns-query` and
+`https://cloudflare-dns.com/dns-query`, with `bootstrap_dns` left on plain Quad9
+addresses because bootstrapping cannot itself be encrypted. This replaces the
+plain `8.8.8.8`/`9.9.9.9` that shipped, and stands in for what `dnscrypt-proxy`
+provides on the NAS.
+
+**Blocklists**, and why these two:
+
+| List | Why it is here |
+| --- | --- |
+| AdGuard DNS filter (`adguardteam.github.io/AdGuardSDNSFilter`) | Shipped enabled with the package; the general-purpose baseline |
+| StevenBlack hosts (`raw.githubusercontent.com/StevenBlack/hosts/master/hosts`) | **The same list the NAS Pi-hole uses**, so a blocked name keeps being blocked after the flip. Parity between the two resolvers is a Gate 3 requirement, and two different lists would make "did the migration change what is blocked?" unanswerable |
+| AdAway Default Blocklist | Present but disabled — shipped that way, left alone |
+
+A name the NAS blocks with Pi-hole's NULL mode answers `0.0.0.0` there and does
+the same here, which is what lets `tests/fixtures/dns-baseline.txt` compare the
+two resolvers directly.
+
+**Two answers deliberately differ from the NAS**, both named `ALLOW-DIFF` in
+that fixture with the reason attached. First, AAAA on a `.lan` name: the NAS
+answers `::` from its `address=/lan/::` hack, AdGuard answers NODATA. Both work
+for a musl client — musl's failure mode is AAAA *NXDOMAIN*, and NODATA is not
+that — and NODATA is the safer answer, since `::` is the unspecified address and
+`connect()` maps it to loopback. Second, a `.lan` name that does not exist: the
+NAS answers it NODATA from its local zone, AdGuard answers NXDOMAIN.
+
+One gap remains, recorded rather than smoothed over: reaching that NXDOMAIN means
+AdGuard **asks a public resolver** for `.lan` names it does not know, which the
+NAS never did. Putting `lan` in AdGuard's `bogus_nxdomain` answers those locally
+and closes it. That is a deliberate follow-up, not an oversight.
+
 ---
 
 ## ✅ + local DNS Complete!
