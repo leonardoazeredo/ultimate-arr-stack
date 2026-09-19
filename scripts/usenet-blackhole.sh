@@ -427,7 +427,12 @@ fi
 # over. Removing the file rather than truncating it keeps one answer for "the
 # last pass ran": no file at all, which is also the ordinary state of a stack
 # that has never skipped one.
-rm -f "$SKIP_PATH"
+#
+# `|| true`, the same rule record_skipped_pass follows: this is bookkeeping, and
+# a download pass must not fail over it. Under `set -e` an unguarded rm that
+# could not unlink -- a directory parked at that path, a partially unmounted
+# pool -- would take the whole pass down and say nothing about why.
+rm -f "$SKIP_PATH" || true
 
 if ! TORBOX_API_KEY="$TORBOX_KEY" \
         SONARR_API_KEY="$SONARR_KEY" \

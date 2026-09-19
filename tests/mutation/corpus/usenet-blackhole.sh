@@ -522,7 +522,7 @@ mutation pressure-gate-skip-record-outlives-the-pass \
   --bats tests/usenet-blackhole.bats \
   --test "usenet-blackhole: the skip trace counts the run and clears when a pass runs" \
   --why "a trace that is never cleared turns the page into a permanent claim that the last pass was skipped. The run length also stops meaning anything: it becomes the number of skips since the file was created rather than the current run, on a host that may have been passing normally for days" \
-  --apply 'sed -i.bak "/^rm -f \"\$SKIP_PATH\"\$/d" "$F" && rm -f "$F.bak"'
+  --apply 'sed -i.bak "/^rm -f \"\$SKIP_PATH\"/d" "$F" && rm -f "$F.bak"'
 
 mutation status-drop-the-skip-notice \
   --file scripts/lib/usenet_status.py \
