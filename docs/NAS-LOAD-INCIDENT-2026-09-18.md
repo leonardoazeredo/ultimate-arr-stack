@@ -37,7 +37,7 @@ average 2.43, memory full-stall 2.00%.
 | Memory PSI full-stall, incident / healthy | 88.12% / 2.00% |
 | Disk reads vs download throughput | 136 MB/s vs 3 MB/s |
 | Jobs the blackhole submitted in one hour | 46 |
-| Jobs left incomplete | 60 of 64 |
+| Jobs left incomplete | 60 of 64 — 64 is the job count in `logs/usenet-blackhole-state.json` as measured during the investigation: 64 total, 4 complete, 60 incomplete |
 | NZBs queued | 531 (488 still queued at the reboot) |
 | duc re-index on container start | 2.9 Tb, 842.4K files, 139.8K directories |
 | TorBox concurrent usenet slot limit | 10 |
@@ -53,7 +53,7 @@ All times BST.
 | Sep 17 22:20 | Stremio library baselined (`stremio-library-sync-state.json`, `baselined_at` 2026-09-17T21:20:53Z) |
 | Sep 17 22:41 | 108-item backfill starts (`backfill_started_at` 2026-09-17T21:41:12Z, `handled: 108`) |
 | Sep 18 05:00-06:00 | 113 + 44 NZBs land |
-| Sep 18 10:00-12:00 | 43 + 61 + 47 NZBs land (531 total) |
+| Sep 18 10:00-12:00 | 43 + 61 + 47 NZBs land; 531 queued in total by this point |
 | Sep 18 11:45-12:20 | Sonarr: `DownloadDecisionMaker: Processing 932 releases`, mass episode searches, `Adding Series [391153][Peacemaker]` |
 | Sep 18 11:51:04 | Six services flip DOWN within 5 ms — a system-wide stall, not individual failures |
 | Sep 18 11:53 | Blackhole pass starts; services recover briefly |
