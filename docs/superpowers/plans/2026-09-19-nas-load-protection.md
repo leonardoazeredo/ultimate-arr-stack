@@ -150,7 +150,14 @@ ssh leoleg@192.168.110.246 \
   'cp /volume1/docker/arr-stack/scripts/usenet-blackhole.service ~/.config/systemd/user/ && systemctl --user daemon-reload'
 ```
 
-Note: `sync-nas.sh` pulls files only; it never installs units. The copy is the step that makes the ceiling real, and the unit's own comment records that the installed copy can drift silently from the repo copy.
+Note: `sync-nas.sh` pulls files only; it never installs units. The copy is what
+makes the unit *configured* — a ceiling a timer nothing has started is not a
+ceiling. `systemctl --user enable --now usenet-blackhole.timer` is the step that
+makes it real, and it belongs immediately after the copy. Both are in
+[Deploying the branch](#deploying-the-branch), together with the ordering hazard
+that puts the copy first: until it lands, the installed unit is the uncapped one,
+and a timer that fires before it runs an uncapped pass against the 488 NZBs still
+queued at the reboot — which is the state that wedged the box.
 
 - [ ] **Step 8: Commit**
 
@@ -536,6 +543,15 @@ git add duc-service/app/startup.sh tests/duc-service.bats tests/mutation/corpus/
 git commit -m "fix(duc): skip the start-up re-index when the index is fresh"
 ```
 
+**Deploying this one is not a file copy.** `duc-service/Dockerfile` line 72 does
+`COPY app/startup.sh /startup.sh`, so the container executes the copy inside the
+image, and `docker-compose.utilities.yml` mounts only `/volume1` and the
+`duc-index` volume — nothing under the repo's `duc-service/` directory is visible
+to the running container. The edited file landing on the NAS disk with the rest
+of the sync changes nothing. The rebuild is step 4 of
+[Deploying the branch](#deploying-the-branch), and it is the only step that ships
+this guard.
+
 ---
 
 ### Task 4: Record the incident
@@ -586,6 +602,112 @@ Expected: PASS. This is the only automated check a document gets in this repo.
 git add docs/NAS-LOAD-INCIDENT-2026-09-18.md docs/TROUBLESHOOTING.md
 git commit -m "docs: record the 2026-09-18 NAS load incident"
 ```
+
+---
+
+## Deploying the branch
+
+One pass, after every task, on a NAS that is otherwise idle. The three guards do
+not ship the same way, and the difference is not cosmetic: two of them are files
+the NAS reads directly once they are in the right place, and the third is baked
+into an image that only a rebuild replaces.
+
+- [ ] **1. Sync the branch.**
+
+  ```bash
+  ./scripts/sync-nas.sh
+  ```
+
+  A file pull and nothing else. It never installs a unit, never recreates a
+  container, and never restarts one — it exits non-zero and says `NAS NOT synced`
+  when it cannot do its job.
+
+- [ ] **2. Install the unit and reload.**
+
+  ```bash
+  ssh leoleg@192.168.110.246 \
+    'cp /volume1/docker/arr-stack/scripts/usenet-blackhole.service ~/.config/systemd/user/ && systemctl --user daemon-reload'
+  ```
+
+  The installed copy is a plain copy, not a symlink, so it can drift from the
+  repo copy with nothing to say so. This step makes the unit *configured*.
+
+- [ ] **3. Arm the timer — after step 2, never before.**
+
+  ```bash
+  ssh leoleg@192.168.110.246 'systemctl --user enable --now usenet-blackhole.timer'
+  ```
+
+  **This is the step that makes the ceiling real, and the order is
+  load-bearing.** `usenet-blackhole.service` is the ceiling; the timer is what
+  runs it every two minutes; a unit nothing starts bounds nothing. And until
+  step 2 has landed, the installed unit is the *uncapped* one — so a timer
+  enabled ahead of the copy runs an uncapped pass against the 488 NZBs still
+  queued at the reboot, which is precisely the state that wedged the box on
+  2026-09-18. Check the installed copy before arming:
+
+  ```bash
+  ssh leoleg@192.168.110.246 'grep -m1 max-inflight ~/.config/systemd/user/usenet-blackhole.service'
+  ```
+
+  Expected: `--max-inflight 6`. No output means the copy has not landed — stop.
+
+  The timer also has to survive the next reboot, and that is an open item in its
+  own right: on the boot after this incident the user manager started 29 seconds
+  in, before `/home` was mounted, and all eight user timers were left inactive
+  while `is-enabled` still reported every one of them as enabled. Confirm with
+  `systemctl --user list-timers usenet-blackhole.timer` after the next reboot
+  rather than assuming `enable` covered it.
+
+- [ ] **4. Rebuild duc.**
+
+  ```bash
+  ssh leoleg@192.168.110.246 \
+    'cd /volume1/docker/arr-stack && docker compose -f docker-compose.utilities.yml up -d --build duc'
+  ```
+
+  **Never with `--remove-orphans`.** This stack's services are split across
+  several compose files that share one project name, so compose treats every
+  container from the other files as an orphan and deletes them all — that is what
+  took out 11 containers on 2026-08-01. Recreate a service only through the
+  compose file that defines it.
+
+  The file sync in step 1 does **not** ship this guard.
+  `duc-service/Dockerfile:72` is `COPY app/startup.sh /startup.sh`, so the
+  container runs the copy inside the image, and `docker-compose.utilities.yml`
+  mounts only `/volume1` and the `duc-index` volume. Without this step the NAS
+  runs the old startup script, which re-walks 2.9 Tb on every restart, while the
+  incident record says the guard shipped.
+  `.github/workflows/nas-auto-deploy.yml` cannot cover it either: it computes its
+  changed-file set from `docker-compose.*.yml` and skips the recreate step
+  entirely when nothing matches, so a change to `app/startup.sh` alone is
+  invisible to it.
+
+- [ ] **5. Verify which duc image is running.**
+
+  ```bash
+  ssh leoleg@192.168.110.246 'docker logs duc 2>&1 | head -20'
+  ```
+
+  `Starting initial recursive scan` means the **old** image is still running and
+  step 4 did not take — that is the walk this guard exists to stop.
+  `Index is newer than 20h; skipping the initial scan` means the new guard is in
+  place and read a fresh index. `Host I/O is stalled; skipping the start-up scan`
+  is also the new image, declining to walk the volume because the host reads as
+  stalled.
+
+- [ ] **6. Confirm the timer and the cap are live.**
+
+  ```bash
+  ssh leoleg@192.168.110.246 \
+    'systemctl --user list-timers usenet-blackhole.timer && tail -5 /volume1/docker/arr-stack/logs/usenet-blackhole.log'
+  ```
+
+  The log line to look for is `In-flight cap: 6`. `In-flight cap: off` means the
+  timer is running a unit that has not been updated — go back to step 2.
+
+Nothing in this section has been run. The deploy is a decision, not a step in
+the branch.
 
 ---
 

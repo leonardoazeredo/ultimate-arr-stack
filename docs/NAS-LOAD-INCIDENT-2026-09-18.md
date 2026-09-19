@@ -126,7 +126,9 @@ Three guards, committed to `fix/nas-load-protection`:
   the reason appearing nowhere.
 - [`duc-service/app/startup.sh`](../duc-service/app/startup.sh) — skips the
   start-up re-index when the index is younger than 20 hours, so `restart: always`
-  stops meaning "re-walk 2.9 Tb".
+  stops meaning "re-walk 2.9 Tb". The same guard refuses to scan at all while the
+  host reads as I/O-stalled, which is the state that made the 23:07 restart walk
+  the volume in the first place.
 
 **These are committed, not deployed.** The NAS has not been synced or
 `daemon-reload`ed, and the installed unit under `~/.config/systemd/user/` is a
@@ -136,6 +138,46 @@ pass performed after all four tasks, because leaving the NAS on a feature branch
 between tasks is itself a documented hazard in this repo. Anyone reading this
 document to conclude the box is protected has read it wrong, and that
 misreading is the failure this record exists to prevent.
+
+The three guards do not ship the same way, and the difference is not cosmetic:
+two of them are files the NAS reads directly once they are in the right place,
+and the third is baked into an image that only a rebuild replaces. In order:
+
+1. **`./scripts/sync-nas.sh`** — a file pull and nothing else. It never installs
+   a unit, recreates a container or restarts one.
+2. **Copy the unit and reload.**
+   `cp /volume1/docker/arr-stack/scripts/usenet-blackhole.service ~/.config/systemd/user/ &&
+   systemctl --user daemon-reload`. This makes the unit *configured*.
+3. **Arm the timer — after step 2, never before.**
+   `systemctl --user enable --now usenet-blackhole.timer`. The copy makes the
+   unit configured; the timer is what makes the ceiling real, and a unit nothing
+   starts bounds nothing. Until step 2 lands the installed unit is the *uncapped*
+   one, so a timer enabled ahead of the copy runs an uncapped pass against the
+   488 NZBs still queued at the reboot — the state that wedged the box.
+   `grep -m1 max-inflight ~/.config/systemd/user/usenet-blackhole.service` should
+   print `--max-inflight 6` before the timer is armed.
+4. **Rebuild duc.**
+   `docker compose -f docker-compose.utilities.yml up -d --build duc`, and
+   **never** with `--remove-orphans`: this stack's services are split across
+   several compose files that share one project name, so compose treats every
+   container from the other files as an orphan and deletes them all. Recreate a
+   service only through the compose file that defines it.
+5. **Verify which duc image is running:** `docker logs duc`. The old image says
+   `Starting initial recursive scan` and starts walking 2.9 Tb — that is the walk
+   this guard exists to stop. The new one says `Index is newer than 20h; skipping
+   the initial scan`, or `Host I/O is stalled; skipping the start-up scan` when
+   the host reads as stalled.
+
+**The sync in step 1 does not ship the duc guard, and nothing else does either.**
+`duc-service/Dockerfile:72` is `COPY app/startup.sh /startup.sh`, so the container
+executes the copy inside the image, and `docker-compose.utilities.yml` mounts only
+`/volume1` and the `duc-index` volume — nothing under the repo's `duc-service/`
+directory is visible to the running container. Without step 4 the NAS runs the
+old startup script, re-walking the volume on every restart, while this record
+says the guard shipped. `.github/workflows/nas-auto-deploy.yml` cannot cover it:
+it computes its changed-file set from `docker-compose.*.yml` and skips the
+recreate step when nothing matches, so a change to `app/startup.sh` alone is
+invisible to it.
 
 ## 7. What is still open
 
