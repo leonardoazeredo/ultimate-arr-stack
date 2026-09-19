@@ -374,9 +374,9 @@ mutation usenet-blackhole-delete-failure-stops-the-pass \
 # TorBox's ten slots are a limit, not a target. Measured over the retained
 # window: nine of the ten were held by jobs 3-21h old while only 4 of 50
 # submissions were ever fetched. `--max-inflight N` stops submitting for the
-# pass once N jobs are in flight, and it ships off (0), because the point is to
-# measure the fetch rate at 6 against 10 before any value is kept -- a ceiling
-# set too low trades wasted slots for idle ones.
+# pass once N jobs are in flight, and the module's own default is 0 -- the flag
+# has to do nothing until an operator asks otherwise, and the unit asks for 6.
+# A ceiling set too low trades wasted slots for idle ones.
 #
 # Every entry here leaves the flag looking present and working while it is not.
 # The dangerous direction is the off-by-one and the ignored check: both look
@@ -410,3 +410,123 @@ mutation usenet-blackhole-inflight-cap-default-on \
   --test "the extracted modules pass their pytest suite" \
   --why "the ceiling has to ship off: it is a measurement, and a default of 10 makes the provider's limit look like a chosen value while removing the only comparison the measurement needs. A pass with ten jobs already in flight then stops offering the eleventh before the flag was ever used, and nothing in argparse or the banner says a default put it there" \
   --apply 'sed -i.bak "s@type=non_negative_int, default=0,@type=non_negative_int, default=10,@" "$F" && rm -f "$F.bak"'
+
+# --- usenet-blackhole.service: the in-flight ceiling ----------------------
+#
+# The module ships the cap inert on purpose, and that is the half every entry
+# above guards. Nothing above looks at the unit, and the unit is where the
+# ceiling actually rests: a stack that never passes the flag runs uncapped no
+# matter how correct the module is.
+#
+# `sed -i.bak`, not the bare `sed -i` this was first written with: GNU sed
+# reads `-i` as the in-place flag, BSD sed reads the script as a backup suffix,
+# fails, and edits nothing -- so on this host both entries would have been
+# reported as changing no file at all. tests/mutation/README.md names the same
+# trap for the corpus as a whole.
+
+mutation unit-inflight-cap-removed \
+  --file scripts/usenet-blackhole.service \
+  --bats tests/usenet-blackhole.bats \
+  --test "usenet-blackhole: the shipped unit caps in-flight jobs below TorBox's ten slots" \
+  --why "removing the flag from ExecStart returns the pass to --max-inflight 0, the state that submitted 46 jobs in one hour on 2026-09-18 while 60 sat incomplete" \
+  --apply 'sed -i.bak "s@--report-failures --max-inflight 6@--report-failures@" "$F" && rm -f "$F.bak"'
+
+mutation unit-inflight-cap-above-slots \
+  --file scripts/usenet-blackhole.service \
+  --bats tests/usenet-blackhole.bats \
+  --test "usenet-blackhole: the shipped unit caps in-flight jobs below TorBox's ten slots" \
+  --why "a ceiling at or above TorBox's ten concurrent slots cannot bound anything; set to 11 it is indistinguishable from no ceiling from the provider's side" \
+  --apply 'sed -i.bak "s@--max-inflight 6@--max-inflight 11@" "$F" && rm -f "$F.bak"'
+
+# --- scripts/usenet-blackhole.sh: the host I/O pressure gate --------------
+#
+# On 2026-09-18 the NAS sat at load 58 with io full avg10 between 78% and 81%
+# for hours while a usenet pass went on submitting into the same pool every two
+# minutes -- the pass lengthening the stall it was competing with. Every entry
+# here either runs a pass exactly when the host is wedged or stops the stack
+# downloading on a host that has no PSI to read, and the fail-open direction is
+# the quieter of the two: a guard that cannot read /proc/pressure looks the same
+# as a guard with nothing to report.
+
+mutation pressure-gate-inverted \
+  --file scripts/usenet-blackhole.sh \
+  --bats tests/usenet-blackhole.bats \
+  --test "usenet-blackhole: the gate is the only thing that changes when pressure crosses the limit" \
+  --why "inverting the comparison runs the pass exactly when the host is stalled and skips it when the host is healthy -- the whole guard backwards, and the boundary test is what notices" \
+  --apply 'sed -i.bak "s@exit !(seen >= limit)@exit !(seen < limit)@" "$F" && rm -f "$F.bak"'
+
+mutation pressure-gate-threshold-hardcoded \
+  --file scripts/usenet-blackhole.sh \
+  --bats tests/usenet-blackhole.bats \
+  --test "usenet-blackhole: the gate is the only thing that changes when pressure crosses the limit" \
+  --why "ignoring PSI_IO_LIMIT and comparing against a literal makes the trip point unmeasurable and un-tunable on a host whose healthy baseline is not this one's" \
+  --apply 'sed -i.bak "s@-v limit=\"\$PSI_IO_LIMIT\"@-v limit=\"999999\"@" "$F" && rm -f "$F.bak"'
+
+mutation pressure-gate-fails-closed \
+  --file scripts/usenet-blackhole.sh \
+  --bats tests/usenet-blackhole.bats \
+  --test "usenet-blackhole: no PSI on the host means the gate fails open" \
+  --why "treating an unreadable /proc/pressure/io as stalled stops the stack downloading on every host without PSI, silently, and it would take the macOS half of this suite down with it. The reading has to be invented for this mutant to be observable at all: the reader's own exit status is discarded by the gate's \`|| true\`, so \`|| return 0\` alone is an equivalent mutant -- empty stdout either way, fail-open gate either way. Returning a number that looks stalled is what makes the defect reach the behaviour the fail-open test names" \
+  --apply 'sed -i.bak "s@\[\[ -r \"\$path\" \]\] || return 1@[[ -r \"\$path\" ]] || { echo 100; return 0; }@" "$F" && rm -f "$F.bak"'
+
+mutation pressure-gate-reads-some-not-full \
+  --file scripts/usenet-blackhole.sh \
+  --bats tests/usenet-blackhole.bats \
+  --test "usenet-blackhole: a stalled host skips the pass before python runs" \
+  --why "reading PSI's \`some\` instead of \`full\` inverts the guard's purpose: \`some\` counts a single stalled task and runs high on a merely busy box, so the pass would skip on healthy hosts and the stack would silently stop downloading -- the failure mode the fail-open test exists to prevent, arriving from the other direction" \
+  --apply 'sed -i.bak "s@\$1 == \"full\"@\$1 == \"some\"@" "$F" && rm -f "$F.bak"'
+
+mutation pressure-gate-failopen-silent \
+  --file scripts/usenet-blackhole.sh \
+  --bats tests/usenet-blackhole.bats \
+  --test "usenet-blackhole: no PSI on the host means the gate fails open" \
+  --why "an unreadable PSI reading that announces nothing is indistinguishable in the pass log from a guard that ran and found the host calm. Both leave the stack unprotected on a host the operator believes is being watched -- and the unreadable case is the one that hits every macOS box and every kernel built without PSI, which is where the first version of this gate silently did nothing. The range deletes BOTH reading-announcement branches, not just the first: an empty reading is caught by the \`-z\` branch, so deleting that one alone leaves the not-a-number branch announcing the same thing and the mutant survives while looking silenced" \
+  --apply 'sed -i.bak "/elif \[\[ -z \"\$HOST_PRESSURE\" \]\]/,/so nothing can be compared against the limit/d" "$F" && rm -f "$F.bak"'
+
+mutation pressure-gate-limit-unvalidated \
+  --file scripts/usenet-blackhole.sh \
+  --bats tests/usenet-blackhole.bats \
+  --test "usenet-blackhole: a malformed PSI limit is announced and runs the pass unprotected" \
+  --why "the case block accepting every value is the same as dropping it: awk then compares the limit as a string, \"95.00\" >= \"abc\" is false, and a host with a stalled reading runs the pass while PSI_IO_LIMIT says it is bounded. The gate looks armed and the limit is the thing that was wrong, so nothing downstream notices" \
+  --apply 'sed -i.bak "s@PSI_IO_LIMIT_USABLE=false@PSI_IO_LIMIT_USABLE=true@" "$F" && rm -f "$F.bak"'
+
+mutation pressure-gate-reading-unvalidated \
+  --file scripts/usenet-blackhole.sh \
+  --bats tests/usenet-blackhole.bats \
+  --test "usenet-blackhole: a malformed PSI reading is announced and runs the pass unprotected" \
+  --why "accepting every reading is the one path in this guard that fails CLOSED. awk compares a non-numeric \`seen\` as a string and \"garbage\" >= 20 is true, so a reading that is not a measurement trips the gate, skips the pass, and quotes the garbage back as a pressure figure -- a stack that has silently stopped downloading on a host the operator has no reason to look at. A truncated read is enough to produce one, and the pass log is the only place it would show" \
+  --apply 'sed -i.bak "s@HOST_PRESSURE_USABLE=false@HOST_PRESSURE_USABLE=true@" "$F" && rm -f "$F.bak"'
+
+# --- the skip trace the status page reads ---------------------------------
+#
+# The gate exits before python, so a skipped pass writes neither of the two
+# files scripts/usenet-blackhole-status.sh renders. It appends to a third one
+# instead, and that is the only place "nothing is being polled" appears: the
+# stall clock is derived at render time, so without it a long stall paints every
+# in-flight job `stalled` under a freshly stamped `Generated` and reads as a
+# stack full of dead downloads.
+#
+# Two writers, one file, and the second is the half that is easy to leave out:
+# the file has to be cleared when a pass runs, or the page goes on saying passes
+# are being skipped on a host that recovered hours ago.
+
+mutation pressure-gate-skip-not-recorded \
+  --file scripts/usenet-blackhole.sh \
+  --bats tests/usenet-blackhole.bats \
+  --test "usenet-blackhole: a skipped pass leaves a trace the status page can read" \
+  --why "the skip is invisible without this line. The gate exits before python, so neither the state file nor the failed log is written, and usenet.lan shows a fresh timestamp over jobs whose stall clock keeps climbing -- the whole page describing a fault that is in fact the protection working" \
+  --apply 'sed -i.bak "/^  record_skipped_pass /d" "$F" && rm -f "$F.bak"'
+
+mutation pressure-gate-skip-record-outlives-the-pass \
+  --file scripts/usenet-blackhole.sh \
+  --bats tests/usenet-blackhole.bats \
+  --test "usenet-blackhole: the skip trace counts the run and clears when a pass runs" \
+  --why "a trace that is never cleared turns the page into a permanent claim that the last pass was skipped. The run length also stops meaning anything: it becomes the number of skips since the file was created rather than the current run, on a host that may have been passing normally for days" \
+  --apply 'sed -i.bak "/^rm -f \"\$SKIP_PATH\"/d" "$F" && rm -f "$F.bak"'
+
+mutation status-drop-the-skip-notice \
+  --file scripts/lib/usenet_status.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "the shell half records the skip and the renderer half has to show it; a page that reads the file and prints nothing is the same page as before the fix -- twelve jobs painted \`stalled\` with a fresh \`Generated\` timestamp and no reason anywhere. The JSON keeps the record either way, so only a renderer test notices" \
+  --apply 'sed -i.bak "s@^    if not isinstance(skipped, dict):\$@    if True:@" "$F" && rm -f "$F.bak"'

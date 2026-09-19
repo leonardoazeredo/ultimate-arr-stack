@@ -39,7 +39,7 @@ mutation duc-initial-scan-failure-is-fatal \
   --bats tests/duc-service.bats \
   --test "duc: a failed initial scan does not stop the container coming up" \
   --why "lets a failing initial index kill startup under set -e. The web UI and the crontab both matter more than the first scan: this turns one bad index into a container that never serves anything again, and restart: always makes it a crash loop" \
-  --apply 'sed -i "s@^    \"\$SCAN_SH\" || echo \"Initial scan failed (exit \$?)\" | tee -a \"\$LOG_FILE\"\$@    \"\$SCAN_SH\"@" "$F"'
+  --apply 'sed -i "s@^        \"\$SCAN_SH\" || echo \"Initial scan failed (exit \$?)\" | tee -a \"\$LOG_FILE\"\$@    \"\$SCAN_SH\"@" "$F"'
 
 mutation duc-scan-failure-loses-the-log-line \
   --file duc-service/app/scan.sh \
@@ -143,3 +143,103 @@ mutation duc-webserver-socket-wait-inverted \
   --test "duc: start_webserver returns as soon as the socket is up" \
   --why "inverts the wait for the fcgiwrap socket, which is severe in both directions. With the socket up the loop spins instead of returning, so the chmod and nginx are never reached and the container serves no web UI at all; with it absent the loop is skipped, the chmod finds no socket, and errexit kills the function before nginx - the same dead UI, arrived at from the other side" \
   --apply 'perl -pi -e '"'"'s{while ! \[ -S "\$FCGI_SOCKET" \]}{while [ -S "\$FCGI_SOCKET" ]}'"'"' "$F"'
+
+# --- duc startup.sh: the start-up scan ------------------------------------
+#
+# The five below pin the decision that keeps `restart: always` from re-walking
+# all of /volume1 on every restart. The last two are the ones that matter most:
+# every other entry here calls startup_scan_needed directly, so without them
+# deleting or inverting the branch in main() restores the 2026-09-18 defect with
+# the whole suite still green.
+#
+# All five apply with `sed -i.bak … && rm -f "$F.bak"`: a bare `sed -i` on this
+# macOS host reads the script as the -i suffix and edits nothing, which the
+# runner scores as "changed NOTHING" rather than as a pass - see
+# tests/mutation/README.md.
+
+mutation duc-index-missing-treated-fresh \
+  --file duc-service/app/startup.sh \
+  --bats tests/duc-service.bats \
+  --test "duc: startup scans when there is no index yet" \
+  --why "treating a missing index as fresh is the first-run defect: a container started against an empty volume never builds an index, every page of the UI is empty, and nothing in the log says why" \
+  --apply 'sed -i.bak "s@\[\[ -f \"\$INDEX_DB\" \]\] || return 0@[[ -f \"\$INDEX_DB\" ]] || return 1@" "$F" && rm -f "$F.bak"'
+
+mutation duc-staleness-compared-backwards \
+  --file duc-service/app/startup.sh \
+  --bats tests/duc-service.bats \
+  --test "duc: startup scans again once the index is older than the window" \
+  --why "comparing the age the wrong way round skips the scan on a stale index and runs it on a fresh one -- the guard exactly backwards; it also fails the fresh-index test, so both directions of the decision are pinned" \
+  --apply 'sed -i.bak "s@-mmin -\"\$age_minutes\"@-mmin +\"\$age_minutes\"@" "$F" && rm -f "$F.bak"'
+
+mutation duc-freshness-window-hardcoded \
+  --file duc-service/app/startup.sh \
+  --bats tests/duc-service.bats \
+  --test "duc: the freshness window comes from the environment, not a literal" \
+  --why "hardcoding the window makes the seam inert, so the number cannot be tuned on a host whose cron cadence differs and the test above silently stops testing anything" \
+  --apply 'sed -i.bak "s@age_minutes=\$(( STARTUP_SCAN_MAX_AGE_HOURS \* 60 ))@age_minutes=1200@" "$F" && rm -f "$F.bak"'
+
+mutation duc-startup-branch-removed \
+  --file duc-service/app/startup.sh \
+  --bats tests/duc-service.bats \
+  --test "duc: main\(\) branches on the start-up scan decision" \
+  --why "deleting the branch restores the unconditional start-up scan, which with restart: always is the defect of 2026-09-18 -- and no behavioural test notices, because they all call the decision function directly" \
+  --apply 'sed -i.bak "s@if startup_scan_needed; then@if true; then@" "$F" && rm -f "$F.bak"'
+
+mutation duc-startup-branch-inverted \
+  --file duc-service/app/startup.sh \
+  --bats tests/duc-service.bats \
+  --test "duc: main\(\) branches on the start-up scan decision" \
+  --why "inverting the branch scans only when the index is fresh and never when it is stale -- the opposite of the intent, reached by a one-character edit" \
+  --apply 'sed -i.bak "s@if startup_scan_needed; then@if ! startup_scan_needed; then@" "$F" && rm -f "$F.bak"'
+
+# --- startup.sh: the same host-pressure input the pass gate uses ------------
+#
+# Index age alone is not enough to decide this. The cron is `0 4 * * *`, so the
+# index is stamped at ~04:07 and from ~00:07 to 04:00 it is older than the
+# 20-hour window -- a restart in that band re-walks 2.9 Tb, in the same window
+# scripts/usenet-blackhole.sh is refusing to start a pass because the host is
+# jammed. Two guards reading one stalled host and disagreeing about it is the
+# feedback loop of 2026-09-18, one `restart: always` away from turning again.
+#
+# The fail-open direction is the quieter of the two and the reason the numeric
+# checks exist at all: awk compares a non-numeric operand as a string, so a
+# garbage reading is TRUE against a numeric limit -- the guard trips on nothing
+# and skips the scan.
+
+mutation duc-pressure-gate-removed \
+  --file duc-service/app/startup.sh \
+  --bats tests/duc-service.bats \
+  --test "duc: startup skips the scan while the host is I/O-stalled" \
+  --why "deleting the veto restores the disagreement this closes: the indexer walks the whole volume precisely while the ingest pass is being skipped for the same host condition, which is the loop docs/NAS-LOAD-INCIDENT-2026-09-18.md describes -- and the age decision it falls back to says 'scan' for four hours of every day" \
+  --apply 'sed -i.bak "s@if host_io_stalled; then@if false; then@" "$F" && rm -f "$F.bak"'
+
+mutation duc-pressure-threshold-inverted \
+  --file duc-service/app/startup.sh \
+  --bats tests/duc-service.bats \
+  --test "duc: the pressure gate is the only thing that changes when it crosses the limit" \
+  --why "inverting the comparison makes a healthy host read as stalled, so every start-up scan is skipped on a box reading 1.9% -- the index then goes stale by however long the container runs, with the cron inside it the only thing left keeping the page current. The boundary test is what notices, one hundredth either side of the limit" \
+  --apply 'sed -i.bak "s@exit !(seen >= limit)@exit !(seen < limit)@" "$F" && rm -f "$F.bak"'
+
+mutation duc-pressure-fails-closed \
+  --file duc-service/app/startup.sh \
+  --bats tests/duc-service.bats \
+  --test "duc: no readable pressure reading leaves the scan to the index age" \
+  --why "treating a reading this cannot judge as a stalled host is the guard failing CLOSED. /proc/pressure/io does not exist on macOS or on any kernel built without PSI, so this is not a rare input -- and the failure is silent in the direction that matters: a container on such a host comes up, serves an empty UI, and never builds the index it would need to fill it" \
+  --apply 'sed -i.bak "s@\[\[ -n \"\$reading\" \]\] || return 1@[[ -n \"\$reading\" ]] || return 0@" "$F" && rm -f "$F.bak"'
+
+# --- startup.sh: the index path, and the file duc actually reads ------------
+#
+# startup.sh decides from $INDEX_DB whether to skip the start-up scan; `duc`
+# itself writes wherever ducrc's `database` line says, which the image installs
+# as /etc/ducrc (duc-service/Dockerfile). Nothing else in the suite compares
+# them: tests/duc-service.bats pins DUC_INDEX_DB, so the default is exercised
+# nowhere else. Drift there is invisible in the worst way -- `[[ -f "$INDEX_DB" ]]`
+# is false forever and the guard quietly goes back to scanning on every restart,
+# with all 39 tests green.
+
+mutation duc-index-default-drifts-from-ducrc \
+  --file duc-service/app/startup.sh \
+  --bats tests/duc-service.bats \
+  --test "duc: the index the guard defaults to is the one duc actually writes" \
+  --why "a default index path that is not the one duc writes makes the freshness check permanently false, so every restart re-walks 2.9 Tb / 842.4K files and the guard reads as if it were working the whole time. The two values live in different files and neither one is checked against the other anywhere else in this suite" \
+  --apply 'sed -i.bak "/^INDEX_DB=/ s@/database/duc.db@/var/lib/duc.db@" "$F" && rm -f "$F.bak"'

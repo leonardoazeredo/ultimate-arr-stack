@@ -312,6 +312,7 @@ before the arr notices. A pass with nothing in flight is a handful of API calls.
 | `logs/usenet-blackhole.log` | what each pass did |
 | `logs/usenet-blackhole-failed.log` | releases TorBox failed, that stalled past `--stall-hours`, or that passed `--timeout-hours` |
 | `logs/usenet-blackhole-state.json` | what is in flight. **Do not delete it** |
+| `logs/usenet-blackhole-skipped.log` | one line per pass the I/O pressure gate refused to start. Its presence means the last pass was skipped, and the status page reads its line count as "N in a row" |
 
 Staging is deliberately a sibling of the watch folder and not a `.incoming-`
 directory inside it. Sonarr does not skip dot-directories when scanning a watch

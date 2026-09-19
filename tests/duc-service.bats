@@ -26,6 +26,25 @@ setup() {
     mkdir -p "$WORK"
 
     export DUC_LOG_FILE="$WORK/duc.log"
+    # Pinned here, not only in the tests that read it: main() now decides
+    # whether to run its initial scan by looking at the index, and the image's
+    # default is /database/duc.db - a real file on the NAS, and on any host that
+    # has run the container. Unpinned, the two main() tests below would read
+    # that host state instead of the throwaway tree: a fresh index there skips
+    # the initial scan they assert on, and the whole file goes red for a reason
+    # nothing in it mentions. The path does not exist unless a test creates it,
+    # which keeps main() on the no-index branch those two tests were written for.
+    export DUC_INDEX_DB="$WORK/duc.db"
+    # And the pressure reading startup_scan_needed now consults before it will
+    # scan, for the same reason the line above is pinned: /proc/pressure/io is
+    # real on Linux -- CI is ubuntu-latest, and so is pi1 -- and a host whose io
+    # full avg10 happened to sit at or above the limit would skip the scan the
+    # two main() tests below assert on, leaving the whole file red for a reason
+    # nothing in it mentions. The pressure tests further down override this
+    # through the environment, which wins over the exported value.
+    export DUC_PSI_IO_PATH="$WORK/pressure-io"
+    export DUC_PSI_IO_LIMIT=20
+    psi_fixture 1.90 > /dev/null
     export DUC_LOCK_DIR="$WORK/scan.lock"
     export DUC_REQUEST_DIR="$WORK/scan_requested"
     export DUC_SCAN_ROOT="$WORK/scan"
@@ -454,4 +473,161 @@ run_main() {
     assert_failure
     assert_output --partial "Creating cron schedule: 0 4 * * *"
     refute_output --partial "webserver started"
+}
+
+# --- startup.sh: the start-up scan -----------------------------------------
+
+@test "duc: startup scans when there is no index yet" {
+    export DUC_INDEX_DB="$WORK/duc.db"
+    rm -f "$DUC_INDEX_DB"
+    startup startup_scan_needed
+    assert_success
+}
+
+@test "duc: startup skips the scan when the index is fresh" {
+    # The incident case: restart: always brought duc up at 23:07 on 2026-09-18
+    # while the NAS was already I/O-starved, and it walked 842.4K files again
+    # for nothing. The daily cron is what keeps the index current.
+    export DUC_INDEX_DB="$WORK/duc.db"
+    : > "$DUC_INDEX_DB"
+    startup startup_scan_needed
+    assert_failure
+}
+
+@test "duc: startup scans again once the index is older than the window" {
+    export DUC_INDEX_DB="$WORK/duc.db"
+    : > "$DUC_INDEX_DB"
+    touch -t 202001010000 "$DUC_INDEX_DB"
+    startup startup_scan_needed
+    assert_success
+}
+
+@test "duc: the freshness window comes from the environment, not a literal" {
+    export DUC_INDEX_DB="$WORK/duc.db"
+    : > "$DUC_INDEX_DB"
+    touch -t 202001010000 "$DUC_INDEX_DB"
+    export DUC_STARTUP_SCAN_MAX_AGE_HOURS=999999
+    startup startup_scan_needed
+    assert_failure
+}
+
+@test "duc: main() branches on the start-up scan decision" {
+    # The four tests above prove the decision is right; this one proves it is
+    # WIRED. Without it, deleting the branch in main() restores the
+    # scan-on-every-restart defect of 2026-09-18 and every other test stays
+    # green, because they call startup_scan_needed directly. `declare -f` rather
+    # than running main(): the BASH_SOURCE guard at the bottom of startup.sh
+    # means sourcing defines main without executing it, and main() blocks on
+    # start_webserver anyway.
+    run bash -c 'source "$1"; declare -f main' _ "$APP/startup.sh"
+    assert_success
+    assert_output --partial 'if startup_scan_needed; then'
+}
+
+# --- startup.sh: the host I/O pressure reading ------------------------------
+#
+# The index age alone is not enough to decide this. The cron is `0 4 * * *`, so
+# the index is written at ~04:07 and from ~00:07 to 04:00 it is older than the
+# 20-hour window -- a restart in that band re-walks 2.9 Tb. That is the same
+# band in which scripts/usenet-blackhole.sh is refusing to start a pass because
+# the host is jammed, and two guards disagreeing about one stalled host is the
+# loop the incident of 2026-09-18 turned on.
+
+# A fixture standing in for /proc/pressure/io, in the shape the kernel writes.
+# `some` is pinned low and deliberately differs from `full`: `some` counts a
+# single stalled task and runs high on a merely busy box, so carrying the same
+# number on both lines would make these tests blind to which one is read.
+psi_fixture() {
+    printf 'some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=%s avg60=0.00 avg300=0.00 total=0\n' \
+        "$1" > "$WORK/pressure-io"
+    echo "$WORK/pressure-io"
+}
+
+# A stale index, which is what makes this decision the only thing under test:
+# age alone says "scan", so anything that comes back skipped came from PSI.
+stale_index() {
+    : > "$DUC_INDEX_DB"
+    touch -t 202001010000 "$DUC_INDEX_DB"
+}
+
+@test "duc: startup skips the scan while the host is I/O-stalled" {
+    # The disagreement this closes. Without it the indexer walks the volume in
+    # the same window the ingest pass is being skipped for, which is the
+    # 2026-09-18 feedback loop one `restart: always` away from turning again.
+    stale_index
+    export DUC_PSI_IO_PATH="$(psi_fixture 95.00)"
+    startup startup_scan_needed
+    assert_failure
+    assert_output --partial "Host I/O is stalled"
+}
+
+@test "duc: the pressure gate is the only thing that changes when it crosses the limit" {
+    # Same stale index, same fixture, one hundredth apart. Without this, a gate
+    # that always skipped -- or never did -- would pass the tests either side of
+    # it.
+    local pair value expect
+    stale_index
+    for pair in "19.99:scan" "20.00:skip"; do
+        value="${pair%%:*}"
+        expect="${pair##*:}"
+        export DUC_PSI_IO_PATH="$(psi_fixture "$value")"
+        startup startup_scan_needed
+        if [[ "$expect" == "scan" ]]; then
+            [ "$status" -eq 0 ] || fail "avg10=$value should have run the scan: $output"
+        else
+            [ "$status" -ne 0 ] || fail "avg10=$value should have skipped the scan"
+        fi
+    done
+}
+
+@test "duc: no readable pressure reading leaves the scan to the index age" {
+    # macOS has no /proc/pressure/io and neither does a kernel built without
+    # PSI. A gate that blocked there would leave every duc container on such a
+    # host with no index and no way to build one -- and it would do it silently,
+    # which is the failure mode this repo keeps being bitten by.
+    stale_index
+    export DUC_PSI_IO_PATH="$WORK/does-not-exist"
+    startup startup_scan_needed
+    assert_success
+    assert_output --partial "deciding on index age alone"
+}
+
+@test "duc: a pressure reading that is not a number is announced, not obeyed" {
+    # awk compares a non-numeric operand as a string, and "garbage" >= 20 is
+    # true -- so without the numeric check a garbled or truncated reading would
+    # skip the scan and quote the garbage back as a reason. Same contract as the
+    # unreadable case: announced, then the index age decides.
+    stale_index
+    export DUC_PSI_IO_PATH="$(psi_fixture garbage)"
+    startup startup_scan_needed
+    assert_success
+    assert_output --partial "is not a number"
+}
+
+@test "duc: a pressure limit that is not a number leaves the scan to the index age" {
+    # The other direction of the same string comparison: "95.00" >= "abc" is
+    # false, so a malformed limit means the gate silently never trips while the
+    # host looks watched.
+    stale_index
+    export DUC_PSI_IO_PATH="$(psi_fixture 95.00)"
+    export DUC_PSI_IO_LIMIT=abc
+    startup startup_scan_needed
+    assert_success
+    assert_output --partial "deciding on index age alone"
+}
+
+@test "duc: the index the guard defaults to is the one duc actually writes" {
+    # INDEX_DB decides whether a start-up scan is skipped; ducrc is what `duc`
+    # itself reads, via /etc/ducrc in the image (duc-service/Dockerfile). If the
+    # two ever drift, `[[ -f "$INDEX_DB" ]]` is false forever, the guard
+    # silently reverts to scanning the whole volume on every restart, and every
+    # other test in this file stays green -- they all pin DUC_INDEX_DB, so the
+    # default is exercised nowhere else.
+    local default_path ducrc_path
+    default_path="$(env -u DUC_INDEX_DB bash -c 'source "$1"; printf "%s" "$INDEX_DB"' \
+        _ "$APP/startup.sh")"
+    ducrc_path="$(awk '$1 == "database" { print $2; exit }' "$APP/ducrc")"
+    [ -n "$ducrc_path" ] || fail "ducrc has no database line to compare against"
+    [ "$default_path" = "$ducrc_path" ] \
+        || fail "startup.sh defaults INDEX_DB to '$default_path' but duc writes '$ducrc_path'"
 }

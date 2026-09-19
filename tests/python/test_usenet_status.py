@@ -385,6 +385,135 @@ def test_a_failure_entry_that_is_not_an_object_is_dropped():
     assert summary["failures"] == [{"name": "r"}]
 
 
+# --- the pressure gate's skip record ----------------------------------------
+#
+# The gate exits before python, so a skipped pass writes neither the state file
+# nor the failed log -- the only two files this page otherwise renders. It
+# leaves one line per skipped pass in a third file instead, and the page has to
+# surface it: the stall clock is derived at render time, so a long stall paints
+# every in-flight job `stalled` under a fresh `Generated` timestamp with the
+# actual reason appearing nowhere.
+
+
+def test_a_missing_skip_log_is_no_record(tmp_path):
+    # The ordinary case. A file is only ever written when the gate refuses to
+    # start a pass, so no file means the last pass ran.
+    assert m.load_skips(str(tmp_path / "nope.log")) is None
+
+
+def test_a_skip_line_carries_the_time_the_reading_and_the_limit(tmp_path):
+    path = tmp_path / "skipped.log"
+    path.write_text("2026-09-19T04:07:00Z\t95.00\t20\n")
+    assert m.load_skips(str(path)) == {
+        "passes": 1,
+        "at": "2026-09-19T04:07:00Z",
+        "avg10": "95.00",
+        "limit": "20",
+    }
+
+
+def test_the_skip_record_counts_the_run_and_reads_the_last_line(tmp_path):
+    # "N in a row" is the line count, and the reading worth showing is the most
+    # recent one -- the run is what makes the page's claim true.
+    path = tmp_path / "skipped.log"
+    path.write_text("".join(
+        f"2026-09-19T0{i}:00:00Z\t{80 + i}.00\t20\n" for i in range(1, 4)
+    ))
+    record = m.load_skips(str(path))
+    assert record["passes"] == 3
+    assert record["avg10"] == "83.00"
+
+
+def test_a_skip_file_with_nothing_readable_still_reports_passes_were_skipped(tmp_path):
+    # The gate only writes this file when it refuses to start a pass, so a
+    # record that cannot be parsed is still evidence that passes are being
+    # skipped. Returning None here would describe a healthy stack during exactly
+    # the stall this exists to make visible.
+    path = tmp_path / "skipped.log"
+    path.write_text("something went wrong and there are no tabs\n")
+    record = m.load_skips(str(path))
+    assert record["passes"] == 1
+    assert record["avg10"] is None and record["limit"] is None
+
+
+def test_a_skip_file_holding_only_blank_lines_is_no_record(tmp_path):
+    path = tmp_path / "skipped.log"
+    path.write_text("\n   \n")
+    assert m.load_skips(str(path)) is None
+
+
+def test_an_undecodable_skip_log_is_no_record(tmp_path):
+    path = tmp_path / "skipped.log"
+    path.write_bytes(b"\xff\xfe\x00 not utf-8 at all\n")
+    assert m.load_skips(str(path)) is None
+
+
+def test_the_skip_record_rides_in_the_same_structure_the_jobs_do():
+    record = {"passes": 2, "at": "2026-09-19T04:07:00Z", "avg10": "95.00", "limit": "20"}
+    summary = m.summarize({"jobs": {}}, NOW, skipped=record)
+    assert summary["skipped"] == record
+    assert json.loads(m.render_json(summary))["skipped"] == record
+
+
+def test_a_record_with_no_usable_count_is_dropped_rather_than_rendered():
+    # `passes` is the one field that says a pass was skipped at all, so a
+    # renderer handed a garbage one has nothing honest to say.
+    for garbage in ("nonsense", {"passes": 0}, {"passes": True},
+                    {"passes": "twelve"}, {"passes": None}, None, 7, []):
+        assert m._skip_record(garbage) is None
+        assert m.summarize({"jobs": {}}, NOW, skipped=garbage)["skipped"] is None
+
+
+def test_the_page_says_the_last_pass_was_skipped_rather_than_implying_a_fault():
+    summary = m.summarize(
+        state_with({"k": a_job(progress_changed_at=at(9))}),
+        NOW,
+        skipped={"passes": 12, "at": "2026-09-19T04:07:00Z",
+                 "avg10": "95.00", "limit": "20"},
+    )
+    page = m.render_html(summary)
+    assert "Last pass skipped" in page
+    assert "95.00" in page and "20" in page
+    assert "12 in a row" in page
+    assert "2026-09-19T04:07:00Z" in page
+    # The row is still stalled -- nothing has polled it in nine hours -- and the
+    # notice is what says that is not on its own evidence of a fault.
+    assert 'class="s-stalled"' in page
+
+
+def test_the_page_says_nothing_about_skips_when_the_last_pass_ran():
+    page = m.render_html(m.summarize(state_with({"k": a_job()}), NOW))
+    assert "Last pass skipped" not in page
+    assert 'class="notice"' not in page
+
+
+def test_a_hand_edited_skip_record_is_escaped_like_everything_else():
+    summary = m.summarize(
+        {"jobs": {}}, NOW,
+        skipped={"passes": 1, "at": "2026-09-19T04:07:00Z",
+                 "avg10": "<script>alert(1)</script>", "limit": "20"},
+    )
+    page = m.render_html(summary)
+    assert "<script>alert(1)</script>" not in page
+    assert "&lt;script&gt;" in page
+
+
+def test_main_reads_the_skip_log_it_is_given(tmp_path, capsys):
+    skip = tmp_path / "skipped.log"
+    skip.write_text("2026-09-19T04:07:00Z\t95.00\t20\n")
+    assert m.main(["usenet_status.py", "json", str(tmp_path / "nope.json"),
+                   str(tmp_path / "nope.log"), str(skip)]) == 0
+    loaded = json.loads(capsys.readouterr().out)
+    assert loaded["skipped"]["passes"] == 1
+    assert loaded["sources"]["skipped_log"] == str(skip)
+
+
+def test_main_reads_no_skip_log_as_no_record(tmp_path, capsys):
+    assert m.main(["usenet_status.py", "json", str(tmp_path / "nope.json"),
+                   str(tmp_path / "nope.log"), str(tmp_path / "nope-skip.log")]) == 0
+    assert json.loads(capsys.readouterr().out)["skipped"] is None
+
+
 # --- HTML escaping ----------------------------------------------------------
 
 
@@ -478,12 +607,14 @@ def test_the_json_keys_are_sorted_so_two_runs_diff_cleanly():
     text = m.render_json(m.summarize(state_with({"k": a_job()}), NOW))
     assert text == json.dumps(json.loads(text), indent=2, sort_keys=True) + "\n"
     assert text.index('"failures"') < text.index('"generated_at"') \
-        < text.index('"jobs"') < text.index('"stall_hours"') < text.index('"totals"')
+        < text.index('"jobs"') < text.index('"skipped"') \
+        < text.index('"stall_hours"') < text.index('"totals"')
 
 
 def test_the_json_shape_is_the_documented_one():
     loaded = json.loads(m.render_json(m.summarize(state_with({"k": a_job()}), NOW)))
-    assert set(loaded) == {"generated_at", "stall_hours", "totals", "jobs", "failures"}
+    assert set(loaded) == {"generated_at", "stall_hours", "totals", "jobs",
+                           "failures", "skipped"}
     assert set(loaded["totals"]) == {"jobs", "in_flight", "complete", "stalled",
                                      "failed", "unknown"}
     assert set(loaded["jobs"][0]) == {
@@ -660,8 +791,11 @@ def test_main_still_stalls_that_job_without_the_flag(tmp_path, capsys):
 
 def test_the_positional_order_survives_the_flag_in_front(tmp_path, capsys):
     # `usenet_status.py <format> [state-path] [failed-log-path]` is the contract
-    # the wrapper and a hand-run rely on. The flag is pulled out of argv wherever
-    # it appears, so it must not become a positional itself.
+    # the wrapper and a hand-run rely on, with the skip path appended after it.
+    # The flag is pulled out of argv wherever it appears, so it must not become a
+    # positional itself -- and a three-argument call must keep naming exactly the
+    # files it was given, with the skip path falling back to its default rather
+    # than shifting one of them along.
     path = tmp_path / "state.json"
     path.write_text(json.dumps(state_with({"k": a_job()})))
     log = tmp_path / "failed.log"
@@ -670,7 +804,11 @@ def test_the_positional_order_survives_the_flag_in_front(tmp_path, capsys):
     assert m.main(["usenet_status.py", "--stall-hours=6", "json", str(path),
                    str(log)]) == 0
     view = json.loads(capsys.readouterr().out)
-    assert view["sources"] == {"state": str(path), "failed_log": str(log)}
+    assert view["sources"] == {
+        "state": str(path),
+        "failed_log": str(log),
+        "skipped_log": m.DEFAULT_SKIP_LOG,
+    }
     assert view["failures"][0]["name"] == "some.release"
 
 

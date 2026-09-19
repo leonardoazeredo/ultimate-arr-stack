@@ -33,13 +33,13 @@ set -euo pipefail
 # bounded by --timeout-hours, which stays the outer limit for genuinely large
 # downloads; a record with no progress field at all falls back to that bound.
 #
-# --max-inflight (default 0, off) stops submitting for the pass once that many
-# jobs are in flight, below TorBox's own ten. Measured over the retained window:
-# nine of the ten slots were held by jobs 3-21h old while only 4 of 50
-# submissions were ever fetched, so the question is whether fewer concurrent
-# jobs complete more of themselves. Measure the fetch rate at 6 against 10
-# before keeping a value -- a ceiling set too low trades wasted slots for idle
-# ones. Reaching it costs no TorBox call: the check runs before the upload.
+# --max-inflight (default 0 here, 6 in the shipped unit) stops submitting for the
+# pass once that many jobs are in flight, below TorBox's own ten. 0 is only what
+# this flag does when nothing passes one: scripts/usenet-blackhole.service runs
+# the pass with --max-inflight 6, so the stack does not run uncapped. 6 sits
+# below the ten rather than at a measured optimum -- the fetch-rate comparison at
+# 6 against 10 has not been run. Reaching the ceiling costs no TorBox call: the
+# check runs before the upload.
 #
 # Scheduled by usenet-blackhole.timer, every 2 minutes. Running it by hand is
 # how you see what it would do first.
@@ -88,6 +88,20 @@ FAILED_LOG="$NAS_STACK_DIR/logs/usenet-blackhole-failed.log"
 LOG_FILE="$NAS_STACK_DIR/logs/usenet-blackhole.log"
 MAX_LOG_LINES=1000
 
+# What the pressure gate below leaves behind when it refuses to start a pass.
+#
+# A sidecar rather than a field in the state file: that file is the Python
+# half's, written on a resume contract, and a second writer on it is a coupling
+# trap -- the gate would have to read-modify-write around a process it does not
+# control, on the one file whose loss costs in-flight jobs.
+#
+# One line per skipped pass, appended while the host reads as stalled and
+# REMOVED the moment a pass is allowed through. So the line count is the current
+# run of skipped passes, and the file's absence means the last pass ran.
+# scripts/lib/usenet_status.py renders it; scripts/usenet-blackhole-status.sh
+# passes the path along.
+SKIP_PATH="${USENET_SKIP_PATH:-$NAS_STACK_DIR/logs/usenet-blackhole-skipped.log}"
+
 # A job that never completes is invisible to a blackhole client -- the arr sees
 # only what appears in the watch folder -- so this bound is what turns a stuck
 # release into a log line someone can act on.
@@ -101,12 +115,48 @@ DEFAULT_TIMEOUT_HOURS=24
 DEFAULT_STALL_HOURS=4
 
 # The operator's ceiling on jobs in flight, below the ten concurrent slots
-# TorBox itself allows. Off by default, because the only ceiling measured so far
-# is the provider's: nine of its ten slots were held by jobs 3-21h old while 4
-# of 50 submissions were ever fetched, and whether a lower ceiling completes
-# more of them is the measurement this exists to make. Off is what ships; a
-# value is kept only after the fetch rate at 6 and at 10 have been compared.
+# TorBox itself allows. 0 here is a rollout state, not the stack's resting state:
+# scripts/usenet-blackhole.service passes --max-inflight 6, and that unit is what
+# the timer runs. Do not read this default as "the stack is uncapped" -- it was
+# read that way once, in docs/TORBOX-API.md, against a unit that had already been
+# capped.
+#
+# 6 is a limit chosen to sit below the provider's, not a measured optimum. The
+# evidence for wanting a ceiling is that nine of the ten slots were held by jobs
+# 3-21h old while 4 of 50 submissions were ever fetched, and that an uncapped
+# pass submitted 46 jobs in one hour on 2026-09-18 while 60 sat incomplete.
+# Neither says six is the right number: the fetch rate at 6 against 10 has not
+# been compared.
 DEFAULT_MAX_INFLIGHT=0
+
+# io full avg10 at or above which a pass refuses to start. The reading and the
+# reason for `full` over `some` are at the gate below; the number is 20 because
+# the healthy baseline measured on this NAS is 1.9% and the incident of
+# 2026-09-18 sat between 78% and 81% for hours, so 20% is high enough that an
+# ordinary import or a transcoding sweep never reaches it and low enough to fire
+# long before the box is wedged. Read from the environment so a host whose
+# baseline differs can be tuned without editing the script.
+PSI_IO_LIMIT="${PSI_IO_LIMIT:-20}"
+
+# io full avg10 from /proc/pressure/io, or nothing when PSI is unavailable.
+#
+# `full` rather than `some`: `some` counts a single stalled task, which is
+# ordinary on a busy box, while `full` means every runnable task was stalled on
+# I/O at once. Measured on this NAS: 1.9% healthy, 78-81% during the incident of
+# 2026-09-18.
+#
+# PSI_IO_PATH exists so a test can point this at a fixture; the real file is
+# Linux-only and the suite also runs on macOS.
+psi_io_full_avg10() {
+  local path="${PSI_IO_PATH:-/proc/pressure/io}"
+  [[ -r "$path" ]] || return 1
+  awk '$1 == "full" {
+         for (i = 2; i <= NF; i++) {
+           split($i, kv, "=")
+           if (kv[1] == "avg10") { print kv[2]; exit }
+         }
+       }' "$path"
+}
 
 APPLY=false
 VERBOSE=false
@@ -222,6 +272,20 @@ MAX_INFLIGHT=$((10#$MAX_INFLIGHT))
 
 log() { echo "[usenet-blackhole] $1"; }
 
+# One line per pass the pressure gate refuses to start: when, at what reading,
+# against which limit. Appended by the gate and deleted by it as soon as a pass
+# is allowed through.
+#
+# This is the only place the reason a pass is not running can appear. The status
+# page renders the state file and the failed log, and a skipped pass writes to
+# neither -- so without this the page shows jobs ageing under a fresh timestamp
+# and says nothing about why nothing is being polled. `|| true` because a
+# download pass must not fail over a line of bookkeeping.
+record_skipped_pass() {
+  printf '%s\t%s\t%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$1" "$PSI_IO_LIMIT" \
+    >> "$SKIP_PATH" 2>/dev/null || true
+}
+
 echo ""
 echo "========================================"
 echo "Usenet Blackhole — $(date '+%Y-%m-%d %H:%M:%S')"
@@ -301,6 +365,75 @@ if $REPORT_DRY_RUN; then PY_ARGS+=(--report-dry-run); fi
 # ${PY_ARGS[@]+"${PY_ARGS[@]}"} rather than a bare expansion: with `set -u`, an
 # empty array is an unbound variable in bash before 4.4, and /bin/bash on macOS
 # is 3.2.
+
+# --- host I/O pressure gate -------------------------------------------------
+#
+# A pass writes to the same pool the rest of the stack reads from, so a pass
+# that starts while the host is already stalled is the one thing that cannot
+# help: it lengthens the stall it is competing with. On 2026-09-18 this NAS sat
+# at load 58 with io full avg10 between 78% and 81% for hours; every container
+# accepted a TCP connection and answered nothing.
+#
+# A skipped pass leaves a trace in two places, and it has to: the pass log, which
+# the unit redirects to logs/usenet-blackhole.log, and the sidecar above, which
+# is the only one of the two usenet.lan reads. The status page renders the state
+# file and the failed log, and a skipped pass writes to neither -- so without
+# the sidecar the page shows jobs ageing under a freshly stamped `Generated`
+# with nothing anywhere saying that no pass has run to poll them.
+#
+# Fails OPEN, and says so out loud. Four states leave this guard inert: a
+# kernel built without PSI (or a container that cannot read /proc/pressure), an
+# unreadable PSI file, a PSI_IO_LIMIT that is not a number, and a reading that
+# is not a number. The last two are awk's string comparison in opposite
+# directions -- "95.00" >= "abc" is false, so a malformed limit never trips the
+# gate, while "garbage" >= 20 is true, so a malformed reading trips it and
+# quotes the garbage back as a pressure figure. That second one was the only
+# path in this guard that failed CLOSED, and it is the one a truncated read
+# produces. Each is announced, because "the guard ran and found nothing" and
+# "the guard could not run" must not be the same observable result -- and then
+# the pass runs anyway, because a guard that cannot read its own input must not
+# be the thing that stops the stack downloading.
+#
+# The case pattern is the script's existing numeric idiom, the same one
+# --timeout-hours and --stall-hours refuse with; a second style of number check
+# here would be one more thing to keep in step.
+PSI_IO_LIMIT_USABLE=true
+case "$PSI_IO_LIMIT" in
+  ''|*[!0-9.]*|*.*.*) PSI_IO_LIMIT_USABLE=false ;;
+  *) PSI_IO_LIMIT_USABLE=true ;;
+esac
+
+HOST_PRESSURE="$(psi_io_full_avg10 || true)"
+HOST_PRESSURE_USABLE=true
+case "$HOST_PRESSURE" in
+  ''|*[!0-9.]*|*.*.*) HOST_PRESSURE_USABLE=false ;;
+  *) HOST_PRESSURE_USABLE=true ;;
+esac
+
+if [[ "$PSI_IO_LIMIT_USABLE" != "true" ]]; then
+  echo "[pressure-gate] PSI_IO_LIMIT='${PSI_IO_LIMIT}' is not a number, so nothing can be bounded; this pass runs unprotected"
+elif [[ -z "$HOST_PRESSURE" ]]; then
+  echo "[pressure-gate] no readable I/O pressure reading at ${PSI_IO_PATH:-/proc/pressure/io}; this pass runs unprotected"
+elif [[ "$HOST_PRESSURE_USABLE" != "true" ]]; then
+  echo "[pressure-gate] the I/O pressure reading '${HOST_PRESSURE}' is not a number, so nothing can be compared against the limit; this pass runs unprotected"
+elif awk -v seen="$HOST_PRESSURE" -v limit="$PSI_IO_LIMIT" \
+     'BEGIN { exit !(seen >= limit) }'; then
+  record_skipped_pass "$HOST_PRESSURE"
+  echo "[pressure-gate] host I/O is stalled (io full avg10=${HOST_PRESSURE}%, limit ${PSI_IO_LIMIT}%); skipping this pass"
+  exit 0
+fi
+
+# A pass is about to run, so whatever run of skipped passes was recorded is
+# over. Removing the file rather than truncating it keeps one answer for "the
+# last pass ran": no file at all, which is also the ordinary state of a stack
+# that has never skipped one.
+#
+# `|| true`, the same rule record_skipped_pass follows: this is bookkeeping, and
+# a download pass must not fail over it. Under `set -e` an unguarded rm that
+# could not unlink -- a directory parked at that path, a partially unmounted
+# pool -- would take the whole pass down and say nothing about why.
+rm -f "$SKIP_PATH" || true
+
 if ! TORBOX_API_KEY="$TORBOX_KEY" \
         SONARR_API_KEY="$SONARR_KEY" \
         RADARR_API_KEY="$RADARR_KEY" \

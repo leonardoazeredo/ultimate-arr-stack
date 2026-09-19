@@ -30,6 +30,31 @@ setup() {
     WATCH="$WORK/data/usenet/blackhole/complete"
     STAGING="$WORK/data/usenet/blackhole/staging"
     KEYFILE="$WORK/key"
+    # Every test in this file starts from a readable, healthy PSI reading.
+    #
+    # Without this the gate reads the host's own /proc/pressure/io, which does
+    # not exist on macOS -- so leaving it unset was invisible on the machine this
+    # suite was written on. It does exist on Linux, and Linux is where the suite
+    # actually runs: CI is ubuntu-latest and so is pi1. A host whose io full
+    # avg10 sits at or above the limit at that moment would skip the pass before
+    # python, failing every stub_python test below; and run-mutations.sh runs its
+    # control run first, so it would score ERRORED and then report a FALSE KILLED
+    # for every pre-existing entry against this file. Coverage inflated by an
+    # environment condition is the exact failure the mutation corpus exists to
+    # prevent.
+    #
+    # psi_fixture is defined in the pressure-gate section at the bottom; this is
+    # a call at test time, after the whole file is sourced, so the definition is
+    # already there. The pressure-gate tests override this through `env`, which
+    # wins over the exported value.
+    psi_fixture 1.90 > /dev/null
+    export PSI_IO_PATH="$WORK/pressure-io"
+    # And the limit, for the same reason. A PSI_IO_LIMIT exported into the shell
+    # that runs bats reaches every test here, and the boundary test below would
+    # then be measuring the operator's value rather than the script's own
+    # default -- the same ambient leak, one line away from the one that was
+    # fixed. The tests that want a different limit override this through `env`.
+    export PSI_IO_LIMIT=20
 }
 
 # A python3 that records how it was called instead of running anything. Used to
@@ -466,4 +491,177 @@ STUB
     run env "PATH=$WORK/bin:$PATH" "$RUN" --apply
     assert_failure
     assert_output --partial "exited non-zero"
+}
+
+# --- the shipped unit ------------------------------------------------------
+
+@test "usenet-blackhole: the shipped unit caps in-flight jobs below TorBox's ten slots" {
+    # The script ships the cap inert (0, printed as "off"), which is right for a
+    # rollout and wrong as a resting state -- the argument this unit's own
+    # --report-failures comment already makes. TorBox refuses the eleventh
+    # concurrent usenet download, so a ceiling above 10 bounds nothing, and 0
+    # bounds nothing at all: on 2026-09-18 the pass submitted 46 jobs in one
+    # hour and left 60 incomplete while neither arr could see any of them.
+    local unit="$REPO_ROOT/scripts/usenet-blackhole.service"
+    local exec_line value
+    exec_line="$(grep -m1 '^ExecStart=' "$unit")"
+    # `[=[:space:]]`, not `[= ]`: the unit line is one long single-quoted
+    # argument, and a literal space inside an unquoted regex word is a syntax
+    # error on bash 3.2 (the /bin/bash this repo's shell half must keep
+    # working on) -- the test never ran at all. The class is the same two
+    # characters, `=` and a space, spelled so the parser sees one word.
+    if [[ ! "$exec_line" =~ --max-inflight[=[:space:]]([0-9]+) ]]; then
+        fail "ExecStart does not pass --max-inflight: $exec_line"
+    fi
+    value="${BASH_REMATCH[1]}"
+    if (( value < 1 )); then
+        fail "--max-inflight $value is no ceiling at all"
+    fi
+    if (( value > 10 )); then
+        fail "--max-inflight $value is above TorBox's ten concurrent slots"
+    fi
+}
+
+# --- host I/O pressure gate -------------------------------------------------
+
+# A fixture standing in for /proc/pressure/io. The real file is Linux-only, so
+# nothing in this section may touch it -- the suite also runs on macOS.
+#
+# `some` is pinned at 0.00 and deliberately differs from `full`. Carrying the
+# same number on both lines made the fixture blind to which one the gate reads,
+# and `full` rather than `some` is the whole argument for this reading: `some`
+# counts a single stalled task and runs high on a merely busy box, so a
+# regression to it would stop the stack downloading on healthy hosts.
+psi_fixture() {
+    printf 'some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=%s avg60=0.00 avg300=0.00 total=0\n' \
+        "$1" > "$WORK/pressure-io"
+    echo "$WORK/pressure-io"
+}
+
+# Every test here needs a keyed .env, because the gate sits after the key guard.
+keyed_env() {
+    printf 'MEDIA_ROOT=%s/data\nTORBOX_API_KEY=testtorboxkey\n' "$WORK" > "$ENV"
+}
+
+@test "usenet-blackhole: a stalled host skips the pass before python runs" {
+    keyed_env
+    stub_python
+    run env "PATH=$WORK/bin:$PATH" "PSI_IO_PATH=$(psi_fixture 95.00)" "$RUN" --apply
+    assert_success
+    assert_output --partial "pressure-gate"
+    # The whole point of the gate: no work reaches python at all.
+    [ ! -f "$WORK/argv" ]
+}
+
+@test "usenet-blackhole: a healthy host runs the pass" {
+    keyed_env
+    stub_python
+    run env "PATH=$WORK/bin:$PATH" "PSI_IO_PATH=$(psi_fixture 1.90)" "$RUN" --apply
+    assert_success
+    refute_output --partial "pressure-gate"
+    [ -f "$WORK/argv" ]
+}
+
+@test "usenet-blackhole: no PSI on the host means the gate fails open" {
+    # macOS, and any kernel built without PSI, have no /proc/pressure/io. A gate
+    # that blocked there would stop the stack downloading on every machine the
+    # suite runs on. The silence was the second half of the bug: an unreadable
+    # reading and a calm one looked identical in the log, so an inert guard read
+    # as a working one. Announced, and then the pass runs.
+    keyed_env
+    stub_python
+    run env "PATH=$WORK/bin:$PATH" "PSI_IO_PATH=$WORK/does-not-exist" "$RUN" --apply
+    assert_success
+    refute_output --partial "host I/O is stalled"
+    assert_output --partial "runs unprotected"
+    [ -f "$WORK/argv" ]
+}
+
+@test "usenet-blackhole: a malformed PSI limit is announced and runs the pass unprotected" {
+    # awk compares a non-numeric limit as a string, and "95.00" >= "abc" is
+    # false -- so without the case check the gate never trips and the host looks
+    # protected while nothing bounds it. The reading here is a stalled one on
+    # purpose: the point is that the pass runs anyway, not that it was never at
+    # risk.
+    keyed_env
+    stub_python
+    run env "PATH=$WORK/bin:$PATH" "PSI_IO_PATH=$(psi_fixture 95.00)" "PSI_IO_LIMIT=abc" "$RUN" --apply
+    assert_success
+    assert_output --partial "PSI_IO_LIMIT='abc' is not a number"
+    refute_output --partial "host I/O is stalled"
+    [ -f "$WORK/argv" ]
+}
+
+@test "usenet-blackhole: a malformed PSI reading is announced and runs the pass unprotected" {
+    # The other half of the malformed-input pair, and the only path in this
+    # guard that used to fail CLOSED. awk compares a non-numeric `seen` as a
+    # string, and "garbage" >= 20 is true -- so a reading that is not a
+    # measurement tripped the gate, skipped the pass, and printed the garbage
+    # back as a pressure figure. A truncated or half-written read is enough to
+    # produce one. Same contract as the limit above: announced, then the pass
+    # runs, because a guard that cannot read its own input must not be the thing
+    # that stops the stack downloading.
+    keyed_env
+    stub_python
+    run env "PATH=$WORK/bin:$PATH" "PSI_IO_PATH=$(psi_fixture garbage)" "$RUN" --apply
+    assert_success
+    assert_output --partial "the I/O pressure reading 'garbage' is not a number"
+    refute_output --partial "host I/O is stalled"
+    [ -f "$WORK/argv" ]
+}
+
+@test "usenet-blackhole: a skipped pass leaves a trace the status page can read" {
+    # The gate exits before python, so a skipped pass writes neither the state
+    # file nor the failed log -- the only two files the status page renders.
+    # Without the sidecar, usenet.lan shows jobs ageing under a fresh
+    # timestamp, painting every one of them `stalled`, with the actual reason
+    # visible nowhere.
+    keyed_env
+    stub_python
+    run env "PATH=$WORK/bin:$PATH" "PSI_IO_PATH=$(psi_fixture 95.00)" \
+        "USENET_SKIP_PATH=$WORK/skipped.log" "$RUN" --apply
+    assert_success
+    [ -f "$WORK/skipped.log" ] || fail "the gate skipped the pass and recorded nothing"
+    run cat "$WORK/skipped.log"
+    assert_output --partial "95.00"
+    # The limit travels with it, so the page can show the reading against the
+    # bound it crossed rather than a bare percentage.
+    assert_output --partial "20"
+}
+
+@test "usenet-blackhole: the skip trace counts the run and clears when a pass runs" {
+    # "N in a row" is the line count, and the file's absence is what says the
+    # last pass ran. A trace that outlives the skip would leave the page
+    # claiming passes are being skipped on a host that recovered hours ago.
+    keyed_env
+    stub_python
+    local skip="$WORK/skipped.log"
+    run env "PATH=$WORK/bin:$PATH" "PSI_IO_PATH=$(psi_fixture 95.00)" "USENET_SKIP_PATH=$skip" "$RUN" --apply
+    run env "PATH=$WORK/bin:$PATH" "PSI_IO_PATH=$(psi_fixture 96.00)" "USENET_SKIP_PATH=$skip" "$RUN" --apply
+    [ "$(wc -l < "$skip" | tr -d ' ')" -eq 2 ] \
+        || fail "two skipped passes should be two lines, got $(wc -l < "$skip")"
+    run env "PATH=$WORK/bin:$PATH" "PSI_IO_PATH=$(psi_fixture 1.90)" "USENET_SKIP_PATH=$skip" "$RUN" --apply
+    assert_success
+    [ ! -f "$skip" ] \
+        || fail "a pass that ran left the previous run of skips behind, so the page would go on claiming the last pass was skipped"
+}
+
+@test "usenet-blackhole: the gate is the only thing that changes when pressure crosses the limit" {
+    # Same run, same fixture, one hundredth apart. Without this, a gate that
+    # always skipped -- or never did -- would pass the three tests above.
+    keyed_env
+    local pair value expect
+    for pair in "19.99:run" "20.00:skip"; do
+        value="${pair%%:*}"
+        expect="${pair##*:}"
+        stub_python
+        rm -f "$WORK/argv"
+        run env "PATH=$WORK/bin:$PATH" "PSI_IO_PATH=$(psi_fixture "$value")" "$RUN" --apply
+        assert_success
+        if [[ "$expect" == "run" ]]; then
+            [ -f "$WORK/argv" ] || fail "avg10=$value should have run the pass"
+        else
+            [ ! -f "$WORK/argv" ] || fail "avg10=$value should have skipped the pass"
+        fi
+    done
 }

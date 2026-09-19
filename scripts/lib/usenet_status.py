@@ -35,6 +35,20 @@ watcher was last run with: a view holding a different value would call a job
 stalled while the watcher still considered it fine, which is the disagreement
 --stall-hours exists to close.
 
+The one input that is not the state file
+----------------------------------------
+logs/usenet-blackhole-skipped.log belongs to the pressure gate in
+scripts/usenet-blackhole.sh, not to the watcher: one line per pass the gate
+refused to start because the host read as I/O-stalled, and the file removed the
+moment a pass is allowed through. Its line count is therefore the current run of
+skipped passes, and its absence means the last pass ran.
+
+It is rendered as a notice above the table, because the two halves are
+otherwise indistinguishable and they mean opposite things. The stall clock is
+derived at render time, so the longer the protection holds the more jobs are
+painted `stalled` under a freshly stamped `Generated` -- a page describing
+twelve dead jobs, when no pass has run and nothing has been polled at all.
+
 Every field on a job is optional except its key. `complete`, `download_state`
 and `pause_until` appear on some entries and not others, the file is written by
 a script that has changed shape before, and an operator is reading this
@@ -43,7 +57,7 @@ degrades to "unknown" or to no value at all, and never to a traceback.
 
 Usage:
   usenet_status.py <format:json|html> [state-path] [failed-log-path]
-      [--stall-hours N]
+      [skipped-log-path] [--stall-hours N]
 
 --stall-hours (default 4) is the stall threshold `stalled` is derived from; it
 takes a number above zero, in the `--stall-hours N` and `--stall-hours=N`
@@ -89,6 +103,7 @@ FAILURE_TAIL = 50
 # timer or a cron job has no meaningful working directory.
 DEFAULT_STATE_PATH = "logs/usenet-blackhole-state.json"
 DEFAULT_FAILED_LOG = "logs/usenet-blackhole-failed.log"
+DEFAULT_SKIP_LOG = "logs/usenet-blackhole-skipped.log"
 
 STATUS_COMPLETE = "complete"
 STATUS_FAILED = "failed"
@@ -236,7 +251,29 @@ def job_summary(key, job, now, stall_hours=STALL_HOURS):
     }
 
 
-def summarize(state, now, stall_hours=STALL_HOURS, failures=()):
+def _skip_record(record):
+    """The pressure gate's skip record, normalized, or None.
+
+    `passes` is the field that says a pass was skipped at all, so a record whose
+    count is not a positive whole number is no record: there is nothing honest
+    for a renderer to do with it. The reading fields degrade on their own, since
+    a gate that skipped a pass and could not say at what reading is still a gate
+    that skipped a pass.
+    """
+    if not isinstance(record, dict):
+        return None
+    count = record.get("passes")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+        return None
+    return {
+        "passes": count,
+        "at": record.get("at") if isinstance(record.get("at"), str) else None,
+        "avg10": record.get("avg10") if isinstance(record.get("avg10"), str) else None,
+        "limit": record.get("limit") if isinstance(record.get("limit"), str) else None,
+    }
+
+
+def summarize(state, now, stall_hours=STALL_HOURS, failures=(), skipped=None):
     """The whole view as plain data: per job, plus totals, plus the log tail.
 
     Pure by construction -- state in, structure out, no file is opened -- so the
@@ -246,7 +283,8 @@ def summarize(state, now, stall_hours=STALL_HOURS, failures=()):
 
     `failures` is the already-parsed tail from load_failures. It rides in the
     same structure so both renderers show one document rather than the JSON
-    renderer quietly dropping half the view.
+    renderer quietly dropping half the view. `skipped` is the same arrangement
+    for load_skips, and is None on the ordinary stack whose last pass ran.
     """
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
@@ -279,6 +317,7 @@ def summarize(state, now, stall_hours=STALL_HOURS, failures=()):
         "totals": totals,
         "jobs": rows,
         "failures": [entry for entry in failures if isinstance(entry, dict)],
+        "skipped": _skip_record(skipped),
     }
 
 
@@ -346,6 +385,39 @@ def load_failures(path, limit=FAILURE_TAIL):
     return out
 
 
+def load_skips(path):
+    """The pressure gate's skip record, or None when there is not one.
+
+    The file is the gate's, not this module's or the watcher's: one line per
+    pass the gate refused to start, `stamp<TAB>avg10<TAB>limit`, appended while
+    the host reads as I/O-stalled and deleted by the gate itself the moment a
+    pass is allowed through. So the line count is the current run of skipped
+    passes, and no file at all is the ordinary case -- the last pass ran.
+
+    A file that exists but holds nothing readable still means passes are being
+    skipped, because the gate only ever writes one when it refuses to start a
+    pass. Returning None there would describe a healthy stack during exactly the
+    stall this exists to make visible, so the count is kept and the reading
+    degrades to nothing.
+    """
+    try:
+        with open(path, encoding="utf-8") as handle:
+            lines = [line.rstrip("\n") for line in handle]
+    except (OSError, UnicodeDecodeError):
+        return None
+
+    lines = [line for line in lines if line.strip()]
+    if not lines:
+        return None
+    fields = lines[-1].split("\t")
+    return {
+        "passes": len(lines),
+        "at": fields[0].strip() or None,
+        "avg10": (fields[1].strip() or None) if len(fields) > 1 else None,
+        "limit": (fields[2].strip() or None) if len(fields) > 2 else None,
+    }
+
+
 # --- rendering --------------------------------------------------------------
 
 
@@ -405,6 +477,8 @@ body {
 h1 { font-size: 1.4rem; margin: 0 0 .25rem; }
 h2 { font-size: 1.05rem; margin: 2.5rem 0 .5rem; }
 p.meta { margin: 0 0 1.5rem; color: #5c626e; }
+p.notice { margin: 0 0 1.5rem; padding: .6rem .8rem; border-radius: 6px;
+           background: #fdf0da; color: #6b4100; border: 1px solid #f0dcb4; }
 p.empty { color: #5c626e; font-style: italic; }
 table { width: 100%; border-collapse: collapse; background: #fff;
         border: 1px solid #dfe2e8; border-radius: 6px; overflow: hidden; }
@@ -471,6 +545,40 @@ def _failure_item(entry):
     )
 
 
+def _skip_notice(skipped):
+    """The line that separates "nothing is arriving" from "nothing is being asked for".
+
+    Without it, a run of skipped passes renders as a freshly stamped
+    `Generated` over a column of `stalled` badges -- twelve dead jobs, on a
+    page whose truth is that no pass has run and nothing has been polled since
+    the first skip. The stall clock is derived from the state file at render
+    time (see job_status), so it keeps growing for exactly as long as the
+    protection holds, which is the misattribution this exists to remove.
+
+    Empty when there is no record, which is the ordinary case.
+    """
+    if not isinstance(skipped, dict):
+        return ""
+    avg10 = skipped.get("avg10")
+    limit = skipped.get("limit")
+    if avg10 and limit:
+        reading = (f"host I/O stalled (io full avg10={esc(avg10)}%, "
+                   f"limit {esc(limit)}%)")
+    elif avg10:
+        reading = f"host I/O stalled (io full avg10={esc(avg10)}%)"
+    else:
+        reading = "host I/O stalled"
+    streak = (f' &middot; {skipped["passes"]} in a row'
+              if isinstance(skipped.get("passes"), int) else "")
+    at = skipped.get("at")
+    when = f' &middot; most recently {esc(at)}' if at else ""
+    return (
+        f'  <p class="notice"><strong>Last pass skipped:</strong> {reading}'
+        f'{streak}{when}. No pass has run since, so nothing below has been '
+        f'polled: a job shown as <em>stalled</em> may only be unobserved.</p>\n'
+    )
+
+
 def render_html(summary):
     """A self-contained page: one inline stylesheet, no script, no network.
 
@@ -486,6 +594,7 @@ def render_html(summary):
     sources = sources if isinstance(sources, dict) else {}
     failures = [entry for entry in summary.get("failures") or []
                 if isinstance(entry, dict)]
+    skipped = summary.get("skipped")
 
     if jobs:
         body = (
@@ -530,7 +639,8 @@ def render_html(summary):
         "</head>\n"
         "<body>\n"
         "  <h1>Usenet blackhole</h1>\n"
-        f'  <p class="meta">Generated {esc(summary.get("generated_at") or "unknown")}'
+        + _skip_notice(skipped)
+        + f'  <p class="meta">Generated {esc(summary.get("generated_at") or "unknown")}'
         f' &middot; {counts} &middot; stall threshold {esc(stall)}h</p>\n'
         + body + "\n"
         "  <h2>Recent failures</h2>\n"
@@ -538,7 +648,8 @@ def render_html(summary):
         "  <footer>\n"
         "    Read-only view: nothing on this page changes a download.\n"
         f'    State: {esc(sources.get("state") or "unknown")}.'
-        f' Failures: {esc(sources.get("failed_log") or "unknown")}.\n'
+        f' Failures: {esc(sources.get("failed_log") or "unknown")}.'
+        f' Skips: {esc(sources.get("skipped_log") or "unknown")}.\n'
         "  </footer>\n"
         "</body>\n"
         "</html>\n"
@@ -580,7 +691,9 @@ def main(argv):
 
     --stall-hours is pulled out of argv wherever it appears, so the positional
     order this module has always had -- format, state path, failed-log path --
-    keeps working unchanged, with or without the flag.
+    keeps working unchanged, with or without the flag. The skip path is a
+    fourth positional appended to that order, and every existing three-argument
+    call still renders exactly what it did.
     """
     positionals = []
     stall_hours = STALL_HOURS
@@ -620,17 +733,26 @@ def main(argv):
         else DEFAULT_STATE_PATH
     failed_log = positionals[2] if len(positionals) > 2 and positionals[2] \
         else DEFAULT_FAILED_LOG
+    skipped_log = positionals[3] if len(positionals) > 3 and positionals[3] \
+        else DEFAULT_SKIP_LOG
 
     summary = summarize(
         load_state(state_path),
         datetime.now(timezone.utc),
         stall_hours=stall_hours,
         failures=load_failures(failed_log),
+        skipped=load_skips(skipped_log),
     )
     # Which files produced this page. Added here rather than inside summarize,
     # which is pure and has no paths to report; a view read from a different
-    # directory than it was generated in is otherwise ambiguous.
-    summary["sources"] = {"state": state_path, "failed_log": failed_log}
+    # directory than it was generated in is otherwise ambiguous. The skip file
+    # is named even when there is none, because "no skips recorded" and "the
+    # wrong path" look the same on a page that does not say which it read.
+    summary["sources"] = {
+        "state": state_path,
+        "failed_log": failed_log,
+        "skipped_log": skipped_log,
+    }
 
     print(RENDERERS[fmt](summary), end="")
     return 0
