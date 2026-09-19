@@ -49,6 +49,12 @@ setup() {
     # wins over the exported value.
     psi_fixture 1.90 > /dev/null
     export PSI_IO_PATH="$WORK/pressure-io"
+    # And the limit, for the same reason. A PSI_IO_LIMIT exported into the shell
+    # that runs bats reaches every test here, and the boundary test below would
+    # then be measuring the operator's value rather than the script's own
+    # default -- the same ambient leak, one line away from the one that was
+    # fixed. The tests that want a different limit override this through `env`.
+    export PSI_IO_LIMIT=20
 }
 
 # A python3 that records how it was called instead of running anything. Used to
