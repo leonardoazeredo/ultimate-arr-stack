@@ -433,7 +433,20 @@ pi2's resolver still reading `192.168.110.246` is the point of the phase: the re
 
 **Two traps 4.1 hit that this plan did not name.** `uci -q get dhcp.@dnsmasq[0]` returns the section **type** (`dnsmasq`), not the name (`cfg01411c`), so a script that builds `dhcp.dnsmasq` writes into a section dnsmasq never reads and reports success while `.lan` stays broken — the same failure the phase exists to prevent, arriving by an unnamed road. And "first section of type dnsmasq" is not stable: the tunnel's `wgclient1` section is also a dnsmasq. The section is now identified by the `leasefile` option only the DHCP-serving one carries. Neither was caught by reading; both were caught by tests.
 
-**Reboot survival is NOT yet verified, and that is Gate 4's remaining half.** The records are in flash, not tmpfs, and the script re-renders from flash before dnsmasq starts — but a router reboot takes the whole house offline, so it needs a human to choose the moment. Until it is run, Gate 4 is half-closed and this plan says so.
+**Reboot survival verified, 2026-09-19.** The router was rebooted with the owner's approval. It came back in about 90 seconds and everything held:
+
+| After the reboot | Value |
+| --- | --- |
+| `md5sum /etc/config/dhcp` | `66f2755a…`, **byte-identical to before the reboot** |
+| `grep -c '^address=' /var/etc/dnsmasq.conf.cfg01411c` | 19 — re-rendered from flash at boot |
+| `/tmp/dnsmasq.d` entries | **0** |
+| `dns_enabled` / `enabled` | `0` / `1` |
+| dnsmasq / AdGuard | new PIDs, both up |
+| `sonarr.lan` / AAAA / pool `lan` | `192.168.110.250` / `::` / `6,192.168.110.246` |
+
+The empty `/tmp/dnsmasq.d` next to a live 19-record rendered config is the proof 4.1 was asking for: the records cannot have come from the tmpfs confdir, because after a reboot there is nothing in it. Re-checked from the NAS on vlan10, pi1's eth0 on `lan`, pi2 and this Mac on vlan20 — all four resolve `.lan` to Traefik's macvlan, the baseline matrix is still `50/50`, AdGuard came back serving on `:3053` with its 18 rewrites, the redirect chain is still empty, and pi2's resolver still reads `192.168.110.246`.
+
+**Gate 4 passes.**
 
 ---
 
