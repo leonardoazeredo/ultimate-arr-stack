@@ -243,6 +243,8 @@ Per repo convention this lives in `tests/mutation/corpus/`, with a red test prov
 
 **The scratch config dir must be passed as `uci -c <dir>`, never as the `UCI_CONFIG_DIR` environment variable.** Measured 2026-09-19: this build's uci accepts `UCI_CONFIG_DIR`, does not honour it, and writes to the live `/etc/config`. A rehearsal written that way is a production change wearing a rehearsal's name — it was tried, it wrote `dhcp.lan.dhcp_option` in production, and the production file's md5 was checked before and after to establish it. `uci -c <dir>` on the same copy did not touch production. The rollback script therefore takes `UCI_CONF` and routes every uci call through `-c`; a mutation in the corpus removes that and the test catches it.
 
+**Correction, later the same day: `-c` is not reliable either, and the plan should not tell you it is.** While measuring `del_list` semantics in Phase 4, a `uci -c /tmp/<dir>` probe wrote `/c/3 /b/2 /d/4` into the **live** `/etc/config/dhcp`. It was removed and the live config was diffed against the Phase 0 capture, which showed the probe left nothing behind. So the two measurements disagree: `-c` isolated in the first case and did not in the second. **Treat no `uci` invocation on this box as read-only or sandboxed just because it names a directory.** The rehearsal that can be trusted is the stubbed one in `tests/dns-rollback.bats`, which never opens a connection at all; a rehearsal on the live router is a production change that happens to be aimed somewhere else. Keep the `-c` plumbing, because it is what makes the stubbed rehearsal model the real command, and stop describing it as a sandbox.
+
 **Gate 0.** `router/backup/` exists and holds a non-empty capture. Baseline matrix committed and passing against the NAS resolver (50/50 rows as of 2026-09-19). Rollback script covers four pools, reloads dnsmasq, and fails when a pool is left un-reverted — all four properties proven by a mutation in `tests/mutation/corpus/dns.sh` that reintroduces the defect and turns the named test red. `git status` clean, NAS on `main`.
 
 ---
@@ -389,7 +391,7 @@ sonarr.lan AAAA  AdGuard :3053 -> NOERROR <empty>     NAS :53 -> NOERROR ::
 
 Until this is done, moving any client to the router would break `.lan`. Verified gap: `dig sonarr.lan @192.168.120.1` returns nothing today.
 
-- [ ] **4.1 Add the `.lan` records to dnsmasq via the `address` list.** The option exists on this build: `append_address()` at `/etc/init.d/dnsmasq:172`, wired at `:1087` by `config_list_foreach "$cfg" "address" append_address "$address_as_local"`, emitting `--address=$1`. `address_as_local` defaults to `0`, so leave it unset.
+- [x] **4.1 Add the `.lan` records to dnsmasq via the `address` list.** The option exists on this build: `append_address()` at `/etc/init.d/dnsmasq:172`, wired at `:1087` by `config_list_foreach "$cfg" "address" append_address "$address_as_local"`, emitting `--address=$1`. `address_as_local` defaults to `0`, so leave it unset.
 
 ```bash
 ssh pi@pi1 'ssh arr-stack-router sh -s' <<'EOF'
@@ -403,9 +405,35 @@ EOF
 
 Do not write files into `/tmp/dnsmasq.d` — that is the configured `confdir` and it is tmpfs, so records placed there work until the next reboot and then vanish. The pre-existing `dhcp.@dnsmasq[0].local='/lan/'` is complementary, not conflicting: it stops `.lan` queries being forwarded upstream, and these records supply the answers.
 
-- [ ] **4.2 Verify immediately, from a host on each live VLAN**, that `sonarr.lan` and `jellyfin.lan` resolve to `192.168.110.250` while the client still uses the NAS resolver. Verify now, not at the gate: a wrong option name or value syntax produces no records and no error.
+- [x] **4.2 Verify immediately, from a host on each live VLAN**, that `sonarr.lan` and `jellyfin.lan` resolve to `192.168.110.250` while the client still uses the NAS resolver. Verify now, not at the gate: a wrong option name or value syntax produces no records and no error.
 
 **Gate 4.** `.lan` names resolve against the router's `:53` from every live VLAN (`lan`, `vlan10`, `vlan20`, `vlan30`; `iot` is disabled and `guest` already points at the router), and the baseline matrix is unchanged for every existing client. Reboot the router once and re-verify, because surviving a reboot is the point of 4.1.
+
+### Phase 4 outcome, 2026-09-19 — resolution half passes, reboot half outstanding
+
+**4.1 applied** by `scripts/dnsmasq-local-names.sh` (idempotent; a second run reports no change, no commit, no reload, identical `md5sum /etc/config/dhcp`). 19 records — the 18 hostnames plus `address=/lan/::` — are in UCI **and** in the config dnsmasq actually loaded (`grep '^address=' /var/etc/dnsmasq.conf.cfg01411c`), with `local='/lan/'` untouched and `/tmp/dnsmasq.d` holding nothing. That last one is the check that matters: a record written into the tmpfs `confdir` would work until the next reboot and then vanish, which is exactly what 4.1 warns about.
+
+**4.2 verified from every VLAN that has a client:**
+
+| Vantage | `sonarr.lan` | `jellyfin.lan` | AAAA | its own resolver |
+| --- | --- | --- | --- | --- |
+| `vlan10` — the NAS, 192.168.110.246 | 192.168.110.250 | 192.168.110.250 | `::` | 192.168.8.1 |
+| `lan` — pi1 eth0, 192.168.8.227 | 192.168.110.250 | 192.168.110.250 | `::` | — |
+| `vlan20` — pi2, 192.168.120.241 | 192.168.110.250 | 192.168.110.250 | — | **192.168.110.246, unchanged** |
+| `vlan20` — this Mac, 192.168.120.135 | 192.168.110.250 | 192.168.110.250 | — | — |
+| `vlan30` — **no client exists** | 192.168.110.250 | 192.168.110.250 | — | answered from the router itself |
+
+`vlan30` is the one gap and it is stated rather than papered over. There is no DHCP lease on `192.168.130.0/24` at all, so the address was queried from the router's own shell. That proves dnsmasq answers on that interface; it does not prove a client on that VLAN resolves, and those are different claims.
+
+pi2's resolver still reading `192.168.110.246` is the point of the phase: the records were added to the router without moving a single client onto it.
+
+**The acceptance tests moved exactly as predicted.** `tests/alpine-dns-aaaa.bats` is now **4/4 green** — the end-to-end musl proof that could not be made in Phase 3, because `--dns` only ever reaches port 53 and port 53 answers with dnsmasq until Phase 6. `tests/dns-resilience.bats` is 5/6, its only failure the blocked-name row, which needs the Phase 6 redirect to reach AdGuard's blocklist. The baseline matrix is still `50/50` against the NAS, every pool still advertises `6,192.168.110.246`, and `dns_enabled` is still `0`.
+
+**The two stores now agree, which is the first time the 3.5 guard has meant anything.** `check-dns-divergence` over the router's dnsmasq records vs AdGuard's rewrites reports 18 hostnames each and 0 divergences. Both are populated, and they match.
+
+**Two traps 4.1 hit that this plan did not name.** `uci -q get dhcp.@dnsmasq[0]` returns the section **type** (`dnsmasq`), not the name (`cfg01411c`), so a script that builds `dhcp.dnsmasq` writes into a section dnsmasq never reads and reports success while `.lan` stays broken — the same failure the phase exists to prevent, arriving by an unnamed road. And "first section of type dnsmasq" is not stable: the tunnel's `wgclient1` section is also a dnsmasq. The section is now identified by the `leasefile` option only the DHCP-serving one carries. Neither was caught by reading; both were caught by tests.
+
+**Reboot survival is NOT yet verified, and that is Gate 4's remaining half.** The records are in flash, not tmpfs, and the script re-renders from flash before dnsmasq starts — but a router reboot takes the whole house offline, so it needs a human to choose the moment. Until it is run, Gate 4 is half-closed and this plan says so.
 
 ---
 

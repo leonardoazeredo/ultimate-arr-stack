@@ -315,6 +315,7 @@ old "14 tests" claim went stale.
 - `scripts/dns-matrix-check.sh`
 - `scripts/dns-parity.sh`
 - `scripts/dns-rollback.sh`
+- `scripts/dnsmasq-local-names.sh`
 - `scripts/indexer-guard.sh`
 - `scripts/lib/agh-config.sh`
 - `scripts/lib/check-dns-divergence.sh`

@@ -169,6 +169,50 @@ mutation router-access-swallows-the-error-text \
 # lives on the router, not in a file this repo can mutate. There is nothing to
 # break and watch go red.
 
+# --- scripts/dnsmasq-local-names.sh -----------------------------------------
+#
+# Phase 4.1 teaches the router's dnsmasq the .lan address records. Every mutation
+# below is a way of reporting that the records were installed while the router
+# serves none of them, or of leaving a duplicate behind on the second run. All
+# five are scored against tests/dnsmasq-local-names.bats, which runs the real
+# script against a stubbed router: a fake uci, a fake /var/etc, and a fake
+# dnsmasq init that re-renders the config the way the real one does.
+
+mutation dnsmasq-local-second-run-appends \
+  --file scripts/dnsmasq-local-names.sh \
+  --bats tests/dnsmasq-local-names.bats \
+  --test "a second run changes nothing" \
+  --why "Inverts the compare-first guard so a router that already carries the records never matches. uci add_list appends duplicates happily, so a second run leaves 19 more entries in flash - the state this script exists to avoid, and the one Gate 4's reboot would then carry" \
+  --apply 'perl -0pi -e "s/if \[\[ \x22\x24desired\x22 == /if [[ \x22\x24desired\x22 != /" "$F"'
+
+mutation dnsmasq-local-no-reload \
+  --file scripts/dnsmasq-local-names.sh \
+  --bats tests/dnsmasq-local-names.bats \
+  --test "dnsmasq is reloaded after the commit" \
+  --why "Removes the dnsmasq reload. uci commit dhcp emits no config.change event - nothing calls /sbin/reload_config except /etc/init.d/boot - so the records sit in flash while dnsmasq keeps serving the config it rendered at boot" \
+  --apply 'perl -0pi -e "s/^if ! reload_out=.*\n//m" "$F"'
+
+mutation dnsmasq-local-verify-reads-uci-only \
+  --file scripts/dnsmasq-local-names.sh \
+  --bats tests/dnsmasq-local-names.bats \
+  --test "a rendered config carrying every record passes" \
+  --why "Makes the rendered-config read return nothing, so the self-check cannot see a record and reports success on a config that carries none. dnsmasq is started as dnsmasq -C /var/etc/dnsmasq.conf.<hash>; a check that only reads UCI passes while the daemon serves nothing" \
+  --apply 'perl -0pi -e "s/grep \"\^address=\" %s/grep \"\^nope=\" %s/" "$F"'
+
+mutation dnsmasq-local-section-picked-by-position \
+  --file scripts/dnsmasq-local-names.sh \
+  --bats tests/dnsmasq-local-names.bats \
+  --test "the section is resolved, and the type is not mistaken for it" \
+  --why "Replaces the structural section choice with the first section of type dnsmasq. This router carries two - the DHCP-serving one and wgclient1 for the WireGuard tunnel - and uci show dhcp does not promise their order. The records would land in the tunnel section, which the DHCP server never reads. It looked right in development only because the live router happens to list the main section first" \
+  --apply 'perl -0pi -e "s/leasefile.*continue.*\n//" "$F"'
+
+mutation dnsmasq-local-apply-never-removes \
+  --file scripts/dnsmasq-local-names.sh \
+  --bats tests/dnsmasq-local-names.bats \
+  --test "a record this script does not own is not deleted|an AAAA that NXDOMAINs fails the run" \
+  --why "Drops the del_list that precedes each add_list, so the rebuild only ever appends. A record already present is then held twice: the A query still answers, and the zone record is answered twice over, which is what the AAAA assertion catches" \
+  --apply 'perl -0pi -e "s/^\s*printf.*del_list.*\n//mg" "$F"'
+
 # --- scripts/lib/router-dns.sh ----------------------------------------------
 #
 # These judge the router's live state: which pools advertise a resolver, what

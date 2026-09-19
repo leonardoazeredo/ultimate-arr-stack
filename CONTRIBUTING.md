@@ -335,6 +335,7 @@ scripts/
 ├── dns-matrix-check.sh           # Check the DNS baseline matrix against one resolver
 ├── dns-parity.sh                 # Diff the DNS baseline matrix across two resolvers
 ├── dns-rollback.sh               # Return every DHCP pool to the NAS resolver
+├── dnsmasq-local-names.sh        # Teach the router's dnsmasq the .lan address records
 ├── ensure-tailscale-relay-port.sh # Re-apply node 1's relay-server-port pref
 ├── fix-radarr-paths.sh           # Fix Radarr paths after a TRaSH naming reorganize
 ├── fix-sonarr-folders.sh         # Fix Sonarr folder names against the folder format
