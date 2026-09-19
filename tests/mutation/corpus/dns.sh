@@ -211,3 +211,37 @@ mutation router-dns-port53-binds-invisible \
   --test "router-dns: every live non-loopback address bound passes" \
   --why "Inverts the port filter so :53 listeners are discarded instead of kept. Every address then looks unbound, and the check that a client's queries land somewhere on the router stops being able to see the listeners that answer them" \
   --apply 'perl -0pi -e "s/if \(port != \"53\"\) continue/if (port == \"53\") continue/" "$F"'
+
+# --- router/adguard-stage.sh -------------------------------------------------
+#
+# This script enables a DNS resolver for the whole house while its admin API is
+# still unauthenticated. Every mutation below is a way of reporting success
+# having done that.
+
+mutation adguard-stage-starts-without-a-credential \
+  --file router/adguard-stage.sh \
+  --bats tests/adguard-stage.bats \
+  --test "adguard-stage: an unconfigured instance with no credential is refused" \
+  --why "Makes the configured-detection always answer 'already configured', so the script skips the credential entirely and starts an instance with users: [] - an admin API that can rewrite or block any domain for every client, reachable from the maintenance VLAN in 6 ms" \
+  --apply 'perl -0pi -e "s/^    configured=0\$/    configured=1/m" "$F"'
+
+mutation adguard-stage-skips-the-login-check \
+  --file router/adguard-stage.sh \
+  --bats tests/adguard-stage.bats \
+  --test "adguard-stage: a credential that cannot log in fails the run" \
+  --why "Hard-codes the login result to 200, so the script reports a working credential without ever asking. A file that looks right and a hash AdGuard cannot parse are indistinguishable except by logging in, which is the whole reason this call exists" \
+  --apply 'perl -0pi -e "s/login_status=\x24\(/login_status=200 #/" "$F"'
+
+mutation adguard-stage-ignores-dns-enabled-drift \
+  --file router/adguard-stage.sh \
+  --bats tests/adguard-stage.bats \
+  --test "adguard-stage: dns_enabled moving during the run fails it" \
+  --why "Makes the before/after comparison always agree, so the script cannot notice that it moved dns_enabled. That flag installs the redirect that sends every client's :53 to AdGuard, and Phase 2 is supposed to stage a resolver without putting it in the path" \
+  --apply 'perl -0pi -e "s/if \[ \"\x24dns_enabled_after\" = \"\x24dns_enabled_before\" \]; then/if true; then/" "$F"'
+
+mutation adguard-stage-writes-the-plaintext-password \
+  --file router/adguard-stage.sh \
+  --bats tests/adguard-stage.bats \
+  --test "adguard-stage: the user is written and a real login is required to pass" \
+  --why "Writes the plaintext password where the bcrypt hash belongs. AdGuard cannot authenticate against it, so the router ends up with a credential nobody can use and a config file holding a secret in the clear" \
+  --apply 'perl -0pi -e "s/-v h=\"\x24ADMIN_PASSWORD_HASH\"/-v h=\"\x24ADMIN_PASSWORD\"/" "$F"'

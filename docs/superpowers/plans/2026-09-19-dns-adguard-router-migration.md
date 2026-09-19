@@ -280,9 +280,17 @@ These tests are written before any change and **must fail against the current de
 
 Impact is small but not zero: `start_service()` calls `/etc/init.d/firewall reload`, and that reload runs `clean_conntrack`, which deletes DNS conntrack entries. Expect a sub-second DNS blip, not a connectivity interruption.
 
-- [ ] **2.0 Set an admin credential before leaving the service running.** `users: []` means the web UI has no authentication, and the maintenance VLAN reaches it (port 3000 answers in 6 ms from pi1; the same port is dropped from VLAN20). Left as-is, anything on the maintenance VLAN can rewrite or block any domain for every client. Bind the UI to the maintenance interface rather than `0.0.0.0` if it does not need to be reachable elsewhere.
+- [x] **2.0 Set an admin credential before leaving the service running.** `users: []` means the web UI has no authentication, and the maintenance VLAN reaches it (port 3000 answers in 6 ms from pi1; the same port is dropped from VLAN20). Left as-is, anything on the maintenance VLAN can rewrite or block any domain for every client. Bind the UI to the maintenance interface rather than `0.0.0.0` if it does not need to be reachable elsewhere.
 
-- [ ] **2.1 Start it.**
+  **How, because the obvious way does not work here.** `POST /control/install/configure` answers **404**: AdGuard registers the `/control/install/*` routes only when it starts with no config file, and GL.iNet ships a populated `/etc/AdGuardHome/config.yaml`, so the instance counts as configured from first boot with `users: []` sitting in it. The credential therefore goes into the file the way AdGuard stores it — a bcrypt hash under `users:` — and bcrypt has to be computed off-box, because this router has no `htpasswd` and no python: `htpasswd -nBi <user>`, with a leading `$2y$` rewritten to `$2a$`.
+
+  **Verify with `/control/login`, not HTTP Basic.** Measured: `curl -u admin:…` against `/control/status` answers 401 *with the correct password*, because the API authenticates on a session cookie and ignores the Authorization header. A check written with Basic auth reports a working credential as broken, and loosening it to make that go away is how a real mismatch gets waved through.
+
+  Delivered as `router/adguard-stage.sh`, which enables the service, writes the credential only when `users:` is empty, verifies by logging in, and refuses to start at all when it has no credential to set. `tests/adguard-stage.bats` covers the refusals; the credential value itself is not in the repo.
+
+  The bind was left at `0.0.0.0:3000`. It is already unreachable from every client VLAN (only the maintenance VLAN and the tailnet get there), the credential is the control, and narrowing the bind would silently remove remote admin access that nobody asked to lose.
+
+- [x] **2.1 Start it.**
 
 ```bash
 uci set adguardhome.config.enabled='1'
@@ -290,7 +298,9 @@ uci commit adguardhome
 /etc/init.d/adguardhome start
 ```
 
-- [ ] **2.2 Verify it answers on 3053 — from the only vantage that can reach it.**
+  Done through `router/adguard-stage.sh` rather than by hand, per the global constraint that router changes go through a committed script. `enabled='1'`, `dns_enabled='0'`.
+
+- [x] **2.2 Verify it answers on 3053 — from the only vantage that can reach it.**
 
 From **pi1 over the maintenance VLAN** (`lan` zone, `input='ACCEPT'` is the only zone that permits it):
 
@@ -299,15 +309,23 @@ ssh pi@pi1 'dig +short +time=3 +tries=1 example.com @192.168.8.1 -p 3053'
 ssh pi@pi1 'dig +short +time=3 +tries=1 example.com @192.168.8.1 -p 3053 +tcp'
 ```
 
+  Both answered, UDP and TCP, with the same address pair. From the router itself, both transports answered too.
+
+  **One measurement note worth keeping:** the DNS proxy comes up a second or two after the web UI, so a single probe immediately after a restart reports "does not answer" for a resolver that is serving fine moments later. Both the script and any hand-check should poll.
+
 Then settle open question 1 from **on the router**, because pi1 cannot test local-name resolution that only the router's own data can answer:
 
 ```bash
 ssh pi@pi1 'ssh arr-stack-router "dig +short +time=3 +tries=1 <a-known-dhcp-lease-name> @127.0.0.1 -p 3053"'
 ```
 
+  Answered, and the answer was no — see open question 1. Note the leases file's fields are `<expiry> <mac> <ip> <hostname> <clientid>`, so the hostname is `$4`, not `$3`.
+
 Do **not** attempt `dig @192.168.x.1 -p 3053` from a client on `vlan10`, `vlan20` or `vlan30`. It is dropped, not merely closed, and a worker who sees that failure will chase a firewall problem that is not a bug.
 
-- [ ] **2.3 Confirm the live path is untouched.** The baseline matrix still passes against the NAS, and `iptables -t nat -L adg_redirect -n` shows the chain with no rules.
+- [x] **2.3 Confirm the live path is untouched.** The baseline matrix still passes against the NAS, and `iptables -t nat -L adg_redirect -n` shows the chain with no rules.
+
+  Both confirmed after staging: `./scripts/dns-matrix-check.sh` reported `50/50 rows matched` against 192.168.110.246, and `adg_redirect` is declared with no rules while `dns_enabled='0'`.
 
 **Gate 2.** AdGuard Home answers on 3053 from pi1 and from the router. Baseline matrix unchanged. `adg_redirect` present and empty. Rollback trigger: any answer wrong → `enabled='0'`, no client affected.
 
@@ -475,7 +493,11 @@ Access for the router rungs does not depend on DNS working: SSH by IP via pi1 on
 
 ## Open questions, and where each is closed
 
-1. **Does AdGuard Home see dnsmasq's local records at all?** Its configured upstreams are public resolvers, so DHCP lease names and the `lan` search domain may stop resolving once it takes `:53`. Closed in 2.2 by querying 3053 for a known lease name from the router. If the answer is no, either add rewrites or give AdGuard Home an upstream pointing at a dnsmasq instance on a secondary port.
+1. **Does AdGuard Home see dnsmasq's local records at all?** **No, and the answer matters more than the question did.** Answered 2026-09-19 from the router against the staged AdGuard on 3053:
+   - `pi1` and `Redmi-Note-14-Pro-5G` (bare DHCP lease names) answer `NOERROR` with the lease address on dnsmasq's `:53`, and `NXDOMAIN` on AdGuard's `:3053`. Every short name a person actually types stops working.
+   - `sonarr.lan` answers `NXDOMAIN` on 3053 as well. 3.2's rewrites fix the 18 known names, but **AdGuard forwards `.lan` upstream to public resolvers**, which dnsmasq's `local=/lan/` prevented. That is the parity gap 3.5 has to close, and it is a privacy leak as well as a correctness one: every `.lan` lookup leaves the house today.
+   
+   So 3.2 alone is not enough. Phase 3 needs either an upstream pointing at a dnsmasq instance on a secondary port (which restores lease names and local records together) or the rewrites **plus** an AdGuard equivalent of `local=/lan/` — `bogus_nxdomain` with `lan` on it, so unknown `.lan` names are answered locally instead of being asked of Google. Decide this in 3.2/3.3, not later: it changes what 3.6's parity run compares.
 2. **What does `dns_enabled` do beyond the redirect?** Closed in Phase 0 by reading `/etc/firewall.dns_order` in full; line 31 is the only consumer found so far.
 3. **What does AdGuard Home return for AAAA on a rewrite?** Decides whether 3.3 is a configuration change or a design problem. Test with an Alpine/musl container, which is the client that cares.
 4. **Does GL.iNet's firmware upgrade preserve `/etc/AdGuardHome`?** If not, 0.2's backup plus a documented restore is load-bearing, not a nicety.

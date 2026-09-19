@@ -306,6 +306,7 @@ old "14 tests" claim went stale.
 - `decypharr/verify-patch.sh`
 - `duc-service/app/duc.cgi`
 - `duc-service/app/log.cgi`
+- `router/adguard-stage.sh`
 - `scripts/arr-backup.sh`
 - `scripts/backup-prune.sh`
 - `scripts/detect-credential-drift.sh`
