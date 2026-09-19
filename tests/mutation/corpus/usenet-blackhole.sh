@@ -468,3 +468,10 @@ mutation pressure-gate-fails-closed \
   --test "usenet-blackhole: no PSI on the host means the gate fails open" \
   --why "treating an unreadable /proc/pressure/io as stalled stops the stack downloading on every host without PSI, silently, and it would take the macOS half of this suite down with it. The reading has to be invented for this mutant to be observable at all: the reader's own exit status is discarded by the gate's \`|| true\`, so \`|| return 0\` alone is an equivalent mutant -- empty stdout either way, fail-open gate either way. Returning a number that looks stalled is what makes the defect reach the behaviour the fail-open test names" \
   --apply 'sed -i.bak "s@\[\[ -r \"\$path\" \]\] || return 1@[[ -r \"\$path\" ]] || { echo 100; return 0; }@" "$F" && rm -f "$F.bak"'
+
+mutation pressure-gate-reads-some-not-full \
+  --file scripts/usenet-blackhole.sh \
+  --bats tests/usenet-blackhole.bats \
+  --test "usenet-blackhole: a stalled host skips the pass before python runs" \
+  --why "reading PSI's \`some\` instead of \`full\` inverts the guard's purpose: \`some\` counts a single stalled task and runs high on a merely busy box, so the pass would skip on healthy hosts and the stack would silently stop downloading -- the failure mode the fail-open test exists to prevent, arriving from the other direction" \
+  --apply 'sed -i.bak "s@\$1 == \"full\"@\$1 == \"some\"@" "$F" && rm -f "$F.bak"'

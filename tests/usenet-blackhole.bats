@@ -501,9 +501,15 @@ STUB
 
 # A fixture standing in for /proc/pressure/io. The real file is Linux-only, so
 # nothing in this section may touch it -- the suite also runs on macOS.
+#
+# `some` is pinned at 0.00 and deliberately differs from `full`. Carrying the
+# same number on both lines made the fixture blind to which one the gate reads,
+# and `full` rather than `some` is the whole argument for this reading: `some`
+# counts a single stalled task and runs high on a merely busy box, so a
+# regression to it would stop the stack downloading on healthy hosts.
 psi_fixture() {
-    printf 'some avg10=%s avg60=0.00 avg300=0.00 total=0\nfull avg10=%s avg60=0.00 avg300=0.00 total=0\n' \
-        "$1" "$1" > "$WORK/pressure-io"
+    printf 'some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=%s avg60=0.00 avg300=0.00 total=0\n' \
+        "$1" > "$WORK/pressure-io"
     echo "$WORK/pressure-io"
 }
 
