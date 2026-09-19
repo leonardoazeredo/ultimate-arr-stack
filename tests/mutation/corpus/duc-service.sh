@@ -191,3 +191,38 @@ mutation duc-startup-branch-inverted \
   --test "duc: main\(\) branches on the start-up scan decision" \
   --why "inverting the branch scans only when the index is fresh and never when it is stale -- the opposite of the intent, reached by a one-character edit" \
   --apply 'sed -i.bak "s@if startup_scan_needed; then@if ! startup_scan_needed; then@" "$F" && rm -f "$F.bak"'
+
+# --- startup.sh: the same host-pressure input the pass gate uses ------------
+#
+# Index age alone is not enough to decide this. The cron is `0 4 * * *`, so the
+# index is stamped at ~04:07 and from ~00:07 to 04:00 it is older than the
+# 20-hour window -- a restart in that band re-walks 2.9 Tb, in the same window
+# scripts/usenet-blackhole.sh is refusing to start a pass because the host is
+# jammed. Two guards reading one stalled host and disagreeing about it is the
+# feedback loop of 2026-09-18, one `restart: always` away from turning again.
+#
+# The fail-open direction is the quieter of the two and the reason the numeric
+# checks exist at all: awk compares a non-numeric operand as a string, so a
+# garbage reading is TRUE against a numeric limit -- the guard trips on nothing
+# and skips the scan.
+
+mutation duc-pressure-gate-removed \
+  --file duc-service/app/startup.sh \
+  --bats tests/duc-service.bats \
+  --test "duc: startup skips the scan while the host is I/O-stalled" \
+  --why "deleting the veto restores the disagreement this closes: the indexer walks the whole volume precisely while the ingest pass is being skipped for the same host condition, which is the loop docs/NAS-LOAD-INCIDENT-2026-09-18.md describes -- and the age decision it falls back to says 'scan' for four hours of every day" \
+  --apply 'sed -i.bak "s@if host_io_stalled; then@if false; then@" "$F" && rm -f "$F.bak"'
+
+mutation duc-pressure-threshold-inverted \
+  --file duc-service/app/startup.sh \
+  --bats tests/duc-service.bats \
+  --test "duc: the pressure gate is the only thing that changes when it crosses the limit" \
+  --why "inverting the comparison makes a healthy host read as stalled, so every start-up scan is skipped on a box reading 1.9% -- the index then goes stale by however long the container runs, with the cron inside it the only thing left keeping the page current. The boundary test is what notices, one hundredth either side of the limit" \
+  --apply 'sed -i.bak "s@exit !(seen >= limit)@exit !(seen < limit)@" "$F" && rm -f "$F.bak"'
+
+mutation duc-pressure-fails-closed \
+  --file duc-service/app/startup.sh \
+  --bats tests/duc-service.bats \
+  --test "duc: no readable pressure reading leaves the scan to the index age" \
+  --why "treating a reading this cannot judge as a stalled host is the guard failing CLOSED. /proc/pressure/io does not exist on macOS or on any kernel built without PSI, so this is not a rare input -- and the failure is silent in the direction that matters: a container on such a host comes up, serves an empty UI, and never builds the index it would need to fill it" \
+  --apply 'sed -i.bak "s@\[\[ -n \"\$reading\" \]\] || return 1@[[ -n \"\$reading\" ]] || return 0@" "$F" && rm -f "$F.bak"'

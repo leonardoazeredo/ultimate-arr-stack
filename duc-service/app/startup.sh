@@ -15,15 +15,35 @@ MANUAL_SCAN_SH="${DUC_MANUAL_SCAN_SH:-/manual_scan.sh}"
 # so a test that drives that loop has to point it at a path it can bind a socket
 # in. The default is the path the image uses.
 FCGI_SOCKET="${DUC_FCGI_SOCKET:-/var/run/fcgiwrap.socket}"
-# The index this reads to decide whether a start-up scan is worth running, and
-# how old it may be before one is. Same convention as the seams above: the
-# image sets neither, so the container uses these defaults.
+# The index this reads to decide whether a start-up scan is worth running, how
+# old it may be before one is, and the same host I/O pressure reading
+# scripts/usenet-blackhole.sh refuses to start a pass on. Same convention as the
+# seams above: the image sets none of them.
 #
-# 20 hours, not 24: the daily cron is `0 4 * * *`, so an index is at most 24
-# hours old and normally much younger. 20 leaves room for a cron run that
-# started late without letting a genuinely stale index through.
+# 20 hours, not 24, and not because of a late cron run -- a scan stamps the
+# mtime when it FINISHES, so starting late shortens the age rather than
+# lengthening it. The window has to be shorter than the cron period or the
+# start-up scan is dead code: with `0 4 * * *` and a 24-hour window a running
+# stack's index never expires, so the one case this branch exists for besides a
+# first run -- a container whose own cron has stopped -- could never be caught.
+# The price of that is a band from the moment the index crosses 20h old to the
+# moment the 04:00 scan finishes, roughly four hours a day, in which a
+# `restart: always` restart re-walks the volume. That band is the residual
+# exposure, and it is what the pressure reading below bounds.
 INDEX_DB="${DUC_INDEX_DB:-/database/duc.db}"
 STARTUP_SCAN_MAX_AGE_HOURS="${DUC_STARTUP_SCAN_MAX_AGE_HOURS:-20}"
+# `full` rather than `some`, and 20% rather than anything tuned: `some` counts a
+# single stalled task and runs high on a merely busy box, while `full` means
+# every runnable task was stalled on I/O at once. Measured on this NAS, 1.86%
+# healthy and 78-81% for hours during the incident of 2026-09-18.
+#
+# Read inline rather than sourced from scripts/lib/. duc-service/Dockerfile
+# copies app/ and nothing else, so there is no library in this image to share
+# with; two consumers reading one kernel interface is the whole overlap, and it
+# is the same parse scripts/usenet-blackhole.sh makes before it will start a
+# pass.
+PSI_IO_PATH="${DUC_PSI_IO_PATH:-/proc/pressure/io}"
+PSI_IO_LIMIT="${DUC_PSI_IO_LIMIT:-20}"
 FALLBACK_SCHEDULE="0 0 * * *"
 
 # A cron schedule is exactly five whitespace-separated fields on exactly one
@@ -71,6 +91,54 @@ start_webserver() {
     nginx
 }
 
+# io full avg10 from /proc/pressure/io, or nothing when PSI is unavailable.
+#
+# The same reading scripts/usenet-blackhole.sh takes before it will start a
+# pass, and deliberately the same shape: `full` rather than `some`, because
+# `some` counts a single stalled task and would veto a scan on any busy box.
+psi_io_full_avg10() {
+    [[ -r "$PSI_IO_PATH" ]] || return 1
+    awk '$1 == "full" {
+           for (i = 2; i <= NF; i++) {
+             split($i, kv, "=")
+             if (kv[1] == "avg10") { print kv[2]; exit }
+           }
+         }' "$PSI_IO_PATH"
+}
+
+# Is the host too I/O-stalled to walk 2.9 Tb right now?
+#
+# Returns 0 when it is, 1 when it is not -- or when this cannot tell, which is
+# the point. It fails OPEN and says so out loud: a kernel built without PSI, a
+# container that cannot read /proc/pressure, and a reading or a limit that is
+# not a number all leave the decision to the index age alone, and each is
+# announced. A guard that cannot read its own input must not be the thing that
+# leaves a host with no index and no way to build one -- and "the guard ran and
+# found nothing" and "the guard could not run" must not be the same observable
+# result.
+#
+# The numeric checks are the `case` idiom scripts/usenet-blackhole.sh uses for
+# the same two values. They matter in both directions: awk compares a
+# non-numeric operand as a string, so a garbage LIMIT is false against every
+# reading (the guard silently never trips) while a garbage READING is true
+# against a numeric limit (the guard trips on nothing and skips the scan).
+host_io_stalled() {
+    local reading
+    reading="$(psi_io_full_avg10 || true)"
+    if [[ -z "$reading" ]]; then
+        echo "I/O pressure: nothing readable at ${PSI_IO_PATH}; deciding on index age alone"
+    elif [[ "$reading" == *[!0-9.]* || "$reading" == *.*.* ]]; then
+        echo "I/O pressure: the reading '${reading}' is not a number; deciding on index age alone"
+        reading=""
+    elif [[ "$PSI_IO_LIMIT" == *[!0-9.]* || "$PSI_IO_LIMIT" == *.*.* ]]; then
+        echo "I/O pressure: the limit '${PSI_IO_LIMIT}' is not a number; deciding on index age alone"
+        reading=""
+    fi
+    [[ -n "$reading" ]] || return 1
+    awk -v seen="$reading" -v limit="$PSI_IO_LIMIT" \
+        'BEGIN { exit !(seen >= limit) }'
+}
+
 # Is a start-up scan worth running?
 #
 # The start-up scan exists for a first run with no index at all. It used to run
@@ -79,12 +147,25 @@ start_webserver() {
 # immediately walked 2.9 Tb / 842.4K files / 139.8K directories again, adding to
 # the stall it was suffering from. A fresh index is a warm start.
 #
-# Returns 0 when a scan is needed, 1 when the index is fresh enough to skip.
-# Fails towards scanning: an index that is missing, unreadable, or whose age
-# cannot be determined gets a scan, which is the behaviour that shipped before
-# this function existed.
+# The host gets a veto before the calendar does, and that veto is the whole
+# reason this function knows about PSI at all. Age alone is not enough: the
+# daily cron writes the index at ~04:07, so from ~00:07 to 04:00 the index is
+# older than the window and a `restart: always` restart in that band re-walks
+# the volume -- while scripts/usenet-blackhole.sh is skipping the ingest pass
+# for the very same reason. Two guards reading one stalled host and disagreeing
+# about it is the loop in docs/NAS-LOAD-INCIDENT-2026-09-18.md, one restart away
+# from turning again.
+#
+# Returns 0 when a scan is needed, 1 when it is skipped. Fails towards scanning
+# on everything except a host that reads as stalled: an index that is missing,
+# unreadable, or whose age cannot be determined gets a scan, which is the
+# behaviour that shipped before this function existed.
 startup_scan_needed() {
     local age_minutes
+    if host_io_stalled; then
+        echo "Host I/O is stalled; skipping the start-up scan"
+        return 1
+    fi
     [[ -f "$INDEX_DB" ]] || return 0
     age_minutes=$(( STARTUP_SCAN_MAX_AGE_HOURS * 60 ))
     [[ -z "$(find "$INDEX_DB" -mmin -"$age_minutes" 2>/dev/null)" ]]
