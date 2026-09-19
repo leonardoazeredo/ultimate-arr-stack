@@ -451,6 +451,16 @@ INDEX_DB="${DUC_INDEX_DB:-/database/duc.db}"
 STARTUP_SCAN_MAX_AGE_HOURS="${DUC_STARTUP_SCAN_MAX_AGE_HOURS:-20}"
 ```
 
+**The 20-hour rationale in that comment does not hold, and the file no longer
+carries it.** "A cron run that started late" lengthens nothing: a scan stamps the
+mtime when it *finishes*, which shortens the age. The real reason 20 < 24 is that
+the window has to be shorter than the cron period or the start-up scan can never
+fire on a running stack — a container whose own cron has stopped would then serve
+a permanently stale index with no path back. The price is a band of roughly four
+hours a day, from the index crossing 20h old to the 04:00 scan finishing, in
+which a restart re-walks the volume. That band is the residual exposure, and the
+host-pressure veto added to the same decision is what bounds it.
+
 - [ ] **Step 4: Add the decision function**
 
 Add above `main()` in the same file:
