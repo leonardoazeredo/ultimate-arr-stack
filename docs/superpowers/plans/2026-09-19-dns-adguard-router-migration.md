@@ -26,7 +26,7 @@ Measured 2026-09-19 on the live router (via `ssh pi@pi1 'ssh arr-stack-router ..
 | Pools advertising an IPv4 resolver | 4 — `lan`, `vlan10`, `vlan20`, `vlan30` | `uci show dhcp` |
 | Resolver advertised by all 4 | `192.168.110.246` (NAS Pi-hole), single value | `dhcp.<pool>.dhcp_option='6,192.168.110.246'` |
 | `guest` pool IPv4 resolver | none advertised, so dnsmasq advertises itself | `dhcp.guest` has no `dhcp_option` |
-| DHCP lease time | `12h` on `lan`, `vlan20`, `vlan30` | `uci show dhcp` |
+| DHCP lease time | `12h` on `lan`, `vlan10`, `vlan20`, `vlan30` | `uci show dhcp` |
 | **IPv6 handout on `vlan10`/`vlan20`/`vlan30`** | **`dhcpv6='disabled'`, `ra='disabled'` — no IPv6 resolver is handed out** | `uci show dhcp` |
 | IPv6 DNS handed out | only `dhcp.lan.dns='fde0:4646:77b8::1'`, `dhcp.guest.dns='fde0:4646:77b8:1::1'`; both are the router | same, `ip -6 addr` |
 | Zone `lan` forward policy | `ACCEPT`, and `input='ACCEPT'` | `zone_lan_forward` ends `zone_lan_dest_ACCEPT` |
@@ -45,7 +45,8 @@ Measured 2026-09-19 on the live router (via `ssh pi@pi1 'ssh arr-stack-router ..
 | AdGuard Home web UI | `address: 0.0.0.0:3000`, **`users: []` — no credential configured** | same |
 | AdGuard Home upstreams today | `8.8.8.8`, `9.9.9.9` plain, bootstrap Quad9 | same |
 | `adg_redirect` chain at `dns_enabled='0'` | **exists and is empty** (1 reference, no rules) | `iptables -t nat -L adg_redirect` |
-| dnsmasq `:53` binds | `192.168.8.1`, `192.168.9.1`, `192.168.10.1`, `192.168.110.1`, `192.168.120.1`, `192.168.130.1`, tailscale, `127.0.0.1` | `netstat -lntup` |
+| dnsmasq `:53` binds | `192.168.8.1`, `192.168.9.1`, `192.168.110.1`, `192.168.120.1`, `192.168.130.1`, `127.0.0.1`, tailscale, the router's ProtonVPN address | `netstat -lntup` |
+| Disabled `iot` pool | `network.iot` is configured at `192.168.10.1` on `br-iot`, but **`network.iot.disabled='1'`** — the bridge does not exist and no `iot` interface is registered, so dnsmasq never binds `192.168.10.1`. `dhcp.iot` advertises no resolver, so it is not a migration target | `uci show network`, `ip -4 addr`, `ubus list network.interface.*` |
 | dnsmasq `address` option support | yes — `append_address()` at `/etc/init.d/dnsmasq:172`, wired at `:1087`, emits `--address=$1`; `address_as_local` defaults to `0` | `/etc/init.d/dnsmasq` |
 | Pre-existing `local='/lan/'` | set; means "answer `.lan` locally, never forward". Complementary to `address`, not conflicting | `uci show dhcp` |
 | dnsmasq `confdir` | `/tmp/dnsmasq.d` — tmpfs, does not survive reboot | `uci show dhcp` |
@@ -176,6 +177,19 @@ EOF
 test -s router/backup/2026-09-19-dns-state.txt || { echo "capture failed"; exit 1; }
 ```
 
+Capture the redirect machinery alongside the UCI state, because the UCI dump does not contain it and open question 2 is closed here:
+
+```bash
+ssh pi@pi1 'ssh arr-stack-router sh -s' <<'EOF' > router/backup/2026-09-19-redirect.txt
+grep -nE 'adguardhome|dns_enabled|3053|adg_redirect|dns_dispatcher' /etc/firewall.dns_order
+iptables -t nat -L adg_redirect -n -v
+iptables -t nat -S | grep -i adg
+EOF
+test -s router/backup/2026-09-19-redirect.txt || { echo "redirect capture failed"; exit 1; }
+```
+
+The assertion that closes open question 2 is that `dns_enabled` appears exactly once in `/etc/firewall.dns_order` — line 31, gating `adg_handle_dns`. If a second consumer shows up, the file has changed under this plan and the flip in 6.2 is no longer a single-variable change.
+
 - [ ] **0.2 Back up the AdGuard Home config and data, outside the repo.**
 
 ```bash
@@ -238,7 +252,7 @@ These tests are written before any change and **must fail against the current de
 - [ ] **1.2 `tests/router-dns.bats`** — live assertions over the router, in the style of `tests/network-segmentation.bats`, including its vantage-point discipline. Assert:
   - per-pool `dhcp_option 6` state;
   - **`adg_redirect` exists in both states and is empty when `dns_enabled='0'`**, holding `REDIRECT --to-ports 3053` for tcp and udp when it is `'1'`. The chain is declared unconditionally by `iptables-restore`; an "exists iff" assertion fails at baseline;
-  - dnsmasq binds `:53` on every VLAN interface.
+  - dnsmasq binds `:53` on every **live** VLAN-side interface — `192.168.8.1`, `192.168.9.1`, `192.168.110.1`, `192.168.120.1`, `192.168.130.1` — and not on `192.168.10.1`, because `network.iot` is `disabled='1'` and `br-iot` does not exist. Derive the expected set from the live interface list rather than hardcoding six addresses.
 
   Must **skip with a reason** everywhere except a host that can reach the router (pi1), never fail silently.
 
@@ -327,9 +341,9 @@ EOF
 
 Do not write files into `/tmp/dnsmasq.d` — that is the configured `confdir` and it is tmpfs, so records placed there work until the next reboot and then vanish. The pre-existing `dhcp.@dnsmasq[0].local='/lan/'` is complementary, not conflicting: it stops `.lan` queries being forwarded upstream, and these records supply the answers.
 
-- [ ] **4.2 Verify immediately, from a host on each VLAN**, that `sonarr.lan` and `jellyfin.lan` resolve to `192.168.110.250` while the client still uses the NAS resolver. Verify now, not at the gate: a wrong option name or value syntax produces no records and no error.
+- [ ] **4.2 Verify immediately, from a host on each live VLAN**, that `sonarr.lan` and `jellyfin.lan` resolve to `192.168.110.250` while the client still uses the NAS resolver. Verify now, not at the gate: a wrong option name or value syntax produces no records and no error.
 
-**Gate 4.** `.lan` names resolve against the router's `:53` from every VLAN, and the baseline matrix is unchanged for every existing client. Reboot the router once and re-verify, because surviving a reboot is the point of 4.1.
+**Gate 4.** `.lan` names resolve against the router's `:53` from every live VLAN (`lan`, `vlan10`, `vlan20`, `vlan30`; `iot` is disabled and `guest` already points at the router), and the baseline matrix is unchanged for every existing client. Reboot the router once and re-verify, because surviving a reboot is the point of 4.1.
 
 ---
 
@@ -472,3 +486,15 @@ An adversarial pass over the first draft produced fifteen findings. Three were c
 **Corrected.** The claim that `check-dns-duplicates.sh` guards against router-vs-AdGuard divergence was wrong: it compares the NAS's `02-local-dns.conf` against `pihole.toml` inside the container. The duplication this plan creates is real and unguarded, but the retired script never covered it, so 3.5 has to build the new guard rather than inherit one.
 
 **Downgraded.** Phase 4.1's missing option name is a documentation gap, not a blocker: `append_address()` at `/etc/init.d/dnsmasq:172` confirms `list address '/domain/ip'` works, `address_as_local` defaults to `0`, and the pre-existing `local='/lan/'` is complementary rather than conflicting. "Zero client impact" in Phase 2 was overstated but nearly right: `clean_conntrack()` at `/lib/functions/vpn_func/route_policy_func.sh:43` deletes only DNS flows, so the effect is a sub-second DNS blip. The IPv6 concern was largely moot: `ra` and `dhcpv6` are `disabled` on all three VLAN pools, so no IPv6 resolver is handed out there to migrate.
+
+## Amendment, 2026-09-19 evening — Evidence re-measured before Phase 0
+
+Every row in **Evidence** was re-measured against the live router, NAS, pi1 and pi2 before Phase 0 started. All of them reproduced except the dnsmasq bind list, which is corrected above. Three changes came out of it:
+
+- **dnsmasq `:53` binds.** The table previously listed `192.168.10.1`. That address belongs to `network.iot`, which is `disabled='1'`, so `br-iot` does not exist and dnsmasq has nothing to bind there. The live set is five LAN-side addresses plus loopback, tailscale and the ProtonVPN address. This matters because 1.2 asserts on the bind list and Phase 4/Gate 4 say "every VLAN" — the plan now says "every live VLAN" and lists the four.
+- **The disabled `iot` pool is now a row of its own.** It is a sixth DHCP section that the first draft never mentioned: configured, in its own firewall zone with an `Allow-DNS` rule, but inert. It advertises no resolver, so it is not a migration target and needs no pool move.
+- **Lease time was understated.** All four advertising pools carry `12h`, not three; 5.1 and 5.7 touch all four.
+
+Two facts that were not in the table but matter operationally, recorded here rather than as rows: `pi1` does not resolve by name from the maintenance host — it answers as `pi1.local` (wlan0 `192.168.120.228` on VLAN20, eth0 `192.168.8.227` on maintenance), and the router hop works from there as the plan assumes. `pi2` is up at `192.168.120.241` on VLAN20 and still resolves through the NAS Pi-hole, so it is a usable VLAN20 vantage for 5.3.
+
+The re-measurement also closed open question 2 in full: `dns_enabled` appears exactly once in `/etc/firewall.dns_order` (line 31, gating `adg_handle_dns`), and nowhere else in that file.
