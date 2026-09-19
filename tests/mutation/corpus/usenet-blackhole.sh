@@ -480,8 +480,8 @@ mutation pressure-gate-failopen-silent \
   --file scripts/usenet-blackhole.sh \
   --bats tests/usenet-blackhole.bats \
   --test "usenet-blackhole: no PSI on the host means the gate fails open" \
-  --why "an unreadable PSI reading that announces nothing is indistinguishable in the pass log from a guard that ran and found the host calm. Both leave the stack unprotected on a host the operator believes is being watched -- and the unreadable case is the one that hits every macOS box and every kernel built without PSI, which is where the first version of this gate silently did nothing" \
-  --apply 'sed -i.bak "/elif \[\[ -z \"\$HOST_PRESSURE\" \]\]/,/no readable I\/O pressure reading/d" "$F" && rm -f "$F.bak"'
+  --why "an unreadable PSI reading that announces nothing is indistinguishable in the pass log from a guard that ran and found the host calm. Both leave the stack unprotected on a host the operator believes is being watched -- and the unreadable case is the one that hits every macOS box and every kernel built without PSI, which is where the first version of this gate silently did nothing. The range deletes BOTH reading-announcement branches, not just the first: an empty reading is caught by the \`-z\` branch, so deleting that one alone leaves the not-a-number branch announcing the same thing and the mutant survives while looking silenced" \
+  --apply 'sed -i.bak "/elif \[\[ -z \"\$HOST_PRESSURE\" \]\]/,/so nothing can be compared against the limit/d" "$F" && rm -f "$F.bak"'
 
 mutation pressure-gate-limit-unvalidated \
   --file scripts/usenet-blackhole.sh \
@@ -489,3 +489,10 @@ mutation pressure-gate-limit-unvalidated \
   --test "usenet-blackhole: a malformed PSI limit is announced and runs the pass unprotected" \
   --why "the case block accepting every value is the same as dropping it: awk then compares the limit as a string, \"95.00\" >= \"abc\" is false, and a host with a stalled reading runs the pass while PSI_IO_LIMIT says it is bounded. The gate looks armed and the limit is the thing that was wrong, so nothing downstream notices" \
   --apply 'sed -i.bak "s@PSI_IO_LIMIT_USABLE=false@PSI_IO_LIMIT_USABLE=true@" "$F" && rm -f "$F.bak"'
+
+mutation pressure-gate-reading-unvalidated \
+  --file scripts/usenet-blackhole.sh \
+  --bats tests/usenet-blackhole.bats \
+  --test "usenet-blackhole: a malformed PSI reading is announced and runs the pass unprotected" \
+  --why "accepting every reading is the one path in this guard that fails CLOSED. awk compares a non-numeric \`seen\` as a string and \"garbage\" >= 20 is true, so a reading that is not a measurement trips the gate, skips the pass, and quotes the garbage back as a pressure figure -- a stack that has silently stopped downloading on a host the operator has no reason to look at. A truncated read is enough to produce one, and the pass log is the only place it would show" \
+  --apply 'sed -i.bak "s@HOST_PRESSURE_USABLE=false@HOST_PRESSURE_USABLE=true@" "$F" && rm -f "$F.bak"'

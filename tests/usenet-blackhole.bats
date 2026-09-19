@@ -592,6 +592,24 @@ keyed_env() {
     [ -f "$WORK/argv" ]
 }
 
+@test "usenet-blackhole: a malformed PSI reading is announced and runs the pass unprotected" {
+    # The other half of the malformed-input pair, and the only path in this
+    # guard that used to fail CLOSED. awk compares a non-numeric `seen` as a
+    # string, and "garbage" >= 20 is true -- so a reading that is not a
+    # measurement tripped the gate, skipped the pass, and printed the garbage
+    # back as a pressure figure. A truncated or half-written read is enough to
+    # produce one. Same contract as the limit above: announced, then the pass
+    # runs, because a guard that cannot read its own input must not be the thing
+    # that stops the stack downloading.
+    keyed_env
+    stub_python
+    run env "PATH=$WORK/bin:$PATH" "PSI_IO_PATH=$(psi_fixture garbage)" "$RUN" --apply
+    assert_success
+    assert_output --partial "the I/O pressure reading 'garbage' is not a number"
+    refute_output --partial "host I/O is stalled"
+    [ -f "$WORK/argv" ]
+}
+
 @test "usenet-blackhole: the gate is the only thing that changes when pressure crosses the limit" {
     # Same run, same fixture, one hundredth apart. Without this, a gate that
     # always skipped -- or never did -- would pass the three tests above.
