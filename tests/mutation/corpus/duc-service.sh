@@ -39,7 +39,7 @@ mutation duc-initial-scan-failure-is-fatal \
   --bats tests/duc-service.bats \
   --test "duc: a failed initial scan does not stop the container coming up" \
   --why "lets a failing initial index kill startup under set -e. The web UI and the crontab both matter more than the first scan: this turns one bad index into a container that never serves anything again, and restart: always makes it a crash loop" \
-  --apply 'sed -i "s@^    \"\$SCAN_SH\" || echo \"Initial scan failed (exit \$?)\" | tee -a \"\$LOG_FILE\"\$@    \"\$SCAN_SH\"@" "$F"'
+  --apply 'sed -i "s@^        \"\$SCAN_SH\" || echo \"Initial scan failed (exit \$?)\" | tee -a \"\$LOG_FILE\"\$@    \"\$SCAN_SH\"@" "$F"'
 
 mutation duc-scan-failure-loses-the-log-line \
   --file duc-service/app/scan.sh \
