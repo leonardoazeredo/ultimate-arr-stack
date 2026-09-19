@@ -310,7 +310,11 @@ old "14 tests" claim went stale.
 - `scripts/backup-prune.sh`
 - `scripts/detect-credential-drift.sh`
 - `scripts/detect-vpn-zombies.sh`
+- `scripts/dns-matrix-check.sh`
+- `scripts/dns-rollback.sh`
 - `scripts/indexer-guard.sh`
+- `scripts/lib/dns-matrix.sh`
+- `scripts/lib/router-dns.sh`
 - `scripts/post-merge`
 - `scripts/pre-commit`
 - `scripts/sync-nas.sh`

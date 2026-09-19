@@ -89,3 +89,125 @@ mutation dns-rollback-ignores-uci-conf \
   --test "dns-rollback: UCI_CONF is passed to every uci call as -c" \
   --why "Stops scoping uci to UCI_CONF, so a rehearsal aimed at a scratch config directory silently runs against the live /etc/config instead. This is not hypothetical: on 2026-09-19 a rehearsal written against the UCI_CONFIG_DIR environment variable did exactly that on this router, because uci accepts the variable and ignores it. The scratch directory only isolates while -c is on every call" \
   --apply 'perl -0pi -e "s/if \[ -n \"\x24UCI_CONF\" \]; then/if false; then/" "$F"'
+
+# --- tests/helpers/router.bash ----------------------------------------------
+#
+# The helper is what stands between a test and a live router. Two of these
+# mutations reintroduce holes this file's tests actually found: the deny rule
+# matched uci set but not uci -q set, and matched iptables -A but not
+# iptables -t nat -I, which is how the redirect would really be added.
+
+mutation router-access-deny-ignores-uci-flags \
+  --file tests/helpers/router.bash \
+  --bats tests/router-access.bats \
+  --test "router-access: a qualified uci set is refused, not just the bare form" \
+  --why "Drops the flag allowance, so the guard only matches the unqualified form. The qualified one - uci -q set - then walks through, which is the shape a real script would use" \
+  --apply 'perl -0pi -e "s/\Quci([[:space:]]+-[^[:space:]]+)*[[:space:]]+\E/uci[[:space:]]+/" "$F"'
+
+mutation router-access-deny-iptables-needs-leading-flag \
+  --file tests/helpers/router.bash \
+  --bats tests/router-access.bats \
+  --test "router-access: an iptables insert is refused" \
+  --why "Requires the mutating flag to be iptables' first argument. iptables -t nat -I is how the DNS redirect would actually be inserted, and it never has its flag first" \
+  --apply 'perl -0pi -e "s/\Qiptables.*-[AIDXNFZE]\E/iptables[[:space:]]+-[AIDXNFZE]/" "$F"'
+
+mutation router-access-deny-drops-add-list \
+  --file tests/helpers/router.bash \
+  --bats tests/router-access.bats \
+  --test "router-access: add_list is refused" \
+  --why "Removes both add_list and its add prefix from the verb list. add_list is the verb the rollback script uses to write a pool's resolver, so a deny list that misses it misses the operation this whole migration performs" \
+  --apply 'perl -0pi -e "s/\(set\|add\|add_list\|/(set|/" "$F"'
+
+mutation router-access-prefers-the-jump-host \
+  --file tests/helpers/router.bash \
+  --bats tests/router-access.bats \
+  --test "router-access: the direct path is preferred when it works" \
+  --why "Makes the probe reach for pi1 before trying the router directly, so every live assertion runs through an unnecessary extra hop and a broken direct path is never noticed" \
+  --apply 'perl -0pi -e "s/if _router_try direct; then ROUTER_PATH=direct; return 0; fi/if _router_try jump;   then ROUTER_PATH=jump;   return 0; fi/" "$F"'
+
+mutation router-access-any-subnet-matches \
+  --file tests/helpers/router.bash \
+  --bats tests/router-access.bats \
+  --test "router-access: no shared subnet yields no address rather than a wrong one" \
+  --why "Makes the subnet comparison always succeed, so the first address the router reports is used whatever VLAN this host is on. That is the silent wrong-interface failure the derivation exists to prevent: 192.168.8.1 answers, it is just not the address a client here queries" \
+  --apply 'perl -0pi -e "s/if \[\[ \"\x24\{m%\.\*\}\" == \"\x24prefix\" \]\]; then/if true; then/" "$F"'
+
+mutation router-access-swallows-the-error-text \
+  --file tests/helpers/router.bash \
+  --bats tests/router-access.bats \
+  --test "router-access: no route at all is reported, not swallowed" \
+  --why "Keeps the failure and drops the explanation, so a skip says the router is unreachable without saying what happened. Two different problems - a refused connection and a missing ssh alias - become one indistinguishable skip" \
+  --apply 'perl -0pi -e "s/ROUTER_SSH_ERR=\"\x24out\"/ROUTER_SSH_ERR=\"\"/" "$F"'
+
+# --- what this corpus does NOT score yet, and why ---------------------------
+#
+# tests/dns-resilience.bats, tests/alpine-dns-aaaa.bats and tests/router-dns.bats
+# are Phase 1 acceptance tests, and the first two are RED on purpose: they assert
+# the migration's end state, which the router does not reach until Phase 4 and
+# Phase 6. The mutation harness runs the named test unmutated first and refuses
+# to score a test that is already failing ("a later failure would prove
+# nothing"), so a corpus entry naming one of them would ERROR rather than kill.
+# Adding one now would be noise, not coverage.
+#
+# Their sensitivity is established two other ways instead:
+#
+#   * the same expectations are scored by dns-matrix-* above, through the unit
+#     test of scripts/lib/dns-matrix.sh, which is the module every one of those
+#     files judges with;
+#   * the assertions were run against the NAS Pi-hole, which is the correct end
+#     state for these rows: ./scripts/dns-matrix-check.sh reports 50/50 rows
+#     matched against 192.168.110.246, including sonarr.lan A = 192.168.110.250,
+#     sonarr.lan AAAA = :: and doubleclick.net = BLOCKED. Assertions that cannot
+#     pass on a correct resolver would be the defect; these demonstrably can.
+#
+# When Phase 4 makes the .lan rows green and Phase 6 makes the blocked rows
+# green, each of those tests becomes scorable and needs its entry here. That is
+# a deliberate debt, recorded rather than forgotten.
+#
+# tests/alpine-dns-aaaa.bats is a third case: its guard is a container's exit
+# status against a live resolver, and the configuration that would break it
+# lives on the router, not in a file this repo can mutate. There is nothing to
+# break and watch go red.
+
+# --- scripts/lib/router-dns.sh ----------------------------------------------
+#
+# These judge the router's live state: which pools advertise a resolver, what
+# the redirect chain holds, and where dnsmasq listens. Each mutation loosens one
+# rule to "whatever, it's fine", which is the failure mode that matters here -
+# the checks print a verdict either way, so a rule that stops discriminating
+# reports a healthy router regardless of what it was handed.
+
+mutation router-dns-ignores-rules-while-disabled \
+  --file scripts/lib/router-dns.sh \
+  --bats tests/lib-router-dns.bats \
+  --test "router-dns: a rule in the chain while dns_enabled=0 fails" \
+  --why "Stops noticing rules in adg_redirect while dns_enabled is 0. That state is the one the migration is supposed to be reversible to: the config says AdGuard is off, so every query is being redirected to a resolver that is not supposed to be answering" \
+  --apply 'perl -0pi -e "s/if \[\[ \"\x24count\" -gt 0 \]\]; then/if false; then/" "$F"'
+
+mutation router-dns-udp-arm-not-required \
+  --file scripts/lib/router-dns.sh \
+  --bats tests/lib-router-dns.bats \
+  --test "router-dns: a tcp-only chain with dns_enabled=1 fails on the missing udp arm" \
+  --why "Drops the check that the redirect covers UDP. UDP is the transport DNS is actually used over, so a tcp-only redirect leaves dnsmasq answering ordinary lookups while the config claims AdGuard Home does - the exact half-installed state the two-transport assertions exist for" \
+  --apply 'perl -0pi -e "s/if \[\[ \"\x24udp\" -lt 1 \]\]; then/if false; then/" "$F"'
+
+mutation router-dns-any-redirect-port-counts \
+  --file scripts/lib/router-dns.sh \
+  --bats tests/lib-router-dns.bats \
+  --test "router-dns: a udp arm pointed at another port does not count as the arm" \
+  --why "Accepts a REDIRECT to any port as the AdGuard arm, so a chain pointing at 3053's neighbour would satisfy a check whose whole purpose is to confirm the queries land on 3053" \
+  --apply 'perl -0pi -e "s/\"\x24toports\" == \"3053\"/\"\x24toports\" != \"\"/" "$F"'
+
+mutation router-dns-octet-range-unchecked \
+  --file scripts/lib/router-dns.sh \
+  --bats tests/lib-router-dns.bats \
+  --test "router-dns: an out-of-range octet is not a well-formed address" \
+  --why "Keeps the shape test and drops the range test, so 999.1.1.1 is accepted as a resolver address. A pool handed a value no client can parse is a DHCP fault that reads as a healthy pool" \
+  --apply 'perl -0pi -e "s/\(\( 10#\x24octet <= 255 \)\) \|\| return 1/:/" "$F"'
+
+mutation router-dns-port53-binds-invisible \
+  --file scripts/lib/router-dns.sh \
+  --bats tests/lib-router-dns.bats \
+  --test "router-dns: every live non-loopback address bound passes" \
+  --why "Inverts the port filter so :53 listeners are discarded instead of kept. Every address then looks unbound, and the check that a client's queries land somewhere on the router stops being able to see the listeners that answer them" \
+  --apply 'perl -0pi -e "s/if \(port != \"53\"\) continue/if (port == \"53\") continue/" "$F"'

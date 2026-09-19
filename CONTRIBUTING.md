@@ -357,6 +357,7 @@ scripts/
     ├── check-uptime-monitors.sh   # Verify Uptime Kuma monitors
     ├── check-dns-duplicates.sh # Detect duplicate .lan domains
     ├── dns-matrix.sh           # Evaluate the DNS baseline matrix against a resolver
+    ├── router-dns.sh           # Judge the router's DNS state (pools, redirect, binds)
     ├── check-domains.sh        # Verify domain accessibility
     ├── check-doc-links.sh      # Resolve internal markdown links
     ├── check-image-versions.sh # Check for stale Docker image tags

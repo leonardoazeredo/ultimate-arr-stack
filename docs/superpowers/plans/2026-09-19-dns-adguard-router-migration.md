@@ -48,7 +48,7 @@ Measured 2026-09-19 on the live router (via `ssh pi@pi1 'ssh arr-stack-router ..
 | dnsmasq `:53` binds | `192.168.8.1`, `192.168.9.1`, `192.168.110.1`, `192.168.120.1`, `192.168.130.1`, `127.0.0.1`, tailscale, the router's ProtonVPN address | `netstat -lntup` |
 | Disabled `iot` pool | `network.iot` is configured at `192.168.10.1` on `br-iot`, but **`network.iot.disabled='1'`** — the bridge does not exist and no `iot` interface is registered, so dnsmasq never binds `192.168.10.1`. `dhcp.iot` advertises no resolver, so it is not a migration target | `uci show network`, `ip -4 addr`, `ubus list network.interface.*` |
 | dnsmasq `address` option support | yes — `append_address()` at `/etc/init.d/dnsmasq:172`, wired at `:1087`, emits `--address=$1`; `address_as_local` defaults to `0` | `/etc/init.d/dnsmasq` |
-| Pre-existing `local='/lan/'` | set; means "answer `.lan` locally, never forward". Complementary to `address`, not conflicting | `uci show dhcp` |
+| Pre-existing `local='/lan/'` | set; stops `.lan` queries being forwarded upstream. **It makes dnsmasq authoritative over the zone with no data, so an unknown `.lan` name comes back `NXDOMAIN`, not `NODATA`** — measured 2026-09-19 against the router's `:53`. The NAS Pi-hole answers the same question with `NODATA` (`NOERROR`, empty), because `address=/lan/::` gives dnsmasq local data for the zone. The two resolvers therefore differ on names that do not exist, and 3.6's parity harness has to name that as a deliberate difference rather than discovering it | `uci show dhcp`, `dig nope.lan @192.168.120.1` vs `@192.168.110.246` |
 | dnsmasq `confdir` | `/tmp/dnsmasq.d` — tmpfs, does not survive reboot | `uci show dhcp` |
 | dnsmasq reload trigger | `procd_add_reload_trigger "dhcp" "system"` — fires only if a `config.change` event is emitted | `/etc/init.d/dnsmasq:1370` |
 | Who emits `config.change` | `/sbin/reload_config`, and **nothing calls it except `/etc/init.d/boot`** | `grep -rl reload_config /etc/init.d/` |
@@ -251,22 +251,26 @@ Per repo convention this lives in `tests/mutation/corpus/`, with a red test prov
 
 These tests are written before any change and **must fail against the current design**. If a test passes now, it is not testing the migration.
 
-- [ ] **1.1 `tests/dns-resilience.bats`** — the anchor test. Asserts that a resolver answering on the router's address is sufficient for a client to resolve a public name, a `.lan` name, and to have a blocked name blocked — with the NAS resolver not consulted. It fails today because the router's dnsmasq knows no `.lan` records and does no blocking.
+- [x] **1.1 `tests/dns-resilience.bats`** — the anchor test. Asserts that a resolver answering on the router's address is sufficient for a client to resolve a public name, a `.lan` name, and to have a blocked name blocked — with the NAS resolver not consulted. It fails today because the router's dnsmasq knows no `.lan` records and does no blocking.
 
-- [ ] **1.2 `tests/router-dns.bats`** — live assertions over the router, in the style of `tests/network-segmentation.bats`, including its vantage-point discipline. Assert:
+- [x] **1.2 `tests/router-dns.bats`** — live assertions over the router, in the style of `tests/network-segmentation.bats`, including its vantage-point discipline. Assert:
   - per-pool `dhcp_option 6` state;
   - **`adg_redirect` exists in both states and is empty when `dns_enabled='0'`**, holding `REDIRECT --to-ports 3053` for tcp and udp when it is `'1'`. The chain is declared unconditionally by `iptables-restore`; an "exists iff" assertion fails at baseline;
   - dnsmasq binds `:53` on every **live** VLAN-side interface — `192.168.8.1`, `192.168.9.1`, `192.168.110.1`, `192.168.120.1`, `192.168.130.1` — and not on `192.168.10.1`, because `network.iot` is `disabled='1'` and `br-iot` does not exist. Derive the expected set from the live interface list rather than hardcoding six addresses.
 
   Must **skip with a reason** everywhere except a host that can reach the router (pi1), never fail silently.
 
-- [ ] **1.3 `tests/e2e/dns.spec.ts`** — from the e2e container on the NAS: public resolution, `.lan` resolution, blocked-domain behaviour, **TCP and UDP both** (a TCP-only probe passes while UDP resolution is broken — the trap `network-segmentation.bats` already documents for port 53). Assert on the answer, not on a status code.
+- [x] **1.3 `tests/e2e/dns.spec.ts`** — from the e2e container on the NAS: public resolution, `.lan` resolution, blocked-domain behaviour, **TCP and UDP both** (a TCP-only probe passes while UDP resolution is broken — the trap `network-segmentation.bats` already documents for port 53). Assert on the answer, not on a status code.
 
-- [ ] **1.4 The AAAA parity test.** `address=/lan/::` exists because musl/Alpine containers treat AAAA NXDOMAIN as a hard failure. Assert an Alpine container can resolve a `.lan` name when the router is the only resolver. This test is the one most likely to fail late and expensively; it runs from Phase 2 onward.
+- [x] **1.4 The AAAA parity test.** `address=/lan/::` exists because musl/Alpine containers treat AAAA NXDOMAIN as a hard failure. Assert an Alpine container can resolve a `.lan` name when the router is the only resolver. This test is the one most likely to fail late and expensively; it runs from Phase 2 onward. Delivered as `tests/alpine-dns-aaaa.bats`, which points a real `alpine` container at the router with `--dns` and judges it with `getent ahostsv4` (IPv4 answer), `getent hosts` (getaddrinfo not defeated) and an AAAA query (parity with the recorded `::`).
 
-- [ ] **1.5 Extend `tests/mutation/corpus/`** with an entry for each new guard, and confirm `./tests/mutation/run-mutations.sh` turns each named test red. Put them in a new corpus file rather than appending to an existing one; another plan in flight edits `usenet-blackhole.sh` and `tests/mutation/README.md`. See *Running this in parallel with other work*.
+- [x] **1.5 Extend `tests/mutation/corpus/`** with an entry for each new guard, and confirm `./tests/mutation/run-mutations.sh` turns each named test red. Put them in a new corpus file rather than appending to an existing one; another plan in flight edits `usenet-blackhole.sh` and `tests/mutation/README.md`. See *Running this in parallel with other work*.
+
+  One of the two anticipated rubs turned out to be a required edit rather than something to avoid: `tests/shellcheck.bats` derives a no-sweep list from the generative sweep's `TARGETS` and fails when a new production script is missing from `tests/mutation/README.md`. The new scripts had to be listed there, so this branch and the in-flight one both touch that file and the PR will conflict in it. Small and mechanical, but plan for it.
 
 **Gate 1.** `./tests/run-tests.sh` runs, the new tests execute, the ones that must fail do fail for the stated reason, and the mutation corpus kills the new guards. No production change yet.
+
+**Mutation scoring has a stated debt here.** The acceptance tests that are red on purpose cannot be scored by the corpus: the harness runs each named test unmutated first and refuses to score a test that is already failing, so an entry naming one of them would ERROR rather than kill. Coverage for their guards comes from two other places meanwhile — the `dns-matrix-*` mutations score the module they all judge with, and `./scripts/dns-matrix-check.sh` reports 50/50 rows matched against the NAS Pi-hole, which is the correct end state for those rows. When Phase 4 makes the `.lan` rows green and Phase 6 makes the blocked rows green, each becomes scorable and needs its entry. This is recorded in the corpus file itself, not just here.
 
 ---
 
