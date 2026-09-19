@@ -38,4 +38,13 @@ EnvironmentFile=/volume1/docker/arr-stack/.env
 # entries. Re-copying this unit is how it stays on; the installed copy under
 # ~/.config/systemd/user/ is a plain copy, not a symlink, so the two can drift
 # and nothing will say so.
-ExecStart=/bin/bash -c 'mkdir -p /volume1/docker/arr-stack/logs && exec /bin/bash /volume1/docker/arr-stack/scripts/usenet-blackhole.sh --apply --report-failures >> /volume1/docker/arr-stack/logs/usenet-blackhole.log 2>&1'
+#
+# --max-inflight 6 is the resting state, for the same reason --report-failures
+# is on above: the script ships the cap inert and takes a flag, which is right
+# for a rollout and wrong for a stack that is supposed to stay up. TorBox holds
+# ten concurrent usenet downloads and refuses the eleventh, so 6 sits below the
+# limit rather than at it, and the module's own docstring records why 6 was the
+# value worth trying. Measured 2026-09-18, with no ceiling: 46 jobs submitted in
+# one hour, 60 incomplete, and the arrs blind to all of them because a blackhole
+# item is never in an arr queue.
+ExecStart=/bin/bash -c 'mkdir -p /volume1/docker/arr-stack/logs && exec /bin/bash /volume1/docker/arr-stack/scripts/usenet-blackhole.sh --apply --report-failures --max-inflight 6 >> /volume1/docker/arr-stack/logs/usenet-blackhole.log 2>&1'

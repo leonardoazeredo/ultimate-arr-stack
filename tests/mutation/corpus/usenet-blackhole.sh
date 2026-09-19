@@ -410,3 +410,30 @@ mutation usenet-blackhole-inflight-cap-default-on \
   --test "the extracted modules pass their pytest suite" \
   --why "the ceiling has to ship off: it is a measurement, and a default of 10 makes the provider's limit look like a chosen value while removing the only comparison the measurement needs. A pass with ten jobs already in flight then stops offering the eleventh before the flag was ever used, and nothing in argparse or the banner says a default put it there" \
   --apply 'sed -i.bak "s@type=non_negative_int, default=0,@type=non_negative_int, default=10,@" "$F" && rm -f "$F.bak"'
+
+# --- usenet-blackhole.service: the in-flight ceiling ----------------------
+#
+# The module ships the cap inert on purpose, and that is the half every entry
+# above guards. Nothing above looks at the unit, and the unit is where the
+# ceiling actually rests: a stack that never passes the flag runs uncapped no
+# matter how correct the module is.
+#
+# `sed -i.bak`, not the bare `sed -i` this was first written with: GNU sed
+# reads `-i` as the in-place flag, BSD sed reads the script as a backup suffix,
+# fails, and edits nothing -- so on this host both entries would have been
+# reported as changing no file at all. tests/mutation/README.md names the same
+# trap for the corpus as a whole.
+
+mutation unit-inflight-cap-removed \
+  --file scripts/usenet-blackhole.service \
+  --bats tests/usenet-blackhole.bats \
+  --test "usenet-blackhole: the shipped unit caps in-flight jobs below TorBox's ten slots" \
+  --why "removing the flag from ExecStart returns the pass to --max-inflight 0, the state that submitted 46 jobs in one hour on 2026-09-18 while 60 sat incomplete" \
+  --apply 'sed -i.bak "s@--report-failures --max-inflight 6@--report-failures@" "$F" && rm -f "$F.bak"'
+
+mutation unit-inflight-cap-above-slots \
+  --file scripts/usenet-blackhole.service \
+  --bats tests/usenet-blackhole.bats \
+  --test "usenet-blackhole: the shipped unit caps in-flight jobs below TorBox's ten slots" \
+  --why "a ceiling at or above TorBox's ten concurrent slots cannot bound anything; set to 11 it is indistinguishable from no ceiling from the provider's side" \
+  --apply 'sed -i.bak "s@--max-inflight 6@--max-inflight 11@" "$F" && rm -f "$F.bak"'

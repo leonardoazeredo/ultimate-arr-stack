@@ -467,3 +467,32 @@ STUB
     assert_failure
     assert_output --partial "exited non-zero"
 }
+
+# --- the shipped unit ------------------------------------------------------
+
+@test "usenet-blackhole: the shipped unit caps in-flight jobs below TorBox's ten slots" {
+    # The script ships the cap inert (0, printed as "off"), which is right for a
+    # rollout and wrong as a resting state -- the argument this unit's own
+    # --report-failures comment already makes. TorBox refuses the eleventh
+    # concurrent usenet download, so a ceiling above 10 bounds nothing, and 0
+    # bounds nothing at all: on 2026-09-18 the pass submitted 46 jobs in one
+    # hour and left 60 incomplete while neither arr could see any of them.
+    local unit="$REPO_ROOT/scripts/usenet-blackhole.service"
+    local exec_line value
+    exec_line="$(grep -m1 '^ExecStart=' "$unit")"
+    # `[=[:space:]]`, not `[= ]`: the unit line is one long single-quoted
+    # argument, and a literal space inside an unquoted regex word is a syntax
+    # error on bash 3.2 (the /bin/bash this repo's shell half must keep
+    # working on) -- the test never ran at all. The class is the same two
+    # characters, `=` and a space, spelled so the parser sees one word.
+    if [[ ! "$exec_line" =~ --max-inflight[=[:space:]]([0-9]+) ]]; then
+        fail "ExecStart does not pass --max-inflight: $exec_line"
+    fi
+    value="${BASH_REMATCH[1]}"
+    if (( value < 1 )); then
+        fail "--max-inflight $value is no ceiling at all"
+    fi
+    if (( value > 10 )); then
+        fail "--max-inflight $value is above TorBox's ten concurrent slots"
+    fi
+}
