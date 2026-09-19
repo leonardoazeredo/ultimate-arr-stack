@@ -496,3 +496,70 @@ STUB
         fail "--max-inflight $value is above TorBox's ten concurrent slots"
     fi
 }
+
+# --- host I/O pressure gate -------------------------------------------------
+
+# A fixture standing in for /proc/pressure/io. The real file is Linux-only, so
+# nothing in this section may touch it -- the suite also runs on macOS.
+psi_fixture() {
+    printf 'some avg10=%s avg60=0.00 avg300=0.00 total=0\nfull avg10=%s avg60=0.00 avg300=0.00 total=0\n' \
+        "$1" "$1" > "$WORK/pressure-io"
+    echo "$WORK/pressure-io"
+}
+
+# Every test here needs a keyed .env, because the gate sits after the key guard.
+keyed_env() {
+    printf 'MEDIA_ROOT=%s/data\nTORBOX_API_KEY=testtorboxkey\n' "$WORK" > "$ENV"
+}
+
+@test "usenet-blackhole: a stalled host skips the pass before python runs" {
+    keyed_env
+    stub_python
+    run env "PATH=$WORK/bin:$PATH" "PSI_IO_PATH=$(psi_fixture 95.00)" "$RUN" --apply
+    assert_success
+    assert_output --partial "pressure-gate"
+    # The whole point of the gate: no work reaches python at all.
+    [ ! -f "$WORK/argv" ]
+}
+
+@test "usenet-blackhole: a healthy host runs the pass" {
+    keyed_env
+    stub_python
+    run env "PATH=$WORK/bin:$PATH" "PSI_IO_PATH=$(psi_fixture 1.90)" "$RUN" --apply
+    assert_success
+    refute_output --partial "pressure-gate"
+    [ -f "$WORK/argv" ]
+}
+
+@test "usenet-blackhole: no PSI on the host means the gate fails open" {
+    # macOS, and any kernel built without PSI, have no /proc/pressure/io. A gate
+    # that blocked there would stop the stack downloading on every machine the
+    # suite runs on, and would do it silently -- which is the failure mode this
+    # repo keeps being bitten by.
+    keyed_env
+    stub_python
+    run env "PATH=$WORK/bin:$PATH" "PSI_IO_PATH=$WORK/does-not-exist" "$RUN" --apply
+    assert_success
+    refute_output --partial "pressure-gate"
+    [ -f "$WORK/argv" ]
+}
+
+@test "usenet-blackhole: the gate is the only thing that changes when pressure crosses the limit" {
+    # Same run, same fixture, one hundredth apart. Without this, a gate that
+    # always skipped -- or never did -- would pass the three tests above.
+    keyed_env
+    local pair value expect
+    for pair in "19.99:run" "20.00:skip"; do
+        value="${pair%%:*}"
+        expect="${pair##*:}"
+        stub_python
+        rm -f "$WORK/argv"
+        run env "PATH=$WORK/bin:$PATH" "PSI_IO_PATH=$(psi_fixture "$value")" "$RUN" --apply
+        assert_success
+        if [[ "$expect" == "run" ]]; then
+            [ -f "$WORK/argv" ] || fail "avg10=$value should have run the pass"
+        else
+            [ ! -f "$WORK/argv" ] || fail "avg10=$value should have skipped the pass"
+        fi
+    done
+}

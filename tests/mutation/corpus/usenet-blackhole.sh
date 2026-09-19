@@ -437,3 +437,34 @@ mutation unit-inflight-cap-above-slots \
   --test "usenet-blackhole: the shipped unit caps in-flight jobs below TorBox's ten slots" \
   --why "a ceiling at or above TorBox's ten concurrent slots cannot bound anything; set to 11 it is indistinguishable from no ceiling from the provider's side" \
   --apply 'sed -i.bak "s@--max-inflight 6@--max-inflight 11@" "$F" && rm -f "$F.bak"'
+
+# --- scripts/usenet-blackhole.sh: the host I/O pressure gate --------------
+#
+# On 2026-09-18 the NAS sat at load 58 with io full avg10 between 78% and 81%
+# for hours while a usenet pass went on submitting into the same pool every two
+# minutes -- the pass lengthening the stall it was competing with. Every entry
+# here either runs a pass exactly when the host is wedged or stops the stack
+# downloading on a host that has no PSI to read, and the fail-open direction is
+# the quieter of the two: a guard that cannot read /proc/pressure looks the same
+# as a guard with nothing to report.
+
+mutation pressure-gate-inverted \
+  --file scripts/usenet-blackhole.sh \
+  --bats tests/usenet-blackhole.bats \
+  --test "usenet-blackhole: the gate is the only thing that changes when pressure crosses the limit" \
+  --why "inverting the comparison runs the pass exactly when the host is stalled and skips it when the host is healthy -- the whole guard backwards, and the boundary test is what notices" \
+  --apply 'sed -i.bak "s@exit !(seen >= limit)@exit !(seen < limit)@" "$F" && rm -f "$F.bak"'
+
+mutation pressure-gate-threshold-hardcoded \
+  --file scripts/usenet-blackhole.sh \
+  --bats tests/usenet-blackhole.bats \
+  --test "usenet-blackhole: the gate is the only thing that changes when pressure crosses the limit" \
+  --why "ignoring PSI_IO_LIMIT and comparing against a literal makes the trip point unmeasurable and un-tunable on a host whose healthy baseline is not this one's" \
+  --apply 'sed -i.bak "s@-v limit=\"\$PSI_IO_LIMIT\"@-v limit=\"999999\"@" "$F" && rm -f "$F.bak"'
+
+mutation pressure-gate-fails-closed \
+  --file scripts/usenet-blackhole.sh \
+  --bats tests/usenet-blackhole.bats \
+  --test "usenet-blackhole: no PSI on the host means the gate fails open" \
+  --why "treating an unreadable /proc/pressure/io as stalled stops the stack downloading on every host without PSI, silently, and it would take the macOS half of this suite down with it. The reading has to be invented for this mutant to be observable at all: the reader's own exit status is discarded by the gate's \`|| true\`, so \`|| return 0\` alone is an equivalent mutant -- empty stdout either way, fail-open gate either way. Returning a number that looks stalled is what makes the defect reach the behaviour the fail-open test names" \
+  --apply 'sed -i.bak "s@\[\[ -r \"\$path\" \]\] || return 1@[[ -r \"\$path\" ]] || { echo 100; return 0; }@" "$F" && rm -f "$F.bak"'

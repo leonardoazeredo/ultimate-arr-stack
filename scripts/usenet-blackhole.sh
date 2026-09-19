@@ -108,6 +108,35 @@ DEFAULT_STALL_HOURS=4
 # value is kept only after the fetch rate at 6 and at 10 have been compared.
 DEFAULT_MAX_INFLIGHT=0
 
+# io full avg10 at or above which a pass refuses to start. The reading and the
+# reason for `full` over `some` are at the gate below; the number is 20 because
+# the healthy baseline measured on this NAS is 1.9% and the incident of
+# 2026-09-18 sat between 78% and 81% for hours, so 20% is high enough that an
+# ordinary import or a transcoding sweep never reaches it and low enough to fire
+# long before the box is wedged. Read from the environment so a host whose
+# baseline differs can be tuned without editing the script.
+PSI_IO_LIMIT="${PSI_IO_LIMIT:-20}"
+
+# io full avg10 from /proc/pressure/io, or nothing when PSI is unavailable.
+#
+# `full` rather than `some`: `some` counts a single stalled task, which is
+# ordinary on a busy box, while `full` means every runnable task was stalled on
+# I/O at once. Measured on this NAS: 1.9% healthy, 78-81% during the incident of
+# 2026-09-18.
+#
+# PSI_IO_PATH exists so a test can point this at a fixture; the real file is
+# Linux-only and the suite also runs on macOS.
+psi_io_full_avg10() {
+  local path="${PSI_IO_PATH:-/proc/pressure/io}"
+  [[ -r "$path" ]] || return 1
+  awk '$1 == "full" {
+         for (i = 2; i <= NF; i++) {
+           split($i, kv, "=")
+           if (kv[1] == "avg10") { print kv[2]; exit }
+         }
+       }' "$path"
+}
+
 APPLY=false
 VERBOSE=false
 REPORT_FAILURES=false
@@ -301,6 +330,27 @@ if $REPORT_DRY_RUN; then PY_ARGS+=(--report-dry-run); fi
 # ${PY_ARGS[@]+"${PY_ARGS[@]}"} rather than a bare expansion: with `set -u`, an
 # empty array is an unbound variable in bash before 4.4, and /bin/bash on macOS
 # is 3.2.
+
+# --- host I/O pressure gate -------------------------------------------------
+#
+# A pass writes to the same pool the rest of the stack reads from, so a pass
+# that starts while the host is already stalled is the one thing that cannot
+# help: it lengthens the stall it is competing with. On 2026-09-18 this NAS sat
+# at load 58 with io full avg10 between 78% and 81% for hours; every container
+# accepted a TCP connection and answered nothing.
+#
+# Fails OPEN, deliberately. A kernel built without PSI, or a container that
+# cannot read /proc/pressure, must not become a stack that silently stops
+# downloading -- and "the guard ran and found nothing" and "the guard could not
+# run" must not be the same observable result.
+HOST_PRESSURE="$(psi_io_full_avg10 || true)"
+if [[ -n "$HOST_PRESSURE" ]] &&
+   awk -v seen="$HOST_PRESSURE" -v limit="$PSI_IO_LIMIT" \
+       'BEGIN { exit !(seen >= limit) }'; then
+  echo "[pressure-gate] host I/O is stalled (io full avg10=${HOST_PRESSURE}%, limit ${PSI_IO_LIMIT}%); skipping this pass"
+  exit 0
+fi
+
 if ! TORBOX_API_KEY="$TORBOX_KEY" \
         SONARR_API_KEY="$SONARR_KEY" \
         RADARR_API_KEY="$RADARR_KEY" \
