@@ -1584,7 +1584,13 @@ def test_finished_releases_are_fetched_concurrently(tmp_path, monkeypatch):
 def test_the_fetch_pool_is_bounded(tmp_path, monkeypatch):
     # Unbounded would stack an unrar per completed release on a NAS that is
     # also transcoding, and the arr's importer reads the same disk.
-    nzb_dir, watch, state_path, listing = several_jobs(tmp_path, m.FETCH_WORKERS * 2)
+    #
+    # One round's worth of jobs, not two. A pass now fetches at most
+    # FETCH_WORKERS releases, so a fixture of FETCH_WORKERS * 2 leaves half of
+    # them `complete` in the state file by design and the empty-state assertion
+    # below could only pass against the unbounded defect. The subject here is
+    # the width of the pool; the width of the pass has its own test.
+    nzb_dir, watch, state_path, listing = several_jobs(tmp_path, m.FETCH_WORKERS)
     lock = threading.Lock()
     live, peak = 0, 0
 
@@ -2450,3 +2456,29 @@ def test_an_unusable_release_at_fetch_time_is_not_reported(tmp_path, monkeypatch
           arr_keys={"SONARR_API_KEY": "sk"}, report_failures=True)
 
     assert arr.posts == []
+
+
+def test_a_pass_fetches_one_round_and_leaves_the_rest(tmp_path, monkeypatch):
+    # 2026-09-20: one admitted pass pulled 21 releases, three at a time, for
+    # 53m12s, while the operator's --max-inflight 6 read 3 -- that ceiling
+    # counts jobs TorBox has NOT finished, and the fetch set never consulted
+    # it. The fetch set is now one round.
+    #
+    # Nine jobs, not three. With FETCH_WORKERS jobs the unbounded line fetches
+    # them all and this test passes against the defect, which is the exact
+    # shape of a guard that cannot fail.
+    nzb_dir, watch, state_path, listing = several_jobs(tmp_path, m.FETCH_WORKERS * 3)
+    started = []
+
+    def fake_fetch(torbox, key, job, watch_dir, staging_dir, out=print):
+        started.append(job["name"])
+        out(f"    fetched: {job['name']}")
+        return True
+
+    monkeypatch.setattr(m, "fetch", fake_fetch)
+    monkeypatch.setattr(m, "TorBox", lambda *a, **k: FakeTorBox(list_result=listing))
+    m.run(str(nzb_dir), str(watch), str(tmp_path / "staging"), state_path,
+          str(tmp_path / "f.log"), "key", apply_changes=True, out=lambda *a: None)
+
+    assert len(started) == m.FETCH_WORKERS
+    assert len(m.load_state(state_path)["jobs"]) == m.FETCH_WORKERS * 2

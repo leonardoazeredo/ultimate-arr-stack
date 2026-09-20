@@ -530,3 +530,17 @@ mutation status-drop-the-skip-notice \
   --test "the extracted modules pass their pytest suite" \
   --why "the shell half records the skip and the renderer half has to show it; a page that reads the file and prints nothing is the same page as before the fix -- twelve jobs painted \`stalled\` with a fresh \`Generated\` timestamp and no reason anywhere. The JSON keeps the record either way, so only a renderer test notices" \
   --apply 'sed -i.bak "s@^    if not isinstance(skipped, dict):\$@    if True:@" "$F" && rm -f "$F.bak"'
+
+# --- the fetch set has no ceiling ------------------------------------------
+#
+# The ceiling that shipped with PR #101 counts jobs TorBox has NOT finished.
+# The local I/O that wedged the host comes from the jobs it HAS finished, and
+# that population had no bound at all on 2026-09-20: 21 releases owed local
+# I/O while --max-inflight read 3.
+
+mutation usenet-blackhole-fetch-set-unbounded \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "restores the line that let a single admitted pass pull 21 releases, two of them 30-38 GB, three at a time for 53m12s. Measured that day: load went 8.47 -> 50.18 and io full avg10 to 81.91%, and the value the operator's ceiling compared against was 3 because it counts jobs still AT TorBox. The pass cost 86.22 GB logical and 170.6 GB of platter writes to deliver a few GB of media" \
+  --apply 'sed -i.bak "s@to_fetch = owed\[:FETCH_WORKERS\]@to_fetch = owed@" "$F" && rm -f "$F.bak"'

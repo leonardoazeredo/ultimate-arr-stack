@@ -1420,7 +1420,31 @@ def run(nzb_dir, watch_dir, staging_dir, state_path, failed_log, api_key,
             out(f"    ... {name}: {status}")
 
     fetched = 0
-    to_fetch = [(key, name) for key, name, status in results if status == "complete"]
+    # One round, not the whole backlog.
+    #
+    # `results` carries every job TorBox has finished. On 2026-09-20 that was
+    # 21 releases, two of them 30-38 GB, and the pass pulled all of them three
+    # at a time for 53m12s while the host went to 81.91% io full-stall. The
+    # operator's --max-inflight did not bound this and could not: it counts
+    # jobs TorBox has NOT finished, which is the opposite population, and it
+    # gates only the submission loop.
+    #
+    # FETCH_WORKERS is the bound, and it is the right one rather than a new
+    # constant. It is already the number of releases this pass can work on at
+    # once, so slicing to it makes a pass exactly one round: the pass can no
+    # longer outlive, by an order of magnitude, the pressure reading that
+    # admitted it. A new --fetch-budget flag would be a second knob for a
+    # quantity that already has one.
+    #
+    # First N by the order `results` arrives in. Not by size or age: sorting
+    # would make which releases go first depend on something no test pins, and
+    # the remainder is not lost -- those jobs stay `complete` in the state
+    # file and the next pass picks them up.
+    owed = [(key, name) for key, name, status in results if status == "complete"]
+    to_fetch = owed[:FETCH_WORKERS]
+    if len(owed) > len(to_fetch):
+        out(f"  {len(owed)} releases are ready: fetching {len(to_fetch)} this pass, "
+            f"{len(owed) - len(to_fetch)} wait for a later one")
     if to_fetch:
         with ThreadPoolExecutor(max_workers=min(FETCH_WORKERS, len(to_fetch))) as pool:
             pending = {
