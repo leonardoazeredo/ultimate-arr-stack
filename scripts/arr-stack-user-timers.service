@@ -1,0 +1,58 @@
+[Unit]
+Description=Re-arm the arr-stack user timers once /home is usable
+Documentation=file:/volume1/docker/arr-stack/scripts/rearm-user-timers.sh
+#
+# WHY THIS IS A SYSTEM UNIT, AGAINST THE 2026-09-19 PLAN'S RULING
+#
+# That plan decided not to ship a system unit, on two grounds. The first was
+# "it would need root to install on a box where we have none" -- measured
+# false on 2026-09-20: leoleg has no passwordless sudo, but `sudo` works with
+# the owner's password, which is how the macvlan shim was installed. The second
+# was that tests/systemd-units.bats asserts the units in scripts/ carry no
+# root/system-install assumptions. That guard is about the --user units, and
+# this file is deliberately not one of them: it is never copied into
+# ~/.config/systemd/user/. The assert list names its files explicitly, and this
+# one is not on it, so the guard keeps covering what it was written for. The
+# ruling is reversed knowingly, not routed around.
+#
+# WHAT WENT WRONG WITHOUT IT
+#
+# On 2026-09-20 the box rebooted at 19:07. user@1000.service was active at
+# 19:07:38 and home.mount only at 19:08:06, so the user manager read
+# ~/.config/systemd/user/ while /home was still absent, loaded none of the
+# eight unit files, and activated timers.target empty. Nothing noticed for
+# fifteen minutes and nothing would have noticed at all: `is-enabled` reported
+# every timer as enabled and the timers.target.wants/ symlinks were intact.
+#
+# WHY IT DOES NOT ORDER ON home.mount
+#
+# Tried first, on 2026-09-20: a drop-in adding RequiresMountsFor=/home/leoleg
+# to user@1000.service. It did nothing. home.mount reports an empty
+# FragmentPath -- it is an API unit that does not exist until UGOS has already
+# performed the mount -- so at the moment the manager is loaded there is no
+# mount unit for the directive to order against. This unit therefore starts the
+# script and lets the script poll for the unit directory instead, the same way
+# scripts/boot-compose-up.service polls for its file.
+
+Wants=user@1000.service
+After=user@1000.service systemd-user-sessions.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+
+# The script runs `systemctl --user`, which needs the user manager and its
+# runtime dir. Running as leoleg is what makes $HOME resolve to /home/leoleg and
+# the unit directory the script polls for be the right one.
+User=leoleg
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+
+# The script waits up to REARM_TIMEOUT_SECONDS (600) for /home to appear. The
+# systemd default TimeoutStartSec is 90s, which would kill it mid-wait and turn
+# a slow mount into a failed unit, so the timeout has to cover the whole wait.
+TimeoutStartSec=900
+
+ExecStart=/volume1/docker/arr-stack/scripts/rearm-user-timers.sh
+
+[Install]
+WantedBy=multi-user.target

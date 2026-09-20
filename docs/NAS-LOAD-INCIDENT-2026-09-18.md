@@ -186,13 +186,32 @@ Two items are live on the box right now, not architectural:
 - **488 NZBs were still queued at the reboot**, and the blackhole timer is
   currently inactive, so nothing is submitting. Both need a decision before this
   ingest path is exercised again.
-- **The user timers did not arm after that reboot.** On the boot after this
-  incident the user manager started at 00:05:04, 29 seconds after boot, while the
-  unit files live under `/home`, a separate btrfs subvolume on the LVM/md pool.
-  `timers.target` came up active and empty, and all eight user timers were left
-  inactive while `is-enabled` still reported every one of them as enabled.
-  Confirming when `/home` actually mounts relative to `user@1000.service` is a
-  prerequisite for fixing it; that is a plan of its own.
+- **The user timers did not arm after that reboot — diagnosed, remediated, and
+  now automated.** The user manager starts before `/home` is usable: it read
+  `~/.config/systemd/user/` while that directory was still absent, loaded none
+  of the eight unit files, and brought `timers.target` up active and empty,
+  while `is-enabled` reported every one of them as enabled. Measured on two
+  boots — 2026-09-19 `user@1000.service` 00:05:06 against `home.mount` 00:05:36,
+  and 2026-09-20 19:07:38 against 19:08:06, where the manager had loaded no unit
+  file at all until a timer was started by hand.
+
+  Ordering the race away does not work, and that was measured too: a drop-in
+  adding `RequiresMountsFor=/home/leoleg` to `user@1000.service` was installed
+  and the next boot was unchanged, because `home.mount` carries an empty
+  `FragmentPath` and does not exist as a unit until UGOS has already performed
+  the mount. `scripts/rearm-user-timers.sh` polls for the unit directory and
+  then does the two steps that are actually required — `daemon-reload`, which
+  makes the units visible and starts nothing, and `start timers.target`, which
+  arms them —
+  [`is armed`](MAINTENANCE.md#after-every-reboot-the-user-timers-may-not-have-armed).
+  `scripts/check-user-timers.sh` reports the dead state from the freshness of
+  the files the timers write, because nothing that runs unattended on this box
+  can reach the session D-Bus. Both ship with bats coverage and mutation corpus
+  entries, and `scripts/arr-stack-user-timers.service` runs the rearm as a
+  system unit at boot, which is a deliberate reversal of the earlier ruling that
+  no system unit would be shipped — the ground for it was "we have no root",
+  measured false on 2026-09-20 when `sudo` turned out to work with the owner's
+  password.
 
 The rest is capacity, and no guard in this repo removes it:
 
