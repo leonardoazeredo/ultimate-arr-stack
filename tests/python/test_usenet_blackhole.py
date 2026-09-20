@@ -2489,3 +2489,24 @@ def test_a_pass_fetches_one_round_and_leaves_the_rest(tmp_path, monkeypatch):
 
     assert len(started) == m.FETCH_WORKERS
     assert len(m.load_state(state_path)["jobs"]) == m.FETCH_WORKERS * 2
+
+
+def test_the_summary_names_the_three_numbers_separately(tmp_path, monkeypatch):
+    # "still in flight 24" next to a ceiling of 6 reads as a broken cap. It is
+    # not: 24 is the state file, 3 is the subset still holding a TorBox slot,
+    # and the I/O comes from a third count again -- finished at TorBox and not
+    # yet fetched. One word for three quantities is what made this look like a
+    # cap failure on 2026-09-20.
+    nzb_dir, watch, state_path, listing = several_jobs(tmp_path, m.FETCH_WORKERS + 2)
+    lines = []
+
+    monkeypatch.setattr(m, "fetch", lambda *a, **k: True)
+    monkeypatch.setattr(m, "TorBox", lambda *a, **k: FakeTorBox(list_result=listing))
+    m.run(str(nzb_dir), str(watch), str(tmp_path / "staging"), state_path,
+          str(tmp_path / "f.log"), "key", apply_changes=True, out=lines.append)
+
+    summary = [l for l in lines if l.strip().startswith("submitted ")][-1]
+    assert "outstanding 2" in summary
+    assert "2 owed local I/O" in summary
+    assert "0 still at TorBox" in summary
+    assert "still in flight" not in summary

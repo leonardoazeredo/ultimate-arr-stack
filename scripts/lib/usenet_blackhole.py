@@ -1484,7 +1484,15 @@ def run(nzb_dir, watch_dir, staging_dir, state_path, failed_log, api_key,
 
     sweep_staging(staging_dir, set(state["jobs"]), out=out)
 
-    out(f"  submitted {submitted}, fetched {fetched}, still in flight {len(state['jobs'])}")
+    # Three counts, three names. `outstanding` is the state file; `at_torbox`
+    # is the subset still holding one of TorBox's ten slots, which is the only
+    # number --max-inflight compares against; and the remainder is owed local
+    # I/O, which is what actually reaches the disks. Calling all three "in
+    # flight" is what made a working ceiling read as a broken one.
+    outstanding = len(state["jobs"])
+    at_torbox = sum(1 for j in state["jobs"].values() if not j.get("complete"))
+    out(f"  submitted {submitted}, fetched {fetched}, outstanding {outstanding} "
+        f"({outstanding - at_torbox} owed local I/O, {at_torbox} still at TorBox)")
     return 0
 
 
