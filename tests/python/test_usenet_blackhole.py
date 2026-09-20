@@ -2498,6 +2498,13 @@ def test_the_summary_names_the_three_numbers_separately(tmp_path, monkeypatch):
     # yet fetched. One word for three quantities is what made this look like a
     # cap failure on 2026-09-20.
     nzb_dir, watch, state_path, listing = several_jobs(tmp_path, m.FETCH_WORKERS + 2)
+    # One job still downloading at TorBox. Without it every job in the fixture
+    # is `complete`, so `at_torbox` is 0 and `owed` equals `outstanding` --
+    # which means a summary that hardcoded "0 still at TorBox" satisfied every
+    # assertion below. Replacing the real count with a literal 0 left all 148
+    # tests green. One in-progress job is what makes the three counts
+    # distinguishable, which is the entire point of this test.
+    listing[-1]["download_state"] = "downloading"
     lines = []
 
     monkeypatch.setattr(m, "fetch", lambda *a, **k: True)
@@ -2507,6 +2514,8 @@ def test_the_summary_names_the_three_numbers_separately(tmp_path, monkeypatch):
 
     summary = [l for l in lines if l.strip().startswith("submitted ")][-1]
     assert "outstanding 2" in summary
-    assert "2 owed local I/O" in summary
-    assert "0 still at TorBox" in summary
-    assert "still in flight" not in summary
+    assert "1 owed local I/O" in summary
+    assert "1 still at TorBox" in summary
+    # No line in the pass reuses the conflated label.
+    assert not any("in flight" in l for l in lines)
+    assert any(l.strip().startswith("outstanding:") for l in lines)

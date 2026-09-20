@@ -317,7 +317,7 @@ STUB
     # is the whole reason the dry run is the default.
     run "$RUN"
     assert_success
-    assert_output --partial "in flight:    0"
+    assert_output --partial "outstanding:  0"
 }
 
 @test "usenet-blackhole: the key travels in the environment, not on the command line" {

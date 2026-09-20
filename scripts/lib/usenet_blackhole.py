@@ -1342,7 +1342,7 @@ def run(nzb_dir, watch_dir, staging_dir, state_path, failed_log, api_key,
         out(f"  NZB folder:   {nzb_dir}")
     out(f"  watch folder: {watch_dir}")
     out(f"  staging:      {staging_dir}")
-    out(f"  in flight:    {len(state['jobs'])}")
+    out(f"  outstanding:  {len(state['jobs'])}")
 
     if not apply_changes:
         for key, name, path in pending_nzbs(nzb_dir, state):
