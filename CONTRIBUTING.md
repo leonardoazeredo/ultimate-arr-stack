@@ -327,6 +327,7 @@ scripts/
 ├── backup-prune.sh               # GFS-tiered retention over those backups
 ├── boot-compose-up.sh            # Reconcile every stack after a reboot or UGOS update
 ├── check-network.sh              # Find and optionally clean orphaned Docker networks
+├── check-user-timers.sh          # Report dead user timers from the files they write
 ├── check-vpn.sh                  # Confirm Gluetun's exit IP differs from the NAS's
 ├── configure-apps.sh             # Configure the arr apps over their APIs
 ├── detect-credential-drift.sh    # Detect the credential-propagation bug class
@@ -337,6 +338,7 @@ scripts/
 ├── gluetun-rotator.sh            # Restart gluetun on a schedule to rotate the VPN exit server
 ├── indexer-guard.sh              # Rotate the VPN exit IP for a banned indexer Sonarr needs
 ├── queue-cleanup.sh              # Remove stuck items from the Sonarr/Radarr queues
+├── rearm-user-timers.sh          # Re-arm the user timers after a boot that missed them
 ├── restart-stack.sh              # Restart a stack without ever using `down`
 ├── stremio-library-sync.sh       # Turn a Stremio library addition into a Seerr request
 ├── sync-nas.sh                   # Move the NAS deploy copy onto the local branch

@@ -308,11 +308,13 @@ old "14 tests" claim went stale.
 - `duc-service/app/log.cgi`
 - `scripts/arr-backup.sh`
 - `scripts/backup-prune.sh`
+- `scripts/check-user-timers.sh`
 - `scripts/detect-credential-drift.sh`
 - `scripts/detect-vpn-zombies.sh`
 - `scripts/indexer-guard.sh`
 - `scripts/post-merge`
 - `scripts/pre-commit`
+- `scripts/rearm-user-timers.sh`
 - `scripts/sync-nas.sh`
 - `scripts/usenet-blackhole-status.sh`
 - `terraform/apply.sh`
