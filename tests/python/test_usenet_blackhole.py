@@ -1585,11 +1585,18 @@ def test_the_fetch_pool_is_bounded(tmp_path, monkeypatch):
     # Unbounded would stack an unrar per completed release on a NAS that is
     # also transcoding, and the arr's importer reads the same disk.
     #
-    # One round's worth of jobs, not two. A pass now fetches at most
-    # FETCH_WORKERS releases, so a fixture of FETCH_WORKERS * 2 leaves half of
-    # them `complete` in the state file by design and the empty-state assertion
-    # below could only pass against the unbounded defect. The subject here is
-    # the width of the pool; the width of the pass has its own test.
+    # What this test still proves is that the fetches overlap at all --
+    # `peak >= 2` is the assertion with teeth. The `peak <= FETCH_WORKERS` line
+    # is a cheap invariant, not an independent proof of the bound: the slice in
+    # `run()` already caps `to_fetch` at FETCH_WORKERS upstream, so the pool can
+    # never be handed more than that no matter how wide it is. No fixture size
+    # makes an uncapped pool observable here; `usenet-blackhole-fetch-set-
+    # unbounded` is what covers the unbounded case.
+    #
+    # The fixture is one round's worth of jobs, not two. A fixture of
+    # FETCH_WORKERS * 2 leaves half of them `complete` in the state file by
+    # design and the empty-state assertion below could only pass against the
+    # unbounded defect.
     nzb_dir, watch, state_path, listing = several_jobs(tmp_path, m.FETCH_WORKERS)
     lock = threading.Lock()
     live, peak = 0, 0

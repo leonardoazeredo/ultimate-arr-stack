@@ -1446,7 +1446,13 @@ def run(nzb_dir, watch_dir, staging_dir, state_path, failed_log, api_key,
         out(f"  {len(owed)} releases are ready: fetching {len(to_fetch)} this pass, "
             f"{len(owed) - len(to_fetch)} wait for a later one")
     if to_fetch:
-        with ThreadPoolExecutor(max_workers=min(FETCH_WORKERS, len(to_fetch))) as pool:
+        # The slice above is what bounds a pass; this ceiling is the second
+        # line of defence. `len(to_fetch) <= FETCH_WORKERS` holds by
+        # construction now, so clamping to `len(to_fetch)` here is dead code
+        # and stops being observable -- a mutation of it could no longer change
+        # behaviour. Keeping FETCH_WORKERS means a future change that removes
+        # the slice still cannot make the pool unbounded.
+        with ThreadPoolExecutor(max_workers=FETCH_WORKERS) as pool:
             pending = {
                 pool.submit(_fetch_one, torbox, key, state["jobs"][key],
                             watch_dir, staging_dir): (key, name)

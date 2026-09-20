@@ -57,12 +57,26 @@ mutation usenet-blackhole-fetches-one-at-a-time \
   --why "FETCH_WORKERS = 1 restores the serial fetch this was written to remove, and it is the mutation that matters most here: the concurrency test sizes its barrier at three and is hardcoded rather than reading the constant, because a fixture that read it would shrink to one job and one barrier slot and pass against a serial implementation" \
   --apply 'sed -i.bak "s@^FETCH_WORKERS = 3\$@FETCH_WORKERS = 1@" "$F" && rm -f "$F.bak"'
 
-mutation usenet-blackhole-fetch-pool-unbounded \
+# --- the pool runs one release at a time -----------------------------------
+#
+# A serial pool restores the latency the parallel fetch was written to remove:
+# a pass that finds a round of finished releases pulls them one after another,
+# so the last waits out every earlier download and unpack. Measured 2026-09-20
+# a single release is up to 38 GB, so that wait is not academic.
+#
+# This replaces usenet-blackhole-fetch-pool-unbounded, which mutated
+# max_workers=min(...) to max_workers=None. Capping to_fetch at FETCH_WORKERS
+# made that mutation behaviourally equivalent -- the pool can never see more
+# than FETCH_WORKERS tasks -- so the entry could no longer be killed. The
+# unbounded-pass hazard it guarded is now covered by
+# usenet-blackhole-fetch-set-unbounded, which removes the slice itself.
+
+mutation usenet-blackhole-fetch-pool-serialised \
   --file scripts/lib/usenet_blackhole.py \
   --bats tests/python-suite.bats \
   --test "the extracted modules pass their pytest suite" \
-  --why "an uncapped pool starts an unrar per completed release at once. The unpack is CPU-bound and this runs on a NAS that is also transcoding, with the arr's importer reading the same disk, so the bound is what keeps a large batch from stalling everything else on the box" \
-  --apply 'sed -i.bak "s@max_workers=min(FETCH_WORKERS, len(to_fetch))@max_workers=None@" "$F" && rm -f "$F.bak"'
+  --why "max_workers=1 serialises the fetch pool. Each release waits out every earlier download and unpack, which on this NAS is tens of GB per release at rotational-disk latency; the parallel pool exists precisely to overlap that waiting. Removes the pool bound's only observable consequence" \
+  --apply 'sed -i.bak "s@max_workers=FETCH_WORKERS@max_workers=1@" "$F" && rm -f "$F.bak"'
 
 mutation usenet-blackhole-fetch-output-interleaved \
   --file scripts/lib/usenet_blackhole.py \
@@ -542,5 +556,5 @@ mutation usenet-blackhole-fetch-set-unbounded \
   --file scripts/lib/usenet_blackhole.py \
   --bats tests/python-suite.bats \
   --test "the extracted modules pass their pytest suite" \
-  --why "restores the line that let a single admitted pass pull 21 releases, two of them 30-38 GB, three at a time for 53m12s. Measured that day: load went 8.47 -> 50.18 and io full avg10 to 81.91%, and the value the operator's ceiling compared against was 3 because it counts jobs still AT TorBox. The pass cost 86.22 GB logical and 170.6 GB of platter writes to deliver a few GB of media" \
+  --why "restores the line that let a single admitted pass pull 21 releases, two of them 30-38 GB, three at a time for 53m12s. Measured that day: load went 8.47 -> 50.18 and io full avg10 to 81.91%, and the value the operator's ceiling compared against was 3 because it counts jobs still AT TorBox. The pass cost 86.22 GB logical and 170.6 GB of platter writes to deliver a few GB of media. This entry also carries the unbounded-pool hazard the retired usenet-blackhole-fetch-pool-unbounded used to cover: with the slice gone, to_fetch is again every finished release, so the pool runs unbounded even though its own ceiling reads FETCH_WORKERS" \
   --apply 'sed -i.bak "s@to_fetch = owed\[:FETCH_WORKERS\]@to_fetch = owed@" "$F" && rm -f "$F.bak"'
