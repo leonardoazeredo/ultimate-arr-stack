@@ -146,6 +146,52 @@ systemctl --user enable --now queue-cleanup.timer
 systemctl --user list-timers queue-cleanup.timer     # confirm it is armed
 ```
 
+### After every reboot: the user timers may not have armed
+
+The eight `--user` timers can come up inactive after a reboot, and nothing on the
+box says so. The user manager starts before `/home` is usable, so it reads
+`~/.config/systemd/user/` while that directory is not yet there, loads none of
+the unit files, and brings `timers.target` up active and empty. `is-enabled`
+reports every timer as enabled the whole time and the `timers.target.wants/`
+symlinks stay intact, so every signal a person would check looks correct.
+
+Measured twice. 2026-09-19: `user@1000.service` active 00:05:06, `home.mount`
+00:05:36. 2026-09-20: `user@1000.service` active 19:07:38, `home.mount`
+19:08:06 — and on that boot the manager had not loaded a single unit file by the
+time someone started one by hand at 19:22.
+
+Check, then fix:
+
+```bash
+./scripts/check-user-timers.sh     # exit 0 running, exit 1 dead; names the remedy
+./scripts/rearm-user-timers.sh     # daemon-reload, then start timers.target
+systemctl --user list-timers       # confirm NEXT is set, not just that eight print
+```
+
+Both steps are required and the order matters. `daemon-reload` makes the unit
+files visible to the running manager and starts nothing; `start timers.target`
+is what arms them. A reload alone leaves all eight listed with `NEXT` at `-`,
+which reads like success. Measured on this box 2026-09-20: a stopped but enabled
+timer, with `timers.target` already active, is re-armed by
+`systemctl --user start timers.target`.
+
+**This is automated.** `scripts/arr-stack-user-timers.service` is a *system*
+unit, not a `--user` one, that runs the rearm script as leoleg once the user
+manager is up. The script polls for the unit directory rather than ordering on a
+mount, because UGOS mounts the volumes outside systemd's view. Install once,
+with root:
+
+```bash
+sudo install -m 644 scripts/arr-stack-user-timers.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now arr-stack-user-timers.service
+```
+
+A drop-in adding `RequiresMountsFor=/home/leoleg` to `user@1000.service` was
+tried first, on 2026-09-20, and does nothing: `home.mount` has an empty
+`FragmentPath`, so it does not exist as a unit until UGOS has already performed
+the mount, and the directive therefore has nothing to order against.
+
 ### Backlog search (systemd timer, every 4 hours)
 
 Neither arr searches its own backlog. They search for new releases (RSS) and for
