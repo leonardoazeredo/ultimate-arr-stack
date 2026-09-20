@@ -22,3 +22,10 @@ mutation rearm-unit-orders-on-home-mount \
   --test "timer rearm unit waits for the user manager, not for a mount unit" \
   --why "ordering on home.mount was measured doing nothing on 2026-09-20 -- it has an empty FragmentPath and does not exist until UGOS has already mounted the volume -- so reintroducing it restores the belief that the race can be ordered away" \
   --apply 'sed -i.bak "s@^After=user@After=home.mount user@" "$F" && rm -f "$F.bak"'
+
+mutation rearm-unit-execed-too-early \
+  --file scripts/arr-stack-user-timers.service \
+  --bats tests/arr-stack-user-timers.bats \
+  --test "timer rearm unit waits for its own script before exec'ing it" \
+  --why "this is the bug the first version of the unit shipped: /volume1 mounts after multi-user.target, so an ExecStart naming the script directly dies with 203/EXEC -- measured 20:43:08 on a boot where volume1.mount only became active at 20:43:37 -- and every timer stays dead with the unit failing for a reason nobody reads" \
+  --apply 'sed -i.bak "s@^ExecStart=/bin/bash.*@ExecStart=/volume1/docker/arr-stack/scripts/rearm-user-timers.sh@" "$F" && rm -f "$F.bak"'

@@ -71,3 +71,18 @@ setup() {
     run grep '^Wants=user@1000.service' "$UNIT"
     assert_success
 }
+
+@test "timer rearm unit waits for its own script before exec'ing it" {
+    # /volume1 arrives after multi-user.target, exactly as /home does. Measured
+    # on the 2026-09-20 20:42 boot: this unit started at 20:43:08 and
+    # volume1.mount only became active at 20:43:37. A plain ExecStart pointing
+    # at the script died with status=203/EXEC -- systemd cannot execute a path
+    # that does not exist yet -- so the script's own poll for /home never ran
+    # and all eight timers stayed dead. The first version of this unit shipped
+    # exactly that bug.
+    run grep '^ExecStart=' "$UNIT"
+    assert_output --partial "/bin/bash"
+    assert_output --partial "until [ -x /volume1/docker/arr-stack/scripts/rearm-user-timers.sh ]"
+    # ...and then actually runs it, rather than waiting forever or exiting.
+    assert_output --partial "exec /volume1/docker/arr-stack/scripts/rearm-user-timers.sh"
+}

@@ -47,12 +47,26 @@ RemainAfterExit=yes
 User=leoleg
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 
-# The script waits up to REARM_TIMEOUT_SECONDS (600) for /home to appear. The
-# systemd default TimeoutStartSec is 90s, which would kill it mid-wait and turn
-# a slow mount into a failed unit, so the timeout has to cover the whole wait.
+# The script waits up to REARM_TIMEOUT_SECONDS (600) for /home to appear, and
+# the wait below adds however long /volume1 takes on top. The systemd default
+# TimeoutStartSec is 90s, which would kill either one mid-wait and turn a slow
+# mount into a failed unit, so the timeout has to cover both.
 TimeoutStartSec=900
 
-ExecStart=/volume1/docker/arr-stack/scripts/rearm-user-timers.sh
+# THE WAIT IS NOT OPTIONAL, AND IT IS NOT THE SCRIPT'S
+#
+# /volume1 is also mounted by UGOS outside systemd's view, and it arrives after
+# multi-user.target is reached. Measured on the 2026-09-20 20:42 boot: this unit
+# started at 20:43:08 and volume1.mount only became active at 20:43:37, 29
+# seconds later. systemd could not execute a path that did not exist yet, the
+# unit died with status=203/EXEC, the script's own poll for /home never ran, and
+# all eight timers stayed dead -- the same race, one layer down.
+#
+# /bin/bash is on the root filesystem and is therefore always present. Waiting
+# here and then exec'ing the script keeps the two waits in the order they
+# matter: this one for the volume that carries the script, and the script's for
+# the volume that carries the unit files.
+ExecStart=/bin/bash -c 'until [ -x /volume1/docker/arr-stack/scripts/rearm-user-timers.sh ]; do sleep 5; done; exec /volume1/docker/arr-stack/scripts/rearm-user-timers.sh'
 
 [Install]
 WantedBy=multi-user.target
