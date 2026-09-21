@@ -1,9 +1,27 @@
 # Quick Reference: URLs, Commands, Network
 
-> ⚠️ **If you lose internet connection (+ local DNS users):** If you configured Pi-hole as your router's DNS server, stopping it (e.g., `docker compose down`) kills DNS for your entire network. To recover:
-> 1. Connect to mobile hotspot (or manually set DNS to 8.8.8.8)
-> 2. SSH to NAS and run: `docker compose -f docker-compose.arr-stack.yml up -d pihole`
-> 3. Switch back to your normal network
+> ⚠️ **If you lose internet connection:** this warning used to say that stopping
+> Pi-hole kills DNS for the whole network, and to recover by
+> `docker compose up -d pihole`. **That no longer applies here.** DNS moved to
+> AdGuard Home on the router on 2026-09-21, and the router answers with or
+> without the NAS — see [LOCAL-DNS.md](LOCAL-DNS.md) and
+> [the migration plan](superpowers/plans/2026-09-19-dns-adguard-router-migration.md).
+> The old advice is kept only because it is still correct for a deployment that
+> points its DHCP at the NAS.
+>
+> **What to do instead, if DNS stops working:** the NAS is no longer the first
+> suspect and restarting it will not help.
+> 1. Confirm the router is up at all — a house whose router is down has no
+>    internet regardless of DNS.
+> 2. Check the watchdog: `ssh arr-stack-router '/usr/sbin/arrdns-watchdog.sh --status'`.
+>    `mode=fallback` means AdGuard Home stopped answering and the router moved
+>    the house to dnsmasq; resolution is still working and only ad blocking is
+>    lost, so this is not an outage.
+> 3. `mode=adguard` with `probe=down` means the watchdog has not yet fired —
+>    three consecutive failures are required. `tail /var/log/arrdns-watchdog.log`
+>    shows every transition.
+> 4. If a single client is broken and the router is fine, that client is the
+>    problem; point it at `192.168.8.1` by hand to confirm.
 >
 > **Tip:** When doing full stack restarts, use mobile hotspot first, or restart with a single command:
 > ```bash

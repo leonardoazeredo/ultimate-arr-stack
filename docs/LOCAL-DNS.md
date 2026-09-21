@@ -104,7 +104,9 @@ for why a manually added container needs an IP outside that range.
 
 **Step 5: Set router DNS**
 
-Configure your router's DHCP to advertise your NAS IP as DNS server. All devices will then use Pi-hole for DNS.
+Configure your router's DHCP to advertise a resolver that is not the NAS. In this
+deployment that is the router itself, running AdGuard Home — see *Which resolver
+actually serves each VLAN* below for what the router does with the query.
 
 > **Note:** Due to a macvlan limitation, `.lan` domains don't work from the NAS itself (e.g., via SSH). They work from all other devices.
 
@@ -112,22 +114,56 @@ See [REFERENCE.md](REFERENCE.md#service-access) for the full list of `.lan` URLs
 
 ### Which resolver actually serves each VLAN (read off the router, 2026-09-10)
 
-Every DHCP pool that hands out a resolver names the **NAS Pi-hole**, and nothing else does:
+**The router, and it no longer depends on the NAS.** Every pool advertises the
+router. `dhcp_option 6` was deleted from all four target pools on 2026-09-21 and
+dnsmasq advertises itself, which is each VLAN's own gateway address; `guest` and
+`iot` never carried the option at all.
 
-| Pool | `dhcp_option 6` |
+| Pool | advertises |
 |---|---|
-| `lan` | `192.168.110.246` |
-| `vlan10` | `192.168.110.246` |
-| `vlan20` | `192.168.110.246` |
-| `vlan30` | `192.168.110.246` |
+| `lan` | 192.168.8.1 |
+| `vlan10` | 192.168.110.1 |
+| `vlan20` | 192.168.120.1 |
+| `vlan30` | 192.168.130.1 |
 
-Check it from a host with router access — this repo's design makes pi1 the only one:
-`ssh arr-stack-router 'uci show dhcp | grep dhcp_option'`.
+Check it from a host with router access — this repo's design makes pi1 the only
+one. An empty `dhcp_option` result is the correct one:
+
+```bash
+ssh arr-stack-router 'uci show dhcp | grep dhcp_option'   # expect no output
+ssh arr-stack-router 'uci show dhcp | grep leasetime'     # expect all 12h
+```
+
+What the router does with that query is two-stage, and the second stage is the
+part that used to live on the NAS:
+
+1. Every DNS packet arriving on a client bridge is redirected to **AdGuard Home
+   on `:3053`** — blocklists, DoH upstreams, and the `.lan` rewrites that point
+   at Traefik.
+2. If AdGuard Home stops answering, `/usr/sbin/arrdns-watchdog.sh` (cron, every
+   minute) moves that redirect back to dnsmasq on `:53` after three consecutive
+   failed probes, and forward again after three successes. Resolution continues
+   either way; only ad blocking is lost while degraded. Source:
+   `router/arrdns-watchdog.sh`, and the redirect itself is `router/firewall.user`.
 
 Two consequences worth keeping:
 
-- **The NAS Pi-hole is a single point of failure for the entire house.** That is what makes `scripts/boot-compose-up.service` load-bearing rather than a nicety — see [Docker: Ports Not Published After Reboot](TROUBLESHOOTING.md#docker-ports-not-published-after-reboot-containers-running-nothing-listening).
-- **The `pi2-dns` stack (Pi-hole + dnscrypt-proxy on the Pi 3) is a standby, not a peer** — it serves no DHCP client. It was **stopped and retired on 2026-09-10**: containers stopped (not removed), and pi2's checkout returned to `main` so no unmerged branch code stays live. To bring it back deliberately:
+- **The NAS being powered off no longer removes DNS from the house.** It used to:
+  every pool advertised `192.168.110.246`, so a NAS that was down, stalled or
+  being rebooted took the internet with it, and `scripts/boot-compose-up.service`
+  was load-bearing for that reason. Resolution is now answered entirely on the
+  router. The NAS Pi-hole is still running and still correct, so that any pool
+  can be reverted to it in one script run — see the rollback ladder in
+  `docs/superpowers/plans/2026-09-19-dns-adguard-router-migration.md` — but no
+  client needs it, and Phase 9 retires it.
+- **There is one remaining single point of failure, and it is the router** rather
+  than the NAS. That is a deliberate trade: the router is already the gateway,
+  so a house whose router is down has no internet with or without DNS. The
+  watchdog above is what keeps it from being *two* points.
+- **The `pi2-dns` stack (Pi-hole + dnscrypt-proxy on the Pi 3) is a standby, not a
+  peer** — it serves no DHCP client. It was **stopped and retired on 2026-09-10**:
+  containers stopped (not removed), and pi2's checkout returned to `main` so no
+  unmerged branch code stays live. To bring it back deliberately:
 
   ```bash
   ssh pi@pi2 'cd /home/pi/arr-stack && git fetch origin feat/pi1-pi2-split && \
@@ -135,17 +171,32 @@ Two consequences worth keeping:
       docker compose -f docker-compose.pi2-dns.yml up -d'
   ```
 
-  It remains a usable fallback if the NAS is ever down: repoint `dhcp_option 6` at `192.168.120.241`. That is a router edit, not a code change.
+  It was a usable fallback while the NAS was the resolver. It is now a third
+  option behind the router and the NAS, and repointing a pool at
+  `192.168.120.241` is still a router edit rather than a code change.
 
-**Upstream is encrypted.** The NAS Pi-hole forwards to `dnscrypt-proxy` at `172.20.0.6#5053` (set 2026-09-10, which is what `scripts/configure-apps.sh` has always prescribed), rather than sending plaintext to `8.8.8.8`. Verify with `docker exec pihole pihole-FTL --config dns.upstreams`.
+**Upstream is encrypted, now on the router rather than on the NAS.** AdGuard Home
+forwards over DoH — `https://dns.quad9.net/dns-query` and
+`https://cloudflare-dns.com/dns-query`, with plain Quad9 addresses for
+`bootstrap_dns` because bootstrapping cannot itself be encrypted. The NAS Pi-hole
+and dnscrypt-proxy still hold the old encrypted path to `172.20.0.6#5053` for as
+long as they run: `docker exec pihole pihole-FTL --config dns.upstreams`.
 
-### AdGuard Home on the router (staged 2026-09-19, not yet serving)
+### AdGuard Home on the router (serving since 2026-09-21)
 
-The house's DNS is moving off the NAS onto the router, so that the NAS can be
-powered off without taking internet access with it. AdGuard Home runs on
-`arr-stack-router`, listening on `:3053`, and is **not in the query path yet** —
-`adguardhome.config.dns_enabled='0'` means every client still asks dnsmasq on
-`:53`. Phase 6 of the migration plan is the flip.
+The house's DNS moved off the NAS onto the router, so that the NAS can be powered
+off without taking internet access with it. AdGuard Home runs on
+`arr-stack-router`, listening on `:3053`, and **it is the resolver every client
+reaches** — `adguardhome.config.dns_enabled='1'`.
+
+One thing about it is not obvious from the GL.iNet UI and cost real time to find:
+**the vendor's own AdGuard dispatch covers only `br-lan.1` and `br-guest`.** On
+this firmware `dns_enabled='1'` cannot put `vlan10`, `vlan20` or `vlan30` on
+AdGuard at all; that is done by the per-bridge REDIRECT rules in
+`router/firewall.user`, which is why they are load-bearing rather than a
+stale-lease convenience. `tests/router-dns.bats` asserts it, and the same rules
+have to move in lockstep with `dns_enabled` because they are reloaded by different
+mechanisms — see that test's `(d)` group.
 
 Its configuration is written by `scripts/adguard-configure.sh`, which transforms
 `/etc/AdGuardHome/config.yaml` here (the router has no bash, python, perl or

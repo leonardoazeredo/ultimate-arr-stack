@@ -39,6 +39,21 @@ check_dns_duplicates() {
     local pihole_domains
     pihole_domains=$(ssh_to_nas "docker exec pihole cat /etc/pihole/pihole.toml 2>/dev/null | grep -oP '\"[0-9.]+\s+\K[^\"]+(?=\.lan)' | sort -u") || true
 
+    # NOT guarded on empty, and the asymmetry with the dnsmasq read above is
+    # deliberate — see "an empty pihole.toml side is no overlap, not a skip" in
+    # tests/lib-dns-duplicates.bats. pihole.toml holding no .lan entries is the
+    # state this check wants, so an empty read there is a pass.
+    #
+    # The limitation that leaves, recorded rather than discovered later: this
+    # cannot tell "the file has no .lan entries" from "the file could not be read
+    # at all", because the remote read collapses both into an empty string. The
+    # DNS migration's Phase 9.1 stops the Pi-hole container, and from that moment
+    # until 9.4 removes the service this check reports OK without having looked
+    # at anything. That window is the reason 9.4 should not slip, not a reason to
+    # change this now: distinguishing the two needs a probe for the container
+    # rather than the file, which is a change to the stub contract every test in
+    # tests/lib-dns-duplicates.bats is written against.
+
     # Find duplicates
     # -xF, not -w. `grep -w` treats a hyphen as a word boundary, so "sonarr"
     # matched inside "sonarr-4k" and this reported a conflict between two names

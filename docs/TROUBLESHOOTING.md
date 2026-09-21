@@ -1,11 +1,76 @@
 # Troubleshooting
 
+## DNS: nothing resolves, or one client cannot
+
+**The NAS is not the first suspect any more, and restarting it will not help.**
+DNS moved to AdGuard Home on `arr-stack-router` on 2026-09-21, with the router's
+own dnsmasq underneath it and a watchdog choosing between them. See
+[LOCAL-DNS.md](LOCAL-DNS.md).
+
+Work down this list, which is ordered by how often each turns out to be the
+answer:
+
+1. **Is the router up at all?** A house whose router is down has no internet with
+   or without DNS, and this is the one remaining single point of failure. If the
+   router is up, DNS is not your problem.
+2. **What does the watchdog say?**
+   `ssh arr-stack-router '/usr/sbin/arrdns-watchdog.sh --status'`
+   - `mode=fallback` — AdGuard Home stopped answering and the router moved the
+     house to dnsmasq. **Resolution is still working**; only ad blocking is lost.
+     This is not an outage. `tail /var/log/arrdns-watchdog.log` has the reason.
+   - `mode=adguard probe=down` — AdGuard is failing but the watchdog has not
+     fired yet. Three consecutive failures are required, so this lasts up to
+     about three minutes; then it falls back on its own.
+   - `mode=fallback reason=operator` — somebody set
+     `adguardhome.config.dns_enabled='0'` deliberately. The watchdog will not
+     fight that. Set it back to `'1'` and `fw3 reload` to undo it.
+3. **Is the redirect still installed?** A firewall reload is supposed to re-apply
+   it, and both halves have to move together:
+   ```bash
+   ssh arr-stack-router 'iptables -t nat -S PREROUTING | grep "dport 53" | head'
+   ssh arr-stack-router 'iptables -t nat -S adg_redirect'
+   ```
+   Every client bridge should appear there, and `adg_redirect` should hold a
+   `tcp` and a `udp` rule while `dns_enabled='1'`. `tests/router-dns.bats`
+   asserts exactly this and is the fastest way to find out, if you have a host
+   that can reach the router.
+4. **Only one client is broken?** Then it is that client. Check what resolver it
+   holds, and point it at the router by hand to confirm:
+   ```bash
+   ssh arr-stack-router 'uci show dhcp | grep -E "dhcp_option|leasetime"'
+   ```
+   No `dhcp_option` line is the expected result — dnsmasq advertises itself. A
+   client still holding a lease that names `192.168.110.246` is *fine*: the
+   router redirects that traffic too, which is deliberate.
+5. **`.lan` names work but a blocked name is not blocked?** Something is
+   answering on `:53` instead of `:3053`. That is the fallback state or a
+   missing redirect rule; see steps 2 and 3.
+
+**Note on the `.lan` AAAA difference**, because it looks like a fault and is not:
+dnsmasq answers an AAAA query for a `.lan` name with the literal `::`, while
+AdGuard Home answers NOERROR with no record. Both are correct, musl clients work
+with either (it is AAAA *NXDOMAIN* that breaks them, not an empty answer), and
+which one you see tells you which resolver is serving you.
+
 ## Everything Is Unreachable At Once
 
 If the whole stack looks unreachable at once — `.lan` names resolve, ports accept
 connections, and nothing ever answers — read
 [NAS load incident, 2026-09-18](NAS-LOAD-INCIDENT-2026-09-18.md) before
 re-deriving it. That is a host-level I/O stall, not a DNS or proxy fault.
+
+**Distinguish it from a DNS failure first, because the symptoms overlap and the
+fixes do not.** In an I/O stall `.lan` names still resolve and TCP connections
+are still accepted — the box is up and simply not answering. In a DNS failure
+names do not resolve at all. The two questions that separate them, in order:
+
+```bash
+dig +short sonarr.lan @192.168.8.1      # does the router resolve anything?
+ssh arr-stack-router '/usr/sbin/arrdns-watchdog.sh --status'
+```
+
+If the router resolves, this section applies and the router is fine. If it does
+not, you are in the DNS section above instead.
 
 ## Gluetun: Harmless Log Noise on Startup
 
