@@ -28,9 +28,9 @@ mutation firewall-user-probe-always-falls-back \
 mutation firewall-user-only-vendor-interfaces \
   --file router/firewall.user \
   --bats tests/firewall-user.bats \
-  --test "firewall-user: every client bridge is redirected, on both transports" \
+  --test "firewall-user: every client interface is redirected, on both transports" \
   --why "Narrows the interface list to the two GL.iNet's own dns_dispatcher already covers. vlan10, vlan20 and vlan30 then resolve straight off dnsmasq with no ad blocking, which is the state this migration actually shipped on 2026-09-21 and took a client-path check to find" \
-  --apply 'perl -0pi -e "s/ARRDNS_IFACES=\"br-lan\.1 br-lan\.10 br-lan\.20 br-lan\.30 br-guest\"/ARRDNS_IFACES=\"br-lan.1 br-guest\"/" "$F"'
+  --apply 'perl -0pi -e "s/ARRDNS_IFACES=\"\x24\{ARRDNS_IFACES:-[^}]*\}\"/ARRDNS_IFACES=\"br-lan.1 br-guest\"/" "$F"'
 
 mutation firewall-user-never-strips \
   --file router/firewall.user \
@@ -38,3 +38,10 @@ mutation firewall-user-never-strips \
   --test "firewall-user: it strips its own rules before inserting again" \
   --why "Disables the delete loop. fw3 does not flush the built-in PREROUTING chain, so every reload leaves the previous rules and inserts ten more: eighteen were live at one point during this migration, and a duplicate rule is invisible to any check that only asks whether a correct rule exists" \
   --apply 'perl -0pi -e "s/^while :; do/while false; do/m" "$F"'
+
+mutation firewall-user-tailnet-not-filtered \
+  --file router/firewall.user \
+  --bats tests/firewall-user.bats \
+  --test "firewall-user: the tailnet is redirected when it is in scope" \
+  --why "drops tailscale0 from the interface list, so a tailnet device resolves through dnsmasq and gets no ad blocking while every device at home is filtered. Measured 2026-09-21: a tailnet query for a blocklisted name returned a real address while a bridge client got 0.0.0.0, and the asymmetry is invisible from the LAN" \
+  --apply 'perl -0pi -e "s/br-guest tailscale0\}/br-guest}/" "$F"'

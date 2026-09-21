@@ -74,7 +74,12 @@ if [ "$ARRDNS_PORT" = "3053" ]; then
   fi
 fi
 
-ARRDNS_IFACES="br-lan.1 br-lan.10 br-lan.20 br-lan.30 br-guest"
+# tailscale0 is here because the tailnet is a client population too, and it was
+# resolving through dnsmasq unfiltered: measured 2026-09-21, a tailnet query for a
+# blocklisted name returned a real address while a bridge client got 0.0.0.0.
+# Settled deliberately -- see docs/LOCAL-DNS.md. Overridable for a router where
+# the tailnet should keep reaching dnsmasq.
+ARRDNS_IFACES="${ARRDNS_IFACES:-br-lan.1 br-lan.10 br-lan.20 br-lan.30 br-guest tailscale0}"
 
 # Strip our own rules. Only these sit directly in PREROUTING as a REDIRECT on
 # port 53 -- the vendor reaches its redirect through the dns_dispatcher jump,

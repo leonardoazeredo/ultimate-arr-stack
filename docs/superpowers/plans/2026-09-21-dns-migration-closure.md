@@ -41,7 +41,7 @@ The migration leaves AdGuard Home's UI at `http://192.168.8.1:3000`. It answers 
 - Consumes: nothing.
 - Produces: a recorded decision in `docs/LOCAL-DNS.md`, and either a new firewall rule or a documented restriction. Task 4 depends on the decision being recorded, not on which branch was taken.
 
-- [ ] **Step 1: Reproduce the measurement, so the decision rests on current facts**
+- [x] **Step 1: Reproduce the measurement, so the decision rests on current facts**
 
 ```bash
 # --interface on BOTH, and not optional: pi1 holds eth0 on the maintenance VLAN
@@ -68,7 +68,7 @@ NAS - VLAN10                 000
 
 The NAS line is the one that matters: it cannot reach the admin port either, so Branch B's firewall rule is a genuine prerequisite for a Traefik-proxied `.lan` name rather than a nicety.
 
-- [ ] **Step 2: Put the decision to the user**
+- [x] **Step 2: Put the decision to the user**
 
 Present exactly this, then wait:
 
@@ -78,7 +78,7 @@ Present exactly this, then wait:
 
 #### Branch A — leave it (recommended)
 
-- [ ] **Step 3A: Record the decision**
+- [x] **Step 3A: Record the decision**
 
 Append to `docs/LOCAL-DNS.md`, under the AdGuard section:
 
@@ -92,7 +92,7 @@ Making it a `.lan` name behind Traefik would need a rule letting the NAS reach
 the router — a trade nobody has chosen. Decide it explicitly if it ever matters.
 ```
 
-- [ ] **Step 4A: Verify and commit**
+- [x] **Step 4A: Verify and commit**
 
 ```bash
 ./tests/run-tests.sh tests/lib-doc-links.bats
@@ -256,7 +256,7 @@ git commit -m "dns: settle the tailnet as deliberately unfiltered"
 
 #### Branch B — filter the tailnet
 
-- [ ] **Step 5B: Write the failing tests**
+- [x] **Step 5B: Write the failing tests**
 
 In `tests/firewall-user.bats`:
 
@@ -304,12 +304,12 @@ In `tests/lib-router-dns.bats`, replace the existing tailnet test (currently "a 
 }
 ```
 
-- [ ] **Step 6B: Run them and watch them fail**
+- [x] **Step 6B: Run them and watch them fail**
 
 Run: `./tests/run-tests.sh tests/firewall-user.bats tests/lib-router-dns.bats`
 Expected: FAIL on both.
 
-- [ ] **Step 7B: Implement**
+- [x] **Step 7B: Implement**
 
 In `router/firewall.user`, extend the list — as a default, so an operator can still override it:
 
@@ -356,7 +356,7 @@ Finally, close the live coverage gap. `router-dns.bats` group (d) runs against t
 
 `ROUTER_DNS_EXTRA_CLIENT_IFACES` is for the **tests**. Production covers the interface directly through `router/firewall.user`, and setting it in the router's environment would do nothing — `fw3` sources the include with a bare PATH and no repo config. Note that in the lib comment so nobody wires both.
 
-- [ ] **Step 8B: Verify, deploy, verify live, add the mutation, commit**
+- [x] **Step 8B: Verify, deploy, verify live, add the mutation, commit**
 
 ```bash
 ./tests/run-tests.sh tests/firewall-user.bats tests/lib-router-dns.bats tests/router-dns.bats

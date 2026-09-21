@@ -801,19 +801,35 @@ all_bridges() {
     [[ "$output" == *"FAIL br-lan.40"* ]]
 }
 
-@test "router-dns: a tailnet interface is reported, never failed" {
+@test "router-dns: a tailnet interface is required when the tailnet is in scope" {
     client_ifaces_capture ifaces.txt br-lan.1:192.168.8.1 tailscale0:100.70.123.86
     nat_capture nat.txt \
         "$(direct_dns br-lan.1 tcp)" "$(direct_dns br-lan.1 udp)" \
         '-A PREROUTING -i tailscale0 -m comment --comment "!fw3" -j zone_tailscale0_prerouting'
 
-    # RED if tailscale0 were folded into the required set. Whether the tailnet
-    # should be filtered is a decision nobody has made, and a guard that invents
-    # scope is a guard its operator deletes.
-    run router_dns_client_path_check 3053 "$FIX/ifaces.txt" "$FIX/nat.txt"
+    # RED while the derivation only ever prints bridges: a tailnet client would be
+    # silently exempt from the invariant that every client interface is served,
+    # and it resolves through dnsmasq with no ad blocking while the check reports
+    # a healthy client path.
+    ROUTER_DNS_EXTRA_CLIENT_IFACES=tailscale0 \
+        run router_dns_client_path_check 3053 "$FIX/ifaces.txt" "$FIX/nat.txt"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"FAIL tailscale0"* ]]
+}
+
+@test "router-dns: a covered tailnet interface passes when the tailnet is in scope" {
+    client_ifaces_capture ifaces.txt br-lan.1:192.168.8.1 tailscale0:100.70.123.86
+    nat_capture nat.txt \
+        "$(direct_dns br-lan.1 tcp)" "$(direct_dns br-lan.1 udp)" \
+        "$(direct_dns tailscale0 tcp)" "$(direct_dns tailscale0 udp)"
+
+    # The positive arm, and it is not decoration: without it a derivation that
+    # dropped tailscale0 entirely would satisfy the test above, because that test
+    # only ever asserts the failure it was written to produce.
+    ROUTER_DNS_EXTRA_CLIENT_IFACES=tailscale0 \
+        run router_dns_client_path_check 3053 "$FIX/ifaces.txt" "$FIX/nat.txt"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"tailscale0 is NOT redirected"* ]]
-    [[ "$output" == *"1 bridge(s) checked, 0 not on 3053"* ]]
+    [[ "$output" == *"ok   tailscale0"* ]]
 }
 
 @test "router-dns: an interface capture with no client bridge is not a pass" {

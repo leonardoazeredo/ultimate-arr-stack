@@ -528,14 +528,15 @@ router_dns_binds_check() {
 # Whether tailnet clients should be redirected is a policy decision nobody has
 # made, so tailscale0 is reported by the check and not failed by it.
 router_dns_client_ifaces() {
-    awk '
+    awk -v extra="${ROUTER_DNS_EXTRA_CLIENT_IFACES-}" '
+        BEGIN { n = split(extra, e, " "); for (i = 1; i <= n; i++) if (e[i] != "") want[e[i]] = 1 }
         $1 ~ /^[0-9]+:$/ { name = $2 }
         {
             for (i = 1; i <= NF; i++) {
                 if ($i == "inet") {
                     addr = $(i + 1)
                     sub(/\/.*/, "", addr)
-                    if (name ~ /^br-/ && addr !~ /^127\./) { print name }
+                    if (addr !~ /^127\./ && (name ~ /^br-/ || name in want)) { print name }
                     break
                 }
             }
@@ -710,28 +711,6 @@ router_dns_client_path_check() {
             failures=$((failures + 1))
         fi
     done
-
-    # tailscale0 is reported, never failed: the tailnet is a client population
-    # too, but nobody has decided it should be filtered, and a guard that
-    # invents scope is a guard that argues with its own operator.
-    # [[:space:]], not \t. BSD grep accepts \t as a tab and GNU grep does not —
-    # it reads it as a literal 't' — so the original pattern matched on macOS and
-    # silently never matched on Linux, and the note simply never appeared there.
-    # tests/lib-router-dns.bats caught it on the first Linux CI run; a note that
-    # only prints on one platform is worse than no note, because the absence
-    # looks like a quiet router.
-    if printf '%s\n' "$pr" | grep -qE '^tailscale0[[:space:]]'; then
-        local ts=0
-        while IFS=$'\t' read -r _i _p _d _t _tp; do
-            [[ "$_i" == "tailscale0" && "$_d" == "53" ]] || continue
-            [[ "$_t" == "REDIRECT" && "$_tp" == "$port" ]] && ts=1
-        done <<<"$pr"
-        if [[ "$ts" -eq 1 ]]; then
-            echo "note: tailscale0 DNS is redirected to ${port} as well"
-        else
-            echo "note: tailscale0 is NOT redirected, so tailnet clients resolve through dnsmasq and get no ad blocking. Not asserted -- whether the tailnet should be filtered is an open decision."
-        fi
-    fi
 
     echo "--- client path: ${checked} bridge(s) checked, ${failures} not on ${port} ---"
     [[ "$failures" -eq 0 ]] || return 1

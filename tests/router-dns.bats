@@ -191,6 +191,11 @@ router_capture() {
     [[ -n "$adg_port" ]] \
         || skip "AdGuard Home's config.yaml does not state a DNS port, so there is no port to require the redirects to name"
 
+    # Set here, not in the lib's default: this is the arm that reads the router,
+    # and without it the live check derives bridges only and reports a healthy
+    # client path even if the deployed include has dropped the tailnet.
+    export ROUTER_DNS_EXTRA_CLIENT_IFACES=tailscale0
+
     local pair family path failures=0
     for pair in "IPv4:$nat4" "IPv6:$nat6"; do
         family="${pair%%:*}"
