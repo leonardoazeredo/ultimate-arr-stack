@@ -494,11 +494,25 @@ uci commit adguardhome
 /etc/init.d/firewall reload
 ```
 
-- [x] **6.3 Re-run the full acceptance set**: the parity harness against `:53` now (not 3053), the per-VLAN checks **from real clients on every VLAN — this is the first point at which that is possible**, blocking, `.lan`, the AAAA/musl test, and `tests/e2e/dns.spec.ts`.
+- [x] **6.3 Re-run the full acceptance set**: the parity harness against `:53` now (not 3053), the per-VLAN checks **from real clients on every VLAN — this is the first point at which that is possible**, blocking, `.lan`, the AAAA/musl test, and `tests/e2e/dns.spec.ts`. — **All items done.** The parity harness against `:53` reports `50 rows compared, 0 unexplained, 0 excused` (Phase 3 recorded 20 excused; the 20 were load-balanced public names whose edges happened to agree at that moment, so that is not a permanent improvement — the gate condition is zero unexplained, and it holds). `tests/dns-resilience.bats` is 10/10, including blocking and `.lan` over both transports. `tests/e2e/dns.spec.ts` is **6/6** against `192.168.110.1:53`, run from the NAS in the existing `arr-stack-e2e` image: `example.com`, `jellyfin.lan` -> Traefik's macvlan, and `doubleclick.net` -> `0.0.0.0`, each over UDP and TCP. The Alpine/musl test is 4/4.
+
+  **"From real clients on every VLAN" needs a correction.** Three of the four pools have been verified from a live client: `lan` from pi1's `eth0` on the maintenance VLAN, `vlan10` from the NAS, `vlan20` from pi1's `wlan0`. `vlan30` **cannot be**, and that is a fact about the network rather than a gap here: `br-lan.30` reports **rx_bytes = 0** — it has never received a single packet — and it has no DHCP lease and no ARP entry. `br-guest` is the same (rx 0), while `br-lan.1`, `.10` and `.20` carry 20 MB, 600 MB and 634 MB respectively. Its redirect rule exists, is identical in form to the three that are verified, and is asserted configurationally by `tests/router-dns.bats` group (d), which derives the requirement from the live interface list — so if a client ever appears on VLAN30 it is covered without anyone editing anything.
+
+  Synthesising a client to close the last row is not possible on this hardware, which is worth recording so nobody tries again: `ip netns` is supported but **veth creation is not** (`RTNETLINK answers: Not supported`), and macvlan is unsupported too. Both the obvious ways to stand up a test host on an unused VLAN are closed.
 
 - [x] **6.4 Confirm the revert works, then revert it.** Flip `dns_enabled='0'`, reload, confirm resolution returns to dnsmasq, then flip back to `'1'`. A rollback path that has never been executed is a hypothesis, not a plan. — **Executed for real, twice**, as part of Phase 7.4 on 2026-09-21: the watchdog fell back to dnsmasq and recovered, and a real VLAN10 client (the NAS) kept resolving throughout while blocking was correctly dropped. See Ruling D7 — the first watchdog version made the fallback *look* correct while leaving every rule pointed at a dead AdGuard, which is why this revert had to be observed from a client rather than from the router.
 
-**Gate 6.** AdGuard Home serves every client; the NAS resolver is idle but still running; the revert has been executed once for real and restored service both ways. Rollback trigger: any acceptance failure → `dns_enabled='0'` plus firewall reload, seconds of degraded blocking at worst, no loss of resolution.
+**Gate 6.** AdGuard Home serves every client; the NAS resolver is idle but still running; the revert has been executed once for real and restored service both ways.
+
+**Gate 6 passes, with one clause read carefully.** AdGuard Home serves every client
+that exists: verified from a live client on three of the four pools, and the fourth
+(`vlan30`) has never carried a packet. The revert has been executed for real, twice.
+"The NAS resolver is idle" is true of **clients** and was measured rather than
+assumed — querying Pi-hole's FTL database for anything since the 12:34 cutover
+returned no LAN device at all, every client's last query predating it. It is not
+literally idle: `gluetun` still resolves through it on `main`, which is 8.1's whole
+subject, and with 8.1 live Pi-hole's client list went to **zero of any kind**. That
+is the state 9.1 needs. Rollback trigger: any acceptance failure → `dns_enabled='0'` plus firewall reload, seconds of degraded blocking at worst, no loss of resolution.
 
 ---
 
