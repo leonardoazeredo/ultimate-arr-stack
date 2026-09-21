@@ -28,9 +28,9 @@ mutation firewall-user-probe-always-falls-back \
 mutation firewall-user-only-vendor-interfaces \
   --file router/firewall.user \
   --bats tests/firewall-user.bats \
-  --test "firewall-user: every client bridge is redirected, on both transports" \
+  --test "firewall-user: every client interface is redirected, on both transports" \
   --why "Narrows the interface list to the two GL.iNet's own dns_dispatcher already covers. vlan10, vlan20 and vlan30 then resolve straight off dnsmasq with no ad blocking, which is the state this migration actually shipped on 2026-09-21 and took a client-path check to find" \
-  --apply 'perl -0pi -e "s/ARRDNS_IFACES=\"br-lan\.1 br-lan\.10 br-lan\.20 br-lan\.30 br-guest\"/ARRDNS_IFACES=\"br-lan.1 br-guest\"/" "$F"'
+  --apply 'perl -0pi -e "s/ARRDNS_IFACES=\"\x24\{ARRDNS_IFACES:-[^}]*\}\"/ARRDNS_IFACES=\"br-lan.1 br-guest\"/" "$F"'
 
 mutation firewall-user-never-strips \
   --file router/firewall.user \
