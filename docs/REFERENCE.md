@@ -67,7 +67,6 @@
 | Sonarr | 172.20.0.10 | 8989 | TV shows (own IP — not via VPN) |
 | Radarr | 172.20.0.11 | 7878 | Movies (own IP — not via VPN) |
 | Jellyfin | 172.20.0.4 | 8096 | Media server |
-| Pi-hole | 172.20.0.5 | 8081 | DNS ad-blocking (`/admin`) |
 | Seerr | 172.20.0.8 | 5055 | Request management |
 | Bazarr | 172.20.0.9 | 6767 | Subtitles |
 | Decypharr | 172.20.0.7 | 8282 | TorBox debrid client (own IP — not via VPN; it only calls TorBox over HTTPS) |

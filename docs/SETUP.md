@@ -428,7 +428,11 @@ Update `.env` with your provider's required variables.
 
 </details>
 
-> **Don't want Pi-hole?** Change `DNS_ADDRESS=172.20.0.5` to your preferred public DNS (e.g., `1.1.1.1`, `8.8.8.8`) in `docker-compose.arr-stack.yml`.
+> **DNS does not live in this stack any more.** It moved to AdGuard Home on the
+> router on 2026-09-21, so there is no `DNS_ADDRESS` to point at a public
+> resolver here. Gluetun's `DNS_ADDRESS` names the router, and
+> [LOCAL-DNS.md](LOCAL-DNS.md) has the arrangement; the migration record is
+> [DNS-MIGRATION.md](DNS-MIGRATION.md).
 
 ### 2.5 Create Passwords
 
