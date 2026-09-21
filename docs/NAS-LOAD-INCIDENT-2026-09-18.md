@@ -130,7 +130,12 @@ Three guards, committed to `fix/nas-load-protection`:
   host reads as I/O-stalled, which is the state that made the 23:07 restart walk
   the volume in the first place.
 
-**These are committed, not deployed.** The NAS has not been synced or
+**These are committed, not deployed.** *(This paragraph records the state on
+2026-09-19 and is kept because the deploy sequence below is still the sequence.
+Two things have changed since: the guards did ship, and the NAS is no longer in
+the state that made arming them safe. Read
+[§8](#8-the-recurrence-of-2026-09-20) before following any step here.)* The NAS
+has not been synced or
 `daemon-reload`ed, and the installed unit under `~/.config/systemd/user/` is a
 plain copy rather than a symlink, so the two can drift with nothing to say so. As
 of this writing the NAS still runs uncapped. The deploy is a deliberate single
@@ -156,6 +161,11 @@ and the third is baked into an image that only a rebuild replaces. In order:
    488 NZBs still queued at the reboot — the state that wedged the box.
    `grep -m1 max-inflight ~/.config/systemd/user/usenet-blackhole.service` should
    print `--max-inflight 6` before the timer is armed.
+   **Do not arm the timer while the outbox is deep.** On 2026-09-20 the queue
+   stood at 588 NZBs with 21 releases already complete at TorBox and owed a
+   local download, against metadata at 91.5%. Arming the ingest into that state
+   re-enters the failure this document records. See *Holding the usenet ingest
+   down* in [`docs/MAINTENANCE.md`](MAINTENANCE.md#holding-the-usenet-ingest-down).
 4. **Rebuild duc.**
    `docker compose -f docker-compose.utilities.yml up -d --build duc`, and
    **never** with `--remove-orphans`: this stack's services are split across
@@ -217,7 +227,8 @@ The rest is capacity, and no guard in this repo removes it:
 
 - `overlay2` shares `/volume1` with the media library, so container churn
   competes with downloads for the same two disks.
-- 7.7 GB of RAM carries 30 containers.
+- 7.88 GB of RAM (`MemTotal`; `free -m` reports 7,699 MiB) carries 30
+  containers.
 - **Beszel's `data.db` is entirely empty** — zero rows in `systems`,
   `system_stats`, `container_stats` and `system_details`. The hub was never given
   a system, so the stack's own metrics layer recorded nothing across the whole
@@ -250,10 +261,11 @@ finished (`scripts/lib/usenet_blackhole.py:882`). The local I/O comes from jobs
 it *has* finished. At 21:22:32 the state file held 24 jobs, **21 of them
 complete**, so the guard read **3** at the exact moment 21 releases — two of
 them 30–38 GB — were owed a local download. The fetch set took all 21
-(`usenet_blackhole.py:1423`) with no reference to the ceiling anywhere on that
-path, and the string `in-flight cap reached` appears **zero times in 1,281 log
-lines across 72 passes**. A guard whose reading falls as the load rises cannot
-bound the load.
+(`to_fetch = owed[:FETCH_WORKERS]` in `run()` in
+`scripts/lib/usenet_blackhole.py`) with no reference to the ceiling anywhere on
+that path, and the string `in-flight cap reached` appears **zero times in 1,281
+log lines across 72 passes**. A guard whose reading falls as the load rises
+cannot bound the load.
 
 Consequences measured: one admitted pass ran 53m12s; a second took load from
 8.47 to 50.18 and io full avg10 to 81.91% in twelve minutes; one release cost
@@ -281,7 +293,8 @@ is above it. Neither corrected claim appears in what follows.
 bandwidth-saturated: whole-boot averages are 19.47 MB/s of writes and 9.85
 MB/s of reads against drives that do 253 MB/s sequential. The failure is
 latency and queue depth, not throughput. Random 4 KiB reads cost 16.9 ms at
-p50, about 56 IOPS at queue depth 1, and btrfs metadata sits at 91.5%. The
+p50 and 17.9 ms at the mean, so about 59 IOPS at queue depth 1 from the median
+and about 56 from the mean, and btrfs metadata sits at 91.5%. The
 largest single writer over that boot was **decypharr at 67.07% of pool writes**
 (84.77 GB) — the torrent path, which no guard in §6 touches, and which has had
 no investigation of its own.
