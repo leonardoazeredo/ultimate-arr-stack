@@ -57,8 +57,8 @@ Internet ◄───VPN Tunnel───────│  SABnzbd   Prowlarr   Fl
 Internet ◄──Cloudflare Tunnel─│  Jellyfin    Seerr                     │
   (remote)                    │  (stream)    (requests)                 │
                               │                                         │
-LAN only ◄────────────────────│  Pi-hole   Sonarr    Radarr   Bazarr   │
-  (local)                     │  (DNS)     (manage)  (manage)  (subs)   │
+LAN only ◄────────────────────│  Sonarr    Radarr    Bazarr   Jellyfin │
+  (local)                     │  (manage)  (manage)  (subs)   (stream) │
                               └─────────────────────────────────────────┘
 ```
 
@@ -66,7 +66,7 @@ LAN only ◄────────────────────│  Pi-
 
 ## Service Connections
 
-Services behind Gluetun (SABnzbd, Prowlarr, FlareSolverr) use `localhost` to talk to each other. Crossing the bridge↔VPN boundary needs care — the VPN namespace's DNS is Pi-hole, which can't resolve Docker container names, so VPN-side services must reach bridge services by **IP**.
+Services behind Gluetun (SABnzbd, Prowlarr, FlareSolverr) use `localhost` to talk to each other. Crossing the bridge↔VPN boundary needs care — gluetun's `DNS_ADDRESS` is the router, which resolves public and `.lan` names but not Docker container names, so VPN-side services must reach bridge services by **IP**.
 
 ```
 Bridge → VPN-side (use gluetun):     VPN-side → bridge (use IP):
@@ -106,7 +106,7 @@ arr-core network (172.20.0.0/24)
 │ 172.20.0.9   │ Bazarr       │ Subtitles                      │ Core             │
 │ 172.20.0.10  │ Sonarr       │ TV manager (bridge, not VPN)   │ Core             │
 │ 172.20.0.11  │ Radarr       │ Movie manager (bridge, not VPN)│ Core             │
-│ 172.20.0.5   │ Pi-hole      │ DNS server                     │ Core             │
+│ 172.20.0.5   │ Pi-hole      │ legacy DNS (see LOCAL-DNS.md)  │ Core             │
 │ 172.20.0.7   │ Decypharr    │ TorBox debrid client (bridge, not VPN) │ Core     │
 │ 172.20.0.2   │ Traefik      │ Reverse proxy                  │ + local DNS      │
 │ 172.20.0.12  │ Cloudflared  │ Tunnel to Cloudflare           │ + remote access (Cloudflared) │
@@ -144,7 +144,7 @@ magnetio-net (172.22.0.0/24) — isolated, only Gluetun + Magnetio's own contain
 │  └───────────┘  └───────────┘  └───────────┘  └───────────┘            │
 └─────────────────────────────────────────────────────────────────────────┘
                                     │
-                                    │ + Pi-hole + Traefik
+                                    │ + AdGuard Home (router) + Traefik
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                          + LOCAL DNS                                     │
@@ -153,7 +153,7 @@ magnetio-net (172.22.0.0/24) — isolated, only Gluetun + Magnetio's own contain
 │  │ jellyfin.lan  │  │ sonarr.lan    │  │ radarr.lan    │  ...          │
 │  └───────────────┘  └───────────────┘  └───────────────┘               │
 │                                                                          │
-│  Your device → Pi-hole (DNS) → Traefik → Service                        │
+│  Your device → router (AdGuard Home) → Traefik → Service                │
 └─────────────────────────────────────────────────────────────────────────┘
                                     │
                                     │ + Cloudflared and/or Tailscale
@@ -215,7 +215,7 @@ Additional requirements:
 
 **VPN for downloads only:** Protects privacy where it matters, doesn't slow down streaming.
 
-**Pi-hole for DNS:** Provides internal Docker DNS and ad-blocking. Optionally enables `.lan` domains (+ local DNS).
+**DNS lives on the router, not here.** AdGuard Home on `arr-stack-router` answers public and `.lan` names and does the ad blocking; the router's own dnsmasq sits underneath it and a watchdog moves the house between them. Nothing in this stack is in that path. Pi-hole and dnscrypt-proxy still run on the NAS for as long as a rollback to them is wanted — see [LOCAL-DNS.md](LOCAL-DNS.md) and [the migration plan](superpowers/plans/2026-09-19-dns-adguard-router-migration.md) — but no client is pointed at them.
 
 **Named volumes:** Data persists across container updates. Easy to backup with the included script.
 

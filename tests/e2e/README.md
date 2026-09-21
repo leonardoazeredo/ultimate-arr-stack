@@ -8,6 +8,7 @@ Playwright tests against a live running stack (NAS or a local dev copy). Split b
 | `api-assertions.spec.ts` | Root folders, media counts, download-client tests, indexer tests, health checks via each app's API |
 | `vpn-security.spec.ts` | Egress-IP leak checks (tunneled services match Gluetun, bridge services don't), killswitch chaos test, port-forwarding stub |
 | `networking.spec.ts` | DNS resolution via Pi-hole, Traefik `.lan` routing end-to-end, Pi-hole port publication |
+| `dns.spec.ts` | The DNS migration's acceptance spec: public, `.lan` and blocked answers over **both** UDP and TCP, against an explicit resolver (`DNS_RESOLVER`, default the router at `192.168.110.1`) |
 | `addons.spec.ts` | Decypharr, Magnetio (scraper/addon/redis), stremio-jellyfin, Homepage, and two container-toolchain contracts |
 | `operations.spec.ts` | uptime-kuma, beszel, duc over the bridge, and the Docker socket proxy asserted in both directions (what it must allow, what it must refuse) |
 | `resilience.spec.ts` | Gluetun zombie-container detection (stale netns after a recreate) |
@@ -40,7 +41,7 @@ skipping *everything* is a configuration failure that would otherwise read as a 
 Playwright exits 0 when tests skip.
 
 `executed-floor-reporter.ts` prints a census (`executed / skipped / failed / collected`) on every
-run and fails any **full-suite** run that executed fewer than 30 of the 58 collected tests. Runs
+run and fails any **full-suite** run that executed fewer than 30 of the collected tests. Runs
 that collected fewer than 50 in total (a single spec, or `-g`) are exempt, so the documented
 single-file invocations above still work.
 
@@ -49,6 +50,10 @@ complete `.env.e2e` (2 skip: the killswitch chaos test and the port-forwarding s
 every test that needs `docker` skips, which is why the executed count there is not the number to
 read; 3 executed is the signature of a missing or rotted `.env.e2e`. `forbidOnly` is on for the
 same reason: a stray `test.only` would shrink a green run to one test.
+
+Collection grows as specs are added: `npx playwright test --list` on 2026-09-19 reported **80
+tests in 8 files**, up from 74 in 7 when `dns.spec.ts` was added. The tally above is a NAS
+measurement from its own date and needs re-taking there rather than adjusting from a laptop.
 
 Do not hardcode these numbers anywhere else. They move whenever a spec gains a test, and the
 census line printed by every run is the number that cannot go stale.

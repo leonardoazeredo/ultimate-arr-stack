@@ -93,6 +93,38 @@ the whole thing (once upstream ships the fix in a release).
 
 SSH credentials are in `.claude/config.local.md`. Read it before running any NAS commands.
 
+## DNS lives on the router — the NAS is not in that path
+
+**Read this before touching anything DNS-shaped, and before diagnosing "the
+internet is down".** The house's DNS moved off the NAS onto `arr-stack-router`
+on 2026-09-21, so that the NAS being powered off cannot remove internet access.
+AdGuard Home listens on `:3053`; the router's dnsmasq on `:53` sits underneath
+it; `/usr/sbin/arrdns-watchdog.sh` (cron, every minute) moves the house between
+them and logs every transition.
+
+Three things here are expensive to rediscover, and all three cost real time:
+
+- **`dns_enabled='1'` alone does not put the VLANs on AdGuard.** GL.iNet's
+  `dns_dispatcher` is wired for `br-lan.1` and `br-guest` only, so on this
+  firmware `vlan10`/`vlan20`/`vlan30` are reached by the per-bridge REDIRECT
+  rules in `router/firewall.user`. Those rules are load-bearing, not a
+  stale-lease convenience, and `tests/router-dns.bats` asserts them.
+- **`fw3 reload` and those rules move by different mechanisms.**
+  `/etc/firewall.user` is `firewall.@include[0]` and its `reload` option has to be
+  `'1'`, or a reload rebuilds the vendor chain and never re-runs the include —
+  which once left a fallback pointing every client at a stopped AdGuard. fw3 also
+  does not flush the built-in `PREROUTING` chain, so the include strips its own
+  rules before re-inserting them; without that, every reload stacks another ten.
+- **A query the router sends to its own address is not a client test.** It
+  originates locally, takes OUTPUT, and never meets the redirect, so it answers
+  from dnsmasq while clients are being sent elsewhere. Two conclusions in this
+  migration were wrong until they were re-measured from a real client.
+
+The NAS Pi-hole and dnscrypt-proxy still run, and still work, so that any DHCP
+pool can be reverted to them in one script run. Nothing points at them. Full
+record: [docs/LOCAL-DNS.md](docs/LOCAL-DNS.md) and
+[docs/superpowers/plans/2026-09-19-dns-adguard-router-migration.md](docs/superpowers/plans/2026-09-19-dns-adguard-router-migration.md).
+
 ## Project Structure
 
 Docker media stack for Ugreen NAS. Edit NAS files (like `pihole/dnsmasq.d/02-local-dns.conf`) **on the NAS**, not locally.

@@ -1,0 +1,89 @@
+# DNS baseline answer matrix — the oracle for the AdGuard Home migration.
+#
+# Measured 2026-09-19 from 192.168.120.135 (vlan20) against the NAS Pi-hole at
+# 192.168.110.246, with dig +time=3 +tries=1, over both transports.
+# Consumed by scripts/dns-parity.sh (3.6) and the Phase 6 acceptance run (6.3).
+#
+# Columns are TAB-separated: name, qtype, transport, expectation, note
+#
+# expectation is one of:
+#   <address>   the answer set must contain exactly this address, order-free
+#   ANY         at least one address record must come back; the value is not
+#               compared, because these are load-balanced names that hand out a
+#               different edge on every query
+#   BLOCKED     the answer must be 0.0.0.0 (Pi-hole's NULL blocking mode today)
+#   NXDOMAIN    the name must not resolve
+#   NODATA      NOERROR with an empty answer section
+#
+# A note containing ALLOW-DIFF marks a difference the parity harness may excuse,
+# and the note has to say why. Every other row must match. Two classes are marked
+# from the 2026-09-19 parity run, and both are "the same effective answer reached
+# differently" rather than "one side is wrong":
+#
+#   * `.lan` AAAA — the NAS answers `::` from its `address=/lan/::` hack, AdGuard
+#     answers NODATA. Both let a musl client through; NODATA is the safer answer.
+#   * `nope.lan` — a name that does not exist. NAS: NODATA from its local zone.
+#     AdGuard: NXDOMAIN, reached by asking a public resolver.
+#
+# A CDN edge difference on a load-balanced name would be a third class; the ANY
+# rows already cover it, since ANY never compares the value.
+
+# --- public names: resolution itself, both transports ---
+example.com	A	udp	ANY	load-balanced; Cloudflare hands out a different edge per query
+example.com	A	tcp	ANY	the same over TCP — a TCP-only probe passes while UDP is broken
+example.com	AAAA	udp	ANY	AAAA still comes from upstream; address=/lan/:: does not touch it
+cloudflare.com	A	udp	ANY	second public name, different operator, same load-balancing caveat
+
+# --- the 18 .lan hostnames 3.2 migrates, A and AAAA ---
+jellyfin.lan	A	udp	192.168.110.250	Traefik macvlan rewrite
+seerr.lan	A	udp	192.168.110.250	Traefik macvlan rewrite
+jellyseerr.lan	A	udp	192.168.110.250	Traefik macvlan rewrite
+jellyseer.lan	A	udp	192.168.110.250	Traefik macvlan rewrite
+sonarr.lan	A	udp	192.168.110.250	Traefik macvlan rewrite
+radarr.lan	A	udp	192.168.110.250	Traefik macvlan rewrite
+prowlarr.lan	A	udp	192.168.110.250	Traefik macvlan rewrite
+bazarr.lan	A	udp	192.168.110.250	Traefik macvlan rewrite
+sabnzbd.lan	A	udp	192.168.110.250	Traefik macvlan rewrite
+traefik.lan	A	udp	192.168.110.250	Traefik macvlan rewrite
+pihole.lan	A	udp	192.168.110.250	Traefik macvlan rewrite; retired with the service in 8.4 and 9.4
+uptime.lan	A	udp	192.168.110.250	Traefik macvlan rewrite
+duc.lan	A	udp	192.168.110.250	Traefik macvlan rewrite
+beszel.lan	A	udp	192.168.110.250	Traefik macvlan rewrite
+homepage.lan	A	udp	192.168.110.250	Traefik macvlan rewrite
+usenet.lan	A	udp	192.168.110.250	Traefik macvlan rewrite
+stremio.lan	A	udp	192.168.110.250	Traefik macvlan rewrite
+magnetio.lan	A	udp	192.168.110.250	Traefik macvlan rewrite
+jellyfin.lan	A	tcp	192.168.110.250	TCP transport for a .lan name
+sonarr.lan	A	tcp	192.168.110.250	TCP transport for a .lan name
+traefik.lan	A	tcp	192.168.110.250	TCP transport for a .lan name
+jellyfin.lan	AAAA	udp	::	ALLOW-DIFF: the NAS answers :: because of its address=/lan/:: hack; AdGuard answers NODATA (NOERROR, no answer). Both keep a musl client working, because the failure musl has is AAAA NXDOMAIN and neither is that. NODATA is also the safer of the two: :: resolves to the unspecified address, which connect() maps to loopback.
+seerr.lan	AAAA	udp	::	ALLOW-DIFF: the NAS answers :: because of its address=/lan/:: hack; AdGuard answers NODATA (NOERROR, no answer). Both keep a musl client working, because the failure musl has is AAAA NXDOMAIN and neither is that. NODATA is also the safer of the two: :: resolves to the unspecified address, which connect() maps to loopback.
+jellyseerr.lan	AAAA	udp	::	ALLOW-DIFF: the NAS answers :: because of its address=/lan/:: hack; AdGuard answers NODATA (NOERROR, no answer). Both keep a musl client working, because the failure musl has is AAAA NXDOMAIN and neither is that. NODATA is also the safer of the two: :: resolves to the unspecified address, which connect() maps to loopback.
+jellyseer.lan	AAAA	udp	::	ALLOW-DIFF: the NAS answers :: because of its address=/lan/:: hack; AdGuard answers NODATA (NOERROR, no answer). Both keep a musl client working, because the failure musl has is AAAA NXDOMAIN and neither is that. NODATA is also the safer of the two: :: resolves to the unspecified address, which connect() maps to loopback.
+sonarr.lan	AAAA	udp	::	ALLOW-DIFF: the NAS answers :: because of its address=/lan/:: hack; AdGuard answers NODATA (NOERROR, no answer). Both keep a musl client working, because the failure musl has is AAAA NXDOMAIN and neither is that. NODATA is also the safer of the two: :: resolves to the unspecified address, which connect() maps to loopback.
+radarr.lan	AAAA	udp	::	ALLOW-DIFF: the NAS answers :: because of its address=/lan/:: hack; AdGuard answers NODATA (NOERROR, no answer). Both keep a musl client working, because the failure musl has is AAAA NXDOMAIN and neither is that. NODATA is also the safer of the two: :: resolves to the unspecified address, which connect() maps to loopback.
+prowlarr.lan	AAAA	udp	::	ALLOW-DIFF: the NAS answers :: because of its address=/lan/:: hack; AdGuard answers NODATA (NOERROR, no answer). Both keep a musl client working, because the failure musl has is AAAA NXDOMAIN and neither is that. NODATA is also the safer of the two: :: resolves to the unspecified address, which connect() maps to loopback.
+bazarr.lan	AAAA	udp	::	ALLOW-DIFF: the NAS answers :: because of its address=/lan/:: hack; AdGuard answers NODATA (NOERROR, no answer). Both keep a musl client working, because the failure musl has is AAAA NXDOMAIN and neither is that. NODATA is also the safer of the two: :: resolves to the unspecified address, which connect() maps to loopback.
+sabnzbd.lan	AAAA	udp	::	ALLOW-DIFF: the NAS answers :: because of its address=/lan/:: hack; AdGuard answers NODATA (NOERROR, no answer). Both keep a musl client working, because the failure musl has is AAAA NXDOMAIN and neither is that. NODATA is also the safer of the two: :: resolves to the unspecified address, which connect() maps to loopback.
+traefik.lan	AAAA	udp	::	ALLOW-DIFF: the NAS answers :: because of its address=/lan/:: hack; AdGuard answers NODATA (NOERROR, no answer). Both keep a musl client working, because the failure musl has is AAAA NXDOMAIN and neither is that. NODATA is also the safer of the two: :: resolves to the unspecified address, which connect() maps to loopback.
+pihole.lan	AAAA	udp	::	ALLOW-DIFF: the NAS answers :: because of its address=/lan/:: hack; AdGuard answers NODATA (NOERROR, no answer). Both keep a musl client working, because the failure musl has is AAAA NXDOMAIN and neither is that. NODATA is also the safer of the two: :: resolves to the unspecified address, which connect() maps to loopback.
+uptime.lan	AAAA	udp	::	ALLOW-DIFF: the NAS answers :: because of its address=/lan/:: hack; AdGuard answers NODATA (NOERROR, no answer). Both keep a musl client working, because the failure musl has is AAAA NXDOMAIN and neither is that. NODATA is also the safer of the two: :: resolves to the unspecified address, which connect() maps to loopback.
+duc.lan	AAAA	udp	::	ALLOW-DIFF: the NAS answers :: because of its address=/lan/:: hack; AdGuard answers NODATA (NOERROR, no answer). Both keep a musl client working, because the failure musl has is AAAA NXDOMAIN and neither is that. NODATA is also the safer of the two: :: resolves to the unspecified address, which connect() maps to loopback.
+beszel.lan	AAAA	udp	::	ALLOW-DIFF: the NAS answers :: because of its address=/lan/:: hack; AdGuard answers NODATA (NOERROR, no answer). Both keep a musl client working, because the failure musl has is AAAA NXDOMAIN and neither is that. NODATA is also the safer of the two: :: resolves to the unspecified address, which connect() maps to loopback.
+homepage.lan	AAAA	udp	::	ALLOW-DIFF: the NAS answers :: because of its address=/lan/:: hack; AdGuard answers NODATA (NOERROR, no answer). Both keep a musl client working, because the failure musl has is AAAA NXDOMAIN and neither is that. NODATA is also the safer of the two: :: resolves to the unspecified address, which connect() maps to loopback.
+usenet.lan	AAAA	udp	::	ALLOW-DIFF: the NAS answers :: because of its address=/lan/:: hack; AdGuard answers NODATA (NOERROR, no answer). Both keep a musl client working, because the failure musl has is AAAA NXDOMAIN and neither is that. NODATA is also the safer of the two: :: resolves to the unspecified address, which connect() maps to loopback.
+stremio.lan	AAAA	udp	::	ALLOW-DIFF: the NAS answers :: because of its address=/lan/:: hack; AdGuard answers NODATA (NOERROR, no answer). Both keep a musl client working, because the failure musl has is AAAA NXDOMAIN and neither is that. NODATA is also the safer of the two: :: resolves to the unspecified address, which connect() maps to loopback.
+magnetio.lan	AAAA	udp	::	ALLOW-DIFF: the NAS answers :: because of its address=/lan/:: hack; AdGuard answers NODATA (NOERROR, no answer). Both keep a musl client working, because the failure musl has is AAAA NXDOMAIN and neither is that. NODATA is also the safer of the two: :: resolves to the unspecified address, which connect() maps to loopback.
+
+# --- blocklist hits: both resolvers must block these, or Gate 3 fails ---
+doubleclick.net	A	udp	BLOCKED	StevenBlack list on Pi-hole today; AdGuard must match. A mismatch here is a Gate 3 failure, NOT an allowed difference
+doubleclick.net	A	tcp	BLOCKED	the same over TCP — the transport trap for port 53
+googleadservices.com	A	udp	BLOCKED	second blocklist hit, different list entry
+googlesyndication.com	A	udp	BLOCKED	third blocklist hit
+
+# --- negative controls ---
+does-not-exist-zzz.invalid	A	udp	NXDOMAIN	control: a name that must not resolve
+nope.lan	A	udp	NODATA	ALLOW-DIFF: a name that does not exist. The NAS answers NODATA from its local zone; AdGuard answers NXDOMAIN. Both mean "no such name" and neither strands a client. AdGuard reaches its answer by asking a public resolver, which is a leak the NAS did not have -- see the bogus_nxdomain note in the plan.
+
+# --- deliberate differences, named rather than waved through ---
+ads.doubleclick.net	A	udp	NXDOMAIN	ALLOW-DIFF: upstream NXDOMAIN, not a blocklist hit. AdGuard may answer differently; the row is here to make that visible instead of silent

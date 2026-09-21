@@ -471,6 +471,28 @@ configure_pihole() {
         return
     fi
 
+    # Phase 8.5 of the DNS migration. Pi-hole is being retired: the router
+    # answers DNS for the house now, and Phase 9 stops this container and then
+    # removes it from the compose file. Once that happens `docker exec pihole`
+    # fails, and without this guard the else-branch below would call `fail` and
+    # take down every subsequent `configure-apps.sh` run for a service that no
+    # longer exists. Absent is a legitimate state now, so it is a skip.
+    #
+    # The guard sits AFTER the dry-run branch on purpose: `--dry-run` previews
+    # the full sequence of steps this script knows how to take, and
+    # tests/configure-apps.bats asserts that it names every one of them. A
+    # preview that silently dropped a step depending on what happened to be
+    # running would be a worse preview, not a more honest one.
+    #
+    # This is deliberately a guard rather than a deletion. While Pi-hole is still
+    # running it is still configured, because Gate 5 keeps the NAS resolver
+    # correct so that any pool can be reverted to it in one script run — the
+    # rollback ladder depends on it working, not merely existing.
+    if ! docker inspect -f '{{.State.Running}}' pihole 2>/dev/null | grep -q true; then
+        skip "Pi-hole: not running (retired with the DNS migration; the router resolves)"
+        return
+    fi
+
     # Check current upstream DNS configuration
     local current_dns
     current_dns=$(docker exec pihole pihole-FTL --config dns.upstreams 2>/dev/null || true)

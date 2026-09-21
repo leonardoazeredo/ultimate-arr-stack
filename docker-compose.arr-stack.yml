@@ -132,9 +132,12 @@ services:
     image: qmcgaw/gluetun:v3.41
     container_name: gluetun
     <<: *default-security
-    depends_on:
-      pihole:
-        condition: service_healthy  # Wait for Pi-hole DNS before VPN connects
+    # No depends_on. It used to wait on pihole's healthcheck, which made the VPN
+    # a dependent of a service that is being retired — and of the NAS itself,
+    # since Pi-hole only ever ran here. DNS now comes from the router (see
+    # DNS_ADDRESS below), so gluetun has no reason to wait on a local container.
+    # Ordering this correctly matters: on 2026-08-27 a NAS left pointed at a
+    # Pi-hole that no longer existed crash-looped the VPN for 38 hours.
     cap_add:
       - NET_ADMIN
     devices:
@@ -149,7 +152,14 @@ services:
       - WIREGUARD_ADDRESSES=${WIREGUARD_ADDRESSES}
       - SERVER_COUNTRIES=${VPN_COUNTRIES}
       - TZ=${TZ}
-      - DNS_ADDRESS=172.20.0.5
+      # The router, not the NAS. 172.20.0.5 was the Pi-hole container: a resolver
+      # that lives on the NAS and dies with it, which is the whole thing this
+      # migration moves off. 192.168.110.1 is the NAS's own gateway on VLAN10;
+      # the router redirects its :53 to AdGuard Home, and falls back to dnsmasq
+      # if AdGuard stops answering, so resolution survives on the router alone.
+      # Hardcoded rather than read from LAN_GATEWAY: that variable describes the
+      # Traefik macvlan's subnet (maintenance VLAN), not the NAS's.
+      - DNS_ADDRESS=192.168.110.1
       # Both LAN variables apply here, not either/or: LAN_SUBNET is the single
       # CIDR the Traefik macvlan also needs, EXTRA_LAN_SUBNETS is any further LAN
       # subnets. Only list-accepting consumers like this one read the second.
@@ -178,8 +188,8 @@ services:
       # magnetio-net comment in the networks: block above.
       magnetio-net:
         ipv4_address: 172.22.0.4
-    # gluetun's own DNS_SERVER (DNS_ADDRESS=172.20.0.5, DoT to Cloudflare -
-    # deliberate VPN leak protection) can't resolve Docker container names,
+    # gluetun's own DNS_SERVER (DNS_ADDRESS=192.168.110.1, the router) can't
+    # resolve Docker container names, only public hostnames.
     # only public hostnames. magnetio-addon shares this netns entirely
     # (network_mode: container:gluetun in docker-compose.magnetio.yml) and
     # needs to reach magnetio-redis/magnetio-scraper by name - confirmed

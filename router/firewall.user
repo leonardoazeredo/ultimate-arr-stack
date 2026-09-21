@@ -1,0 +1,57 @@
+# /etc/firewall.user -- the DNS redirect for the AdGuard Home migration.
+#
+# THIS FILE IS THE DEPLOYED ARTIFACT. Install it with:
+#     ssh <router> 'cat > /etc/firewall.user' < router/firewall.user
+# It is sourced by fw3 on every firewall reload, so it re-applies itself.
+#
+# Verified on the router 2026-09-21: three consecutive runs leave exactly ten
+# rules (five bridges x tcp/udp), and `fw3 reload` also leaves ten rather than
+# accumulating. See the header below for why that idempotency is load-bearing.
+
+# This file is interpreted as shell script.
+# Put your custom iptables rules here, they will
+# be executed with each firewall (re-)start.
+
+# --- DNS migration 2026-09-21 -------------------------------------------
+# Every client's DNS goes to AdGuard Home on 3053 while it answers, and to
+# the router's own dnsmasq on 53 when it does not. Both resolvers listen on
+# every interface; the port below is the only thing that picks between them.
+#
+# The port lives in a file instead of in this script because the two states
+# must be switchable without editing it: /usr/sbin/arrdns-watchdog.sh writes
+# the file and re-runs this script, so a fallback can never be undone by a
+# later firewall reload reading a stale copy of the file.
+#
+# These rules are not a stale-lease bridge. GL.iNet's own dns_dispatcher is
+# wired only for br-lan.1 and br-guest, so on this firmware these rules are
+# the only thing that puts vlan10/20/30 on AdGuard at all. They are inserted
+# ahead of the vendor chains so all five interfaces behave the same way, and
+# they match every :53 packet rather than only those addressed to the NAS,
+# because a client that has renewed its lease asks the router directly.
+#
+# fw3 does NOT flush the built-in PREROUTING chain, so a reload leaves these
+# rules in place and this script would stack another ten copies on top. Every
+# run therefore strips whatever is already there first. That delete loop is
+# why this file is safe to re-run at any time -- the watchdog relies on it.
+ARRDNS_PORT="$(cat /etc/arrdns-port 2>/dev/null)"
+case "$ARRDNS_PORT" in
+  53|3053) ;;
+  *) ARRDNS_PORT=3053 ;;
+esac
+
+ARRDNS_IFACES="br-lan.1 br-lan.10 br-lan.20 br-lan.30 br-guest"
+
+# Strip our own rules. Only these sit directly in PREROUTING as a REDIRECT on
+# port 53 -- the vendor reaches its redirect through the dns_dispatcher jump,
+# so pattern-matching here cannot touch a GL.iNet rule.
+while :; do
+  num="$(iptables -t nat -L PREROUTING -n --line-numbers 2>/dev/null \
+         | awk '/REDIRECT/ && /dpt:53/ {print $1; exit}')"
+  [ -n "$num" ] || break
+  iptables -t nat -D PREROUTING "$num" || break
+done
+
+for iface in $ARRDNS_IFACES; do
+  iptables -t nat -I PREROUTING 1 -i "$iface" -p udp --dport 53 -j REDIRECT --to-ports "$ARRDNS_PORT"
+  iptables -t nat -I PREROUTING 1 -i "$iface" -p tcp --dport 53 -j REDIRECT --to-ports "$ARRDNS_PORT"
+done

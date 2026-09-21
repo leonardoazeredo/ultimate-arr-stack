@@ -1,0 +1,41 @@
+31:[ "$(uci -q get adguardhome.config.enabled)" = "1" ] && [ "$(uci -q get adguardhome.config.dns_enabled)" = "1" ] && adg_handle_dns='1'
+119:# 生成所有downstream接口到dns_dispatcher的规则
+129:        rules="${rules}-A PREROUTING -p tcp -m tcp --dport 53 -i $interface -j dns_dispatcher
+130:-A PREROUTING -p udp -m udp --dport 53 -i $interface -j dns_dispatcher
+139:                fw4_add_statement "add rule ${DNS_TABLE} PREROUTING iifname { ${ifname} } tcp dport 53 jump dns_dispatcher"
+140:                fw4_add_statement "add rule ${DNS_TABLE} PREROUTING iifname { ${ifname} } udp dport 53 jump dns_dispatcher"
+145:            fw4_add_statement "add rule ${DNS_TABLE} PREROUTING iifname { ${if_list} } tcp dport 53 jump dns_dispatcher"
+146:            fw4_add_statement "add rule ${DNS_TABLE} PREROUTING iifname { ${if_list} } udp dport 53 jump dns_dispatcher"
+184:# adguardhome处理DNS规则
+197:        fw4_add_statement "add rule ${DNS_TABLE} adg_redirect meta l4proto { tcp, udp } ${local_type_fw4} ${fw4_option} redirect to :3053"
+199:            echo "add rule inet fw4 dns_accept tcp dport 3053 meta mark and 0x0000f000 != 0x0 accept" >>$NFT_DNS_INPUT_FILE
+200:            echo "add rule inet fw4 dns_accept udp dport 3053 meta mark and 0x0000f000 != 0x0 accept" >>$NFT_DNS_INPUT_FILE
+202:            echo "add rule inet fw4 dns_accept tcp dport 3053 accept" >>$NFT_DNS_INPUT_FILE
+203:            echo "add rule inet fw4 dns_accept udp dport 3053 accept" >>$NFT_DNS_INPUT_FILE
+206:        rules="-A adg_redirect -p tcp $local_type $append -j REDIRECT --to-ports 3053
+207:-A adg_redirect -p udp $local_type $append -j REDIRECT --to-ports 3053"
+213:# fw4: chain="policy_output";option="tcp dport { 3053 } meta mark and 0xf000 == 0xa000 skuid == dnsmasq";target="redirect to :4153"
+214:# fw3: table="nat";chain="policy_output";option="-p tcp -m mark --mark 0x1000/0xf000 -m owner --uid-owner dnsmasq -m tcp --dport 3053";target="-j REDIRECT --to-ports 2153"
+319:	chain adg_redirect {
+328:	chain dns_dispatcher {
+330:		jump adg_redirect
+424:            # 使用 iptables-save 找出所有包含 dns_dispatcher 的规则
+425:            rules=\$($cmd-save -t nat | grep '^-A PREROUTING.*--dport 53.*-j dns_dispatcher' | sed 's/^-A//')
+462::dns_dispatcher - [0:0]
+465::adg_redirect - [0:0]
+469:-A dns_dispatcher -j aw_redirect
+470:-A dns_dispatcher -j adg_redirect
+471:-A dns_dispatcher -j policy_redirect
+472:-A dns_dispatcher -j dns_redirect
+483::dns_dispatcher - [0:0]
+487::adg_redirect - [0:0]
+490:-A dns_dispatcher -j aw_redirect
+491:-A dns_dispatcher -j adg_redirect
+492:-A dns_dispatcher -j policy_redirect
+493:-A dns_dispatcher -j dns_redirect
+----- adg_redirect nat chain -----
+Chain adg_redirect (1 references)
+ pkts bytes target     prot opt in     out     source               destination         
+----- adg references in nat table -----
+-N adg_redirect
+-A dns_dispatcher -j adg_redirect
