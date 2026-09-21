@@ -401,6 +401,14 @@ be done, and the reason is not a gap in the work: there is no such client
 population to test. The rules cover `br-lan.30` anyway, and
 `tests/lib-router-dns.bats` asserts it synthetically.
 
+### 7.6 The adjacent ingest plan's deferred list is closed
+
+`.superpowers/sdd/2026-09-20-bound-ingest-io/deferred-minors.md` listed eight
+findings deferred from the bound-ingest-io work. All eight were verified resolved
+against the code on 2026-09-21, and the file is marked closed. It is under
+`.superpowers/`, which is gitignored, so the note lives there and this line is
+the committed record. The verification greps are Task 10 of the closure plan.
+
 ---
 
 ## 8. Traps
