@@ -41,7 +41,7 @@
 | Bazarr | `NAS_IP:6767` | `https://bazarr.lan`* | — |
 | SABnzbd | `NAS_IP:8082` | `https://sabnzbd.lan`* | — |
 | Decypharr | `NAS_IP:8282` | — | — |
-| Pi-hole | `NAS_IP:8081/admin` | `https://pihole.lan`* | — |
+| AdGuard Home (DNS) | — (on the router) | `http://192.168.8.1:3000` | maintenance VLAN only |
 | Traefik | — | `https://traefik.lan`* | — |
 | Uptime Kuma | `NAS_IP:3001` | `https://uptime.lan`* | — |
 | duc | — | `https://duc.lan`* | — |

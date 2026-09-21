@@ -100,7 +100,7 @@ The full walkthrough — directories on the host, app configuration, DNS, HTTPS,
 | Sonarr / Radarr / Prowlarr / Bazarr | `NAS_IP:8989` / `:7878` / `:9696` / `:6767` | `https://sonarr.lan`, `https://radarr.lan`, `https://prowlarr.lan`, `https://bazarr.lan` | LAN only |
 | SABnzbd | `NAS_IP:8082` | `https://sabnzbd.lan` | LAN only |
 | Decypharr | `NAS_IP:8282` | — (no `.lan` name) | LAN only |
-| Pi-hole admin | `NAS_IP:8081/admin` | `https://pihole.lan` | LAN only |
+| AdGuard Home (DNS) | — (on the router) | `http://192.168.8.1:3000` | maintenance VLAN only |
 | Uptime Kuma | `NAS_IP:3001` | `https://uptime.lan` | LAN only |
 | Traefik dashboard | — (reached through Traefik) | `https://traefik.lan` | LAN only |
 | Homepage / Beszel / duc / usenet-status | — (no published port; reached through Traefik) | `https://homepage.lan`, `https://beszel.lan`, `https://duc.lan`, `https://usenet.lan` | LAN only |
