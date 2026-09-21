@@ -467,3 +467,265 @@ router_dns_binds_check() {
     [[ "$failures" -eq 0 ]] || return 1
     return 0
 }
+
+# ---------------------------------------------------------------------------
+# `-S PREROUTING` vs the live client interfaces
+# ---------------------------------------------------------------------------
+#
+# WHY THIS SECTION EXISTS
+#
+# Everything above judges the pieces: which resolver a pool hands out, what
+# adg_redirect holds, whether dnsmasq is listening. Every one of those can be
+# perfect while no client is served. That is not hypothetical -- it is what this
+# migration actually shipped on 2026-09-21.
+#
+# GL.iNet's dns_dispatcher is wired into PREROUTING for br-lan.1 and br-guest
+# only. Nothing in firmware puts vlan10, vlan20 or vlan30 on AdGuard Home, so
+# `dns_enabled='1'` made the main LAN blocked and left all three VLANs resolving
+# straight off dnsmasq -- unblocked -- while adg_redirect, option 6 and the :53
+# binds all read exactly as the plan's Evidence said they should. The pieces
+# were right; the connection between them did not exist on three interfaces out
+# of five.
+#
+# So the invariant this section asserts is the one that was missing: for every
+# interface the router hands addresses to, DNS arriving on it ends at AdGuard
+# Home.
+
+# router_dns_client_ifaces -- stdin: `ip -4 -o addr show` -> one interface name
+# per line, for every bridge holding a live non-loopback IPv4.
+#
+# DERIVED, NOT HARDCODED, for the reason router_dns_binds_check spells out: a
+# list written today stops covering a VLAN added tomorrow, and keeps demanding
+# behaviour from one that was removed. `br-` is the marker rather than a fixed
+# set of names because that prefix is exactly the client-facing bridges on this
+# router -- br-lan.1, br-lan.10, br-lan.20, br-lan.30 and br-guest -- while the
+# WAN (eth1), the VPN (protonvpn) and the tailnet (tailscale0) are neither.
+# Whether tailnet clients should be redirected is a policy decision nobody has
+# made, so tailscale0 is reported by the check and not failed by it.
+router_dns_client_ifaces() {
+    awk '
+        $1 ~ /^[0-9]+:$/ { name = $2 }
+        {
+            for (i = 1; i <= NF; i++) {
+                if ($i == "inet") {
+                    addr = $(i + 1)
+                    sub(/\/.*/, "", addr)
+                    if (name ~ /^br-/ && addr !~ /^127\./) { print name }
+                    break
+                }
+            }
+        }'
+}
+
+# router_dns_prerouting_rules -- stdin: `-S PREROUTING` ->
+# "<iface>\t<prot>\t<dport>\t<target>\t<to-ports>" per rule.
+#
+# `-S` rather than `-L -n` for the reason given at the adg_redirect section: `-S`
+# prints the rule as the argv that would create it, so each option sits in a
+# fixed token. A rule with no `-i` is emitted with an empty first field, which
+# the caller has to handle -- the vendor's own dispatch rules carry the
+# interface, but a rule matching every interface would not.
+router_dns_prerouting_rules() {
+    local line
+    while IFS= read -r line; do
+        [[ "$line" == "-A PREROUTING "* ]] || continue
+        local -a f
+        read -r -a f <<<"$line"
+        local iface="" prot="" dport="" target="" toports="" i=0 n=${#f[@]}
+        while ((i < n)); do
+            case "${f[$i]}" in
+                -i)           iface="${f[$((i + 1))]:-}";   i=$((i + 2)); continue ;;
+                -p)           prot="${f[$((i + 1))]:-}";    i=$((i + 2)); continue ;;
+                -j)           target="${f[$((i + 1))]:-}";  i=$((i + 2)); continue ;;
+                --dport)      dport="${f[$((i + 1))]:-}";   i=$((i + 2)); continue ;;
+                --dport=*)    dport="${f[$i]#--dport=}";    i=$((i + 1)); continue ;;
+                --to-ports)   toports="${f[$((i + 1))]:-}"; i=$((i + 2)); continue ;;
+                --to-ports=*) toports="${f[$i]#--to-ports=}"; i=$((i + 1)); continue ;;
+            esac
+            i=$((i + 1))
+        done
+        printf '%s\t%s\t%s\t%s\t%s\n' "$iface" "${prot:-?}" "${dport:-?}" "${target:-?}" "$toports"
+    done
+}
+
+# router_dns_chain_redirects <port> -- stdin: `-S` output for the dispatch chains
+# -> the names of every chain from which a packet can still reach a
+# `REDIRECT --to-ports <port>`, one per line, unchanged chains included.
+#
+# Resolved to a fixed point rather than one hop, because the real path is two:
+# PREROUTING jumps to dns_dispatcher, dns_dispatcher jumps to adg_redirect, and
+# only adg_redirect holds the REDIRECT. A one-hop check would call br-lan.1
+# uncovered even when the vendor path is working -- a guard that fails on a
+# correct system is worse than no guard, because it gets deleted.
+router_dns_chain_redirects() {
+    local port="$1"
+    local text
+    text=$(cat)
+
+    local set=" " i name add
+    # Seed: chains that hold the REDIRECT themselves.
+    local seed
+    seed=$(printf '%s\n' "$text" | awk -v p="$port" '
+        /^-A / {
+            chain = $2; tgt = ""; tp = ""
+            for (i = 3; i <= NF; i++) {
+                if ($i == "-j") { tgt = $(i + 1) }
+                if ($i == "--to-ports") { tp = $(i + 1) }
+            }
+            if (tgt == "REDIRECT" && tp == p) { print chain }
+        }' | sort -u)
+    for name in $seed; do set="$set$name "; done
+
+    # Widen: any chain that jumps to a chain already known to reach the port.
+    for i in 1 2 3 4; do
+        add=$(printf '%s\n' "$text" | awk -v known="$set" '
+            /^-A / {
+                chain = $2; tgt = ""
+                for (j = 3; j <= NF; j++) { if ($j == "-j") { tgt = $(j + 1) } }
+                if (tgt == "" || tgt == "REDIRECT") { next }
+                if (index(known, " " tgt " ") > 0) { print chain }
+            }' | sort -u)
+        [ -n "$add" ] || break
+        local grew=0
+        for name in $add; do
+            case "$set" in
+                *" $name "*) ;;
+                *) set="$set$name "; grew=1 ;;
+            esac
+        done
+        [ "$grew" -eq 1 ] || break
+    done
+
+    for name in $set; do printf '%s\n' "$name"; done
+}
+
+# router_dns_client_path_check <adguard-port> <iface-capture> <nat-capture>
+#
+# Asserts that for every client bridge the router has, both TCP and UDP DNS
+# arriving on it is redirected to <adguard-port> -- either by a rule in
+# PREROUTING that does it directly, or through a jump into one of the dispatch
+# chains that reaches the port.
+#
+# One capture, not two: <nat-capture> is `iptables -t nat -S`, the whole table.
+# The PREROUTING arm reads the `-A PREROUTING` lines out of it and the chain arm
+# reads the rest, so a single ssh round trip answers both questions and the two
+# halves cannot disagree about which rules exist.
+#
+# Both transports are required. UDP is the transport DNS is actually used over,
+# and a tcp-only redirect passes a TCP probe while real resolution stays broken,
+# which is the trap tests/network-segmentation.bats already documents for :53.
+#
+# Returns 2 rather than 0 on an unparseable capture, because a check that reads
+# nothing must not look like a check that found nothing wrong.
+router_dns_client_path_check() {
+    local port="$1" iface_path="$2" nat_path="$3"
+
+    local iface_text pr_text
+    iface_text=$(router_dns_read "$iface_path") || {
+        echo "SKIP: cannot read the interface capture '$iface_path'"
+        return 2
+    }
+    pr_text=$(router_dns_read "$nat_path") || {
+        echo "SKIP: cannot read the nat capture '$nat_path'"
+        return 2
+    }
+
+    if [[ ! "$port" =~ ^[0-9]+$ ]]; then
+        echo "FAIL: '$port' is not a port number, so there is nothing to look for"
+        return 2
+    fi
+
+    local required
+    required=$(printf '%s\n' "$iface_text" | router_dns_client_ifaces | sort -u)
+    if [[ -z "$required" ]]; then
+        echo "FAIL: parsed no client bridge (br-*) with a live non-loopback IPv4 out of 'ip -4 -o addr show'. Either the router has no client interface, or the capture is not that output -- and every assertion below would be vacuous."
+        return 2
+    fi
+
+    local pr
+    pr=$(printf '%s\n' "$pr_text" | router_dns_prerouting_rules)
+    if [[ -z "$pr" ]]; then
+        echo "FAIL: parsed no rule out of 'iptables -t nat -S PREROUTING' -- this is not that output, or its shape changed"
+        return 2
+    fi
+
+    local resolver_chains
+    resolver_chains=$(printf '%s\n' "$pr_text" | router_dns_chain_redirects "$port")
+
+    # Every bridge gets a line, whichever way the verdict falls, so a run on a
+    # healthy router still shows what was actually looked at.
+    local iface tcp udp failures=0 checked=0
+    for iface in $required; do
+        checked=$((checked + 1))
+        tcp=0; udp=0
+        local _i _p _d _t _tp
+        while IFS=$'\t' read -r _i _p _d _t _tp; do
+            [[ "$_i" == "$iface" ]] || continue
+            [[ "$_d" == "53" ]] || continue
+            local covered=0
+            if [[ "$_t" == "REDIRECT" && "$_tp" == "$port" ]]; then
+                covered=1
+            elif [[ -n "$_t" && "$_t" != "REDIRECT" ]] \
+                 && printf '%s\n' "$resolver_chains" | grep -qxF "$_t"; then
+                covered=1
+            fi
+            [[ "$covered" -eq 1 ]] || continue
+            [[ "$_p" == "tcp" ]] && tcp=1
+            [[ "$_p" == "udp" ]] && udp=1
+        done <<<"$pr"
+
+        if [[ "$tcp" -eq 1 && "$udp" -eq 1 ]]; then
+            printf 'ok   %-12s tcp+udp :53 -> %s\n' "$iface" "$port"
+        else
+            local missing=""
+            [[ "$tcp" -eq 1 ]] || missing="tcp"
+            [[ "$udp" -eq 1 ]] || missing="${missing:+$missing+}udp"
+            printf 'FAIL %-12s %s DNS on :53 is not redirected to %s - a client on this interface resolves through whatever is listening underneath, which is dnsmasq, so it gets no ad blocking\n' \
+                "$iface" "$missing" "$port"
+            failures=$((failures + 1))
+        fi
+    done
+
+    # tailscale0 is reported, never failed: the tailnet is a client population
+    # too, but nobody has decided it should be filtered, and a guard that
+    # invents scope is a guard that argues with its own operator.
+    if printf '%s\n' "$pr" | grep -qE '^tailscale0\t'; then
+        local ts=0
+        while IFS=$'\t' read -r _i _p _d _t _tp; do
+            [[ "$_i" == "tailscale0" && "$_d" == "53" ]] || continue
+            [[ "$_t" == "REDIRECT" && "$_tp" == "$port" ]] && ts=1
+        done <<<"$pr"
+        if [[ "$ts" -eq 1 ]]; then
+            echo "note: tailscale0 DNS is redirected to ${port} as well"
+        else
+            echo "note: tailscale0 is NOT redirected, so tailnet clients resolve through dnsmasq and get no ad blocking. Not asserted -- whether the tailnet should be filtered is an open decision."
+        fi
+    fi
+
+    echo "--- client path: ${checked} bridge(s) checked, ${failures} not on ${port} ---"
+    [[ "$failures" -eq 0 ]] || return 1
+    return 0
+}
+
+# router_dns_adguard_port -- stdin: /etc/AdGuardHome/config.yaml -> the port its
+# DNS server listens on, or nothing if the file does not say.
+#
+# Read from AdGuard's own config rather than from a constant, because the
+# invariant that matters is not "the redirects point at 3053" but "the redirects
+# point at the port AdGuard Home is actually listening on". Hardcode both and
+# they can drift apart while every check stays green -- which is the same class
+# of failure as the three VLANs this section was written for, one layer down.
+#
+# Section tracking rather than a bare `port:` match: the HTTP address is
+# `0.0.0.0:3000` under `http:`, and a config can carry several ports. Only the
+# top-level `dns:` section's `port:` is the resolver's.
+router_dns_adguard_port() {
+    awk '
+        /^[^[:space:]#]/ { section = $1 }
+        section == "dns:" && $1 == "port:" {
+            v = $2
+            gsub(/["\x27]/, "", v)
+            print v
+            exit
+        }'
+}

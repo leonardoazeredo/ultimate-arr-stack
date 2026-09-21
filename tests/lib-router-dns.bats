@@ -620,3 +620,281 @@ EOF
     [ "$status" -eq 2 ]
     [[ "$output" == *"SKIP: cannot read the listener capture"* ]]
 }
+
+# --------------------------------------------------------------------------
+# (d) the client path -- routers that hand out addresses, and whether DNS on
+#     them actually reaches AdGuard Home
+# --------------------------------------------------------------------------
+#
+# These exist because the live check can only ever skip on most hosts, and
+# because the failure they guard against is not a parser bug: it shipped. On
+# 2026-09-21 the redirect was correct, adg_redirect was correct, every pool was
+# correct, and three of five client bridges were still resolving straight off
+# dnsmasq with no ad blocking, because GL.iNet's dns_dispatcher is wired only for
+# br-lan.1 and br-guest.
+
+# client_ifaces_capture <name> <iface:ip>... -- an `ip -4 -o addr show` capture
+# with one line per interface, so the derivation from live addresses is what is
+# under test rather than a single-interface fixture.
+client_ifaces_capture() {
+    local name="$1"; shift
+    local f="$FIX/$name" pair
+    {
+        printf '1: lo    inet 127.0.0.1/8 scope host lo   valid_lft forever preferred_lft forever\n'
+        for pair in "$@"; do
+            printf '12: %s    inet %s/24 brd 255.255.255.0 scope global %s   valid_lft forever preferred_lft forever\n' \
+                "${pair%%:*}" "${pair#*:}" "${pair%%:*}"
+        done
+    } > "$f"
+}
+
+# nat_capture <name> <line>... -- an `iptables -t nat -S` capture.
+nat_capture() {
+    local name="$1"; shift
+    local f="$FIX/$name" line
+    printf -- '-P PREROUTING ACCEPT\n' > "$f"
+    for line in "$@"; do
+        printf '%s\n' "$line" >> "$f"
+    done
+}
+
+# direct_dns <iface> <prot> [port] -- the rule /etc/firewall.user installs.
+direct_dns() {
+    printf -- '-A PREROUTING -i %s -p %s -m %s --dport 53 -j REDIRECT --to-ports %s' \
+        "$1" "$2" "$2" "${3:-3053}"
+}
+
+# The five bridges the router has, as they are today.
+all_bridges() {
+    client_ifaces_capture ifaces.txt \
+        br-lan.1:192.168.8.1 br-lan.10:192.168.110.1 br-lan.20:192.168.120.1 \
+        br-lan.30:192.168.130.1 br-guest:192.168.9.1
+}
+
+@test "router-dns: every bridge redirected on both transports passes" {
+    all_bridges
+    local -a rules=()
+    local i
+    for i in br-lan.1 br-lan.10 br-lan.20 br-lan.30 br-guest; do
+        rules+=("$(direct_dns "$i" tcp)" "$(direct_dns "$i" udp)")
+    done
+    nat_capture nat.txt "${rules[@]}"
+
+    # RED if the check parsed no interfaces (status 2), or demanded something
+    # the fixture does not have.
+    run router_dns_client_path_check 3053 "$FIX/ifaces.txt" "$FIX/nat.txt"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"5 bridge(s) checked, 0 not on 3053"* ]]
+}
+
+@test "router-dns: one bridge with no redirect fails, and names itself" {
+    all_bridges
+    local -a rules=()
+    local i
+    for i in br-lan.1 br-lan.10 br-lan.30 br-guest; do
+        rules+=("$(direct_dns "$i" tcp)" "$(direct_dns "$i" udp)")
+    done
+    # br-lan.20 missing -- exactly the 2026-09-21 shape, where three VLANs were
+    # never covered and the pieces that were checked all read green.
+    nat_capture nat.txt "${rules[@]}"
+
+    # RED if the check counted bridges but not coverage, or if it reported the
+    # bridge without saying which one.
+    run router_dns_client_path_check 3053 "$FIX/ifaces.txt" "$FIX/nat.txt"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"FAIL br-lan.20"* ]]
+    [[ "$output" == *"1 not on 3053"* ]]
+}
+
+@test "router-dns: a bridge reached through the vendor dispatch chain passes" {
+    all_bridges
+    local -a rules=()
+    local i
+    for i in br-lan.10 br-lan.20 br-lan.30 br-guest; do
+        rules+=("$(direct_dns "$i" tcp)" "$(direct_dns "$i" udp)")
+    done
+    # br-lan.1 on the vendor path: PREROUTING jumps to dns_dispatcher, which
+    # jumps to adg_redirect, which holds the REDIRECT. Two hops, no direct rule.
+    rules+=(
+        '-A PREROUTING -i br-lan.1 -p tcp -m tcp --dport 53 -j dns_dispatcher'
+        '-A PREROUTING -i br-lan.1 -p udp -m udp --dport 53 -j dns_dispatcher'
+        '-N dns_dispatcher'
+        '-A dns_dispatcher -j adg_redirect'
+        '-N adg_redirect'
+        '-A adg_redirect -p tcp -m addrtype --dst-type LOCAL -j REDIRECT --to-ports 3053'
+        '-A adg_redirect -p udp -m addrtype --dst-type LOCAL -j REDIRECT --to-ports 3053'
+    )
+    nat_capture nat.txt "${rules[@]}"
+
+    # RED if the chain resolution stopped at one hop: br-lan.1 would then be
+    # reported as uncovered while the vendor path is working, which is a guard
+    # that fails on a correct system.
+    run router_dns_client_path_check 3053 "$FIX/ifaces.txt" "$FIX/nat.txt"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ok   br-lan.1"* ]]
+}
+
+@test "router-dns: a bridge with only the udp arm fails on the missing tcp arm" {
+    all_bridges
+    local -a rules=()
+    local i
+    for i in br-lan.1 br-lan.10 br-lan.20 br-lan.30 br-guest; do
+        rules+=("$(direct_dns "$i" udp)")
+    done
+    nat_capture nat.txt "${rules[@]}"
+
+    # RED if both transports were not required independently -- a one-arm check
+    # would pass this and leave TCP queries elsewhere.
+    run router_dns_client_path_check 3053 "$FIX/ifaces.txt" "$FIX/nat.txt"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"tcp DNS on :53 is not redirected"* ]]
+}
+
+@test "router-dns: a bridge with only the tcp arm fails on the missing udp arm" {
+    all_bridges
+    local -a rules=()
+    local i
+    for i in br-lan.1 br-lan.10 br-lan.20 br-lan.30 br-guest; do
+        rules+=("$(direct_dns "$i" tcp)")
+    done
+    nat_capture nat.txt "${rules[@]}"
+
+    # RED if the udp arm were treated as optional. UDP is the transport DNS is
+    # actually used over, so this is the arm whose absence breaks resolution
+    # while a TCP probe still passes -- the trap network-segmentation.bats
+    # documents for port 53.
+    run router_dns_client_path_check 3053 "$FIX/ifaces.txt" "$FIX/nat.txt"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"udp DNS on :53 is not redirected"* ]]
+}
+
+@test "router-dns: redirects aimed at another port do not count" {
+    all_bridges
+    local -a rules=()
+    local i
+    for i in br-lan.1 br-lan.10 br-lan.20 br-lan.30 br-guest; do
+        rules+=("$(direct_dns "$i" tcp 53)" "$(direct_dns "$i" udp 53)")
+    done
+    nat_capture nat.txt "${rules[@]}"
+
+    # This is the watchdog's fallback state, where the whole house is meant to be
+    # on dnsmasq. Checked against 3053 it must fail, or the guard would call a
+    # fully fallen-back router healthy.
+    run router_dns_client_path_check 3053 "$FIX/ifaces.txt" "$FIX/nat.txt"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"5 not on 3053"* ]]
+}
+
+@test "router-dns: a bridge the router gained later is required without touching the lib" {
+    client_ifaces_capture ifaces.txt \
+        br-lan.1:192.168.8.1 br-lan.10:192.168.110.1 br-lan.40:192.168.140.1
+    local -a rules=(
+        "$(direct_dns br-lan.1 tcp)" "$(direct_dns br-lan.1 udp)"
+        "$(direct_dns br-lan.10 tcp)" "$(direct_dns br-lan.10 udp)"
+    )
+    nat_capture nat.txt "${rules[@]}"
+
+    # RED if the required interface list were hardcoded: br-lan.40 would not be
+    # looked at, and a new VLAN would ship uncovered exactly as vlan10/20/30 did.
+    run router_dns_client_path_check 3053 "$FIX/ifaces.txt" "$FIX/nat.txt"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"FAIL br-lan.40"* ]]
+}
+
+@test "router-dns: a tailnet interface is reported, never failed" {
+    client_ifaces_capture ifaces.txt br-lan.1:192.168.8.1 tailscale0:100.70.123.86
+    nat_capture nat.txt \
+        "$(direct_dns br-lan.1 tcp)" "$(direct_dns br-lan.1 udp)" \
+        '-A PREROUTING -i tailscale0 -m comment --comment "!fw3" -j zone_tailscale0_prerouting'
+
+    # RED if tailscale0 were folded into the required set. Whether the tailnet
+    # should be filtered is a decision nobody has made, and a guard that invents
+    # scope is a guard its operator deletes.
+    run router_dns_client_path_check 3053 "$FIX/ifaces.txt" "$FIX/nat.txt"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"tailscale0 is NOT redirected"* ]]
+    [[ "$output" == *"1 bridge(s) checked, 0 not on 3053"* ]]
+}
+
+@test "router-dns: an interface capture with no client bridge is not a pass" {
+    client_ifaces_capture ifaces.txt eth1:100.75.153.172
+    nat_capture nat.txt "$(direct_dns eth1 tcp)"
+
+    # RED if "no bridges" fell through as "nothing to check". A router whose
+    # bridges all disappeared is not a router with nothing wrong.
+    run router_dns_client_path_check 3053 "$FIX/ifaces.txt" "$FIX/nat.txt"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"parsed no client bridge"* ]]
+}
+
+@test "router-dns: a nat capture with no PREROUTING rule is not a pass" {
+    all_bridges
+    nat_capture nat.txt '-N dns_dispatcher' '-A dns_dispatcher -j adg_redirect'
+
+    # RED if an unparseable nat capture returned 0, which is the vacuous-pass
+    # shape this repo has had to dig out of a merged guard before.
+    run router_dns_client_path_check 3053 "$FIX/ifaces.txt" "$FIX/nat.txt"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"parsed no rule"* ]]
+}
+
+@test "router-dns: an unreadable nat capture is a skip, not a pass" {
+    all_bridges
+
+    # RED if the unreadable path were treated as empty text: the missing file
+    # would reach the parse guard and be reported as a shape change rather than
+    # as a file that could not be read.
+    run router_dns_client_path_check 3053 "$FIX/ifaces.txt" "$BATS_TEST_TMPDIR/nope.txt"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"SKIP: cannot read the nat capture"* ]]
+}
+
+@test "router-dns: a non-numeric port is not a pass" {
+    all_bridges
+    nat_capture nat.txt "$(direct_dns br-lan.1 tcp)"
+
+    # RED if an empty or junk port argument were searched for literally, in which
+    # case nothing would match and the check would report failures for the wrong
+    # reason instead of saying it cannot tell.
+    run router_dns_client_path_check "" "$FIX/ifaces.txt" "$FIX/nat.txt"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"is not a port number"* ]]
+}
+
+@test "router-dns: the AdGuard port comes from the dns section, not the http one" {
+    cat > "$FIX/adguard.yaml" <<'EOF'
+http:
+  address: 0.0.0.0:3000
+  session_ttl: 720h
+dns:
+  bind_hosts:
+    - 0.0.0.0
+  port: 3053
+  upstream_dns:
+    - https://dns.quad9.net/dns-query
+filtering:
+  protection_enabled: true
+EOF
+
+    # RED if the parse matched any `port:` line, which would return 3000 -- the
+    # web UI -- and then require every redirect to name the wrong port.
+    run router_dns_adguard_port < "$FIX/adguard.yaml"
+    [ "$status" -eq 0 ]
+    [ "$output" == "3053" ]
+}
+
+@test "router-dns: a config with no dns port yields nothing rather than a wrong port" {
+    cat > "$FIX/adguard-noport.yaml" <<'EOF'
+http:
+  address: 0.0.0.0:3000
+filtering:
+  protection_enabled: true
+EOF
+
+    # RED if a missing dns section fell back to some default: the live test skips
+    # on an empty parse, and a made-up port would make that skip a pass against
+    # a port nobody is listening on.
+    run router_dns_adguard_port < "$FIX/adguard-noport.yaml"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}

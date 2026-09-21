@@ -355,3 +355,56 @@ mutation dns-parity-both-error-is-agreement \
   --why "Turns the all-ERROR guard into its opposite, so a run where nothing was reached stops being a reported skip and becomes a matrix of differences. Two unreachable resolvers are not evidence that they disagree, and a report that says they do sends the reader after a configuration difference that was never observed - while the real cause (a dead jump host, a wrong address) is the text that got buried" \
   --apply 'perl -0pi -e "s/if \[\[ \"\x24errors_a\" -eq \"\x24rows\" && \"\x24errors_b\" -eq \"\x24rows\" \]\]; then/if false; then/" "$F"'
 
+
+# --- scripts/lib/router-dns.sh: the client path ------------------------------
+#
+# The checks above judge the pieces -- which resolver a pool hands out, what
+# adg_redirect holds, where dnsmasq listens. Every one of them can read green
+# while no client is served, and on 2026-09-21 that is exactly what happened:
+# dns_enabled was 1, adg_redirect was correct, all four pools were correct, and
+# three of five client bridges still resolved through dnsmasq with no ad
+# blocking, because GL.iNet's dns_dispatcher is wired only for br-lan.1 and
+# br-guest. Each mutation below loosens the check that connects the pieces, so
+# it reports a healthy router while the connection is gone.
+
+mutation router-dns-client-hardcodes-the-bridge-list \
+  --file scripts/lib/router-dns.sh \
+  --bats tests/lib-router-dns.bats \
+  --test "router-dns: a bridge the router gained later is required without touching the lib" \
+  --why "Stops deriving the client bridges from the live addresses and returns br-lan.1 alone. The derivation is the whole defence against the 2026-09-21 shape: a list written on the day covers the interfaces that existed that day, and the next VLAN to be added is uncovered by default with nothing to notice it" \
+  --apply 'perl -0pi -e "s/^router_dns_client_ifaces\(\) \{\n/router_dns_client_ifaces() {\n    printf \"br-lan.1\n\"; return 0\n/m" "$F"'
+
+mutation router-dns-client-ignores-the-dispatch-chains \
+  --file scripts/lib/router-dns.sh \
+  --bats tests/lib-router-dns.bats \
+  --test "router-dns: a bridge reached through the vendor dispatch chain passes" \
+  --why "Empties the set of chains known to reach AdGuard, so only a direct PREROUTING REDIRECT counts. br-lan.1 and br-guest are served through the vendor path today, and a guard that calls a working interface broken is a guard its operator deletes - which is how the check that would have caught the three missing VLANs would itself have been removed" \
+  --apply 'perl -0pi -e "s/^    resolver_chains=.*\$/    resolver_chains=\"\"/m" "$F"'
+
+mutation router-dns-client-one-transport-is-enough \
+  --file scripts/lib/router-dns.sh \
+  --bats tests/lib-router-dns.bats \
+  --test "router-dns: a bridge with only the tcp arm fails on the missing udp arm" \
+  --why "Accepts a bridge covered on either transport rather than both. UDP is the transport DNS is actually used over, so a tcp-only redirect leaves ordinary lookups on dnsmasq while the config claims AdGuard Home answers them - the half-installed state tests/network-segmentation.bats already documents for port 53" \
+  --apply 'perl -0pi -e "s/if \[\[ \"\x24tcp\" -eq 1 && \"\x24udp\" -eq 1 \]\]; then/if [[ \"\x24tcp\" -eq 1 || \"\x24udp\" -eq 1 ]]; then/" "$F"'
+
+mutation router-dns-client-any-port-counts \
+  --file scripts/lib/router-dns.sh \
+  --bats tests/lib-router-dns.bats \
+  --test "router-dns: redirects aimed at another port do not count" \
+  --why "Accepts a REDIRECT to any port as the AdGuard arm, so a router whose every DNS rule points at dnsmasq on 53 satisfies a check whose entire purpose is to confirm the queries land on AdGuard. That is precisely the watchdog's fallback state, and the guard would call it healthy" \
+  --apply 'perl -0pi -e "s/if \[\[ \"\x24_t\" == \"REDIRECT\" && \"\x24_tp\" == \"\x24port\" \]\]; then/if [[ \"\x24_t\" == \"REDIRECT\" \&\& -n \"\x24_tp\" ]]; then/" "$F"'
+
+mutation router-dns-client-empty-capture-is-a-verdict \
+  --file scripts/lib/router-dns.sh \
+  --bats tests/lib-router-dns.bats \
+  --test "router-dns: a nat capture with no PREROUTING rule is not a pass" \
+  --why "Removes the guard on a nat capture that carried no PREROUTING rule. Every bridge then reports as uncovered, so a read that produced nothing is reported as a broken router rather than as a read that produced nothing - the same defect as an all-clear manufactured from an empty capture, with the sign flipped, and it sends the reader after a firewall fault that was never observed" \
+  --apply 'perl -0pi -e "s/    if \[\[ -z \"\x24pr\" \]\]; then/    if false; then/" "$F"'
+
+mutation router-dns-client-adguard-port-off-by-a-key \
+  --file scripts/lib/router-dns.sh \
+  --bats tests/lib-router-dns.bats \
+  --test "router-dns: the AdGuard port comes from the dns section, not the http one" \
+  --why "Drops the key test and takes the first line of the dns section, which is bind_hosts:. The port then parses as empty, and since the live test skips on an empty parse, the check that every client actually reaches AdGuard would skip for ever while reporting nothing wrong - a guard whose only reachable outcome is 'skipped'" \
+  --apply 'perl -0pi -e "s/section == \"dns:\" && \x241 == \"port:\" \{/section == \"dns:\" {/" "$F"'

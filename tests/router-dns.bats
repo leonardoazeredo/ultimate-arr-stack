@@ -153,6 +153,47 @@ router_capture() {
     echo "$output"
 }
 
+# ---------------------------------------------------------------------------
+# (d) the client path -- the connection between the pieces (a), (b) and (c) judge
+# ---------------------------------------------------------------------------
+
+@test "router-dns: every client bridge's :53 is redirected to the port AdGuard Home listens on" {
+    require_router
+
+    local ifaces="$BATS_TEST_TMPDIR/ip-4-addr.txt"
+    local nat="$BATS_TEST_TMPDIR/nat.txt"
+    local adg_cfg="$BATS_TEST_TMPDIR/adguard-home-config.yaml"
+
+    router_capture "$ifaces" "ip -4 -o addr show"
+    router_capture "$nat" "iptables -t nat -S"
+
+    # Read from AdGuard's own config rather than writing 3053 here. The invariant
+    # is that the redirects name the port AdGuard Home is listening on; a
+    # constant would let the two drift apart while this test stayed green, which
+    # is the same class of failure as the three VLANs this test exists for, one
+    # layer down.
+    if ! router_cmd "cat /etc/AdGuardHome/config.yaml" >"$adg_cfg" 2>"$BATS_TEST_TMPDIR/router-stderr"; then
+        skip "cannot read /etc/AdGuardHome/config.yaml from the router: $(tr '\n' ' ' <"$BATS_TEST_TMPDIR/router-stderr" | head -c 300)"
+    fi
+
+    local adg_port
+    adg_port=$(router_dns_adguard_port <"$adg_cfg" | tr -d '[:space:]')
+    [[ -n "$adg_port" ]] \
+        || skip "AdGuard Home's config.yaml does not state a DNS port, so there is no port to require the redirects to name"
+
+    run router_dns_client_path_check "$adg_port" "$ifaces" "$nat"
+    if [[ "$status" -ne 0 ]]; then
+        echo "$output"
+        echo "--- the port AdGuard Home listens on: ${adg_port} ---"
+        echo "--- PREROUTING rules on :53 ---"
+        grep -E '^-A PREROUTING.*--dport 53' "$nat" || echo "  (none)"
+        echo "--- chains that reach a REDIRECT to ${adg_port} ---"
+        router_dns_chain_redirects "$adg_port" <"$nat" | sed 's/^/  /' || true
+        false
+    fi
+    echo "$output"
+}
+
 # NOT tested, and why:
 #
 #   * Which resolver a pool advertises. Deliberate, and it is the whole reason
