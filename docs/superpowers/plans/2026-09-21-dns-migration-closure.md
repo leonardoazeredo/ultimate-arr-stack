@@ -195,6 +195,18 @@ git commit -m "dns: let the NAS reach AdGuard's admin port, scoped to one host"
 ## Task 2: Settle whether the tailnet gets ad blocking
 
 > **DECIDED 2026-09-21: Branch B.** The tailnet is filtered, so a remote device sees the same DNS a home one does. Execute Steps 1–2 for the record, then **Branch B** (Steps 5B–8B) and its commit. Branch A below is kept only for the record.
+>
+> **Executed 2026-09-21, and the cross-reference above is wrong.** There are no
+> "Steps 5B–8B" in this task: the `5B`–`8B` steps in this file belong to Task 1's
+> Branch B, about the DNS admin-UI rule, and this task's own Branch B was never
+> written as a step list. The work landed as PR #112 anyway, because the Interfaces
+> above already spell out the shape: `tailscale0` added to `ARRDNS_IFACES` in
+> `router/firewall.user`, the client-path note in `scripts/lib/router-dns.sh`
+> replaced by a requirement, `tests/router-dns.bats` asserting the deployed state,
+> and a new corpus entry (`firewall-user-tailnet-not-filtered`) plus a pair of
+> tests in `tests/lib-router-dns.bats` covering both directions. Verified from a
+> real tailnet client: a blocklisted name answers `0.0.0.0`, a public name
+> resolves, and `sonarr.lan` still answers `192.168.110.250`.
 
 `tailscale0` is not in `router/firewall.user`'s interface list, so a tailnet client resolving through the router reaches dnsmasq and gets no filtering. `tests/router-dns.bats` reports this as a note and deliberately does not fail on it — whether the tailnet should be filtered is a policy decision nobody has made.
 
@@ -206,7 +218,7 @@ git commit -m "dns: let the NAS reach AdGuard's admin port, scoped to one host"
 - Consumes: `ARRDNS_IFACES` from `router/firewall.user`; `router_dns_client_ifaces` and the tailnet note in `router_dns_client_path_check`.
 - Produces: a decided and tested tailnet posture.
 
-- [ ] **Step 1: Establish what a tailnet client gets today**
+- [x] **Step 1: Establish what a tailnet client gets today**
 
 ```bash
 ssh -i ~/.ssh/gl_router_ed25519 root@100.70.123.86 \
@@ -226,7 +238,7 @@ covered interfaces: br-guest br-lan.1 br-lan.10 br-lan.20 br-lan.30
 tailscale0 rules: 0
 ```
 
-- [ ] **Step 2: Put the decision to the user**
+- [x] **Step 2: Put the decision to the user**
 
 > Tailnet devices (phones, laptops off-site) resolve through the router's `tailscale0` and get **no ad blocking** — they reach dnsmasq, which is the fallback resolver. Two options:
 > **(A)** Leave the tailnet unfiltered. Remote devices behave differently from home ones, on purpose.
@@ -392,7 +404,7 @@ Phase 9.4 says "back up the volumes first per the repo's backup convention". `sc
 - Consumes: nothing.
 - Produces: two tarballs whose paths Task 4's commit message cites.
 
-- [ ] **Step 1: Confirm the volumes and what is in them**
+- [x] **Step 1: Confirm the volumes and what is in them**
 
 ```bash
 ssh -o ConnectTimeout=12 -i ~/.ssh/ugreen_nas_ed25519 leoleg@100.98.67.13 \
@@ -402,7 +414,7 @@ ssh -o ConnectTimeout=12 -i ~/.ssh/ugreen_nas_ed25519 leoleg@100.98.67.13 \
 
 Expected: `arr-stack_pihole-etc-pihole`, `arr-stack_dnscrypt-config`; `pihole-FTL.db` (about 70 MB) among the contents.
 
-- [ ] **Step 2: Back them up**
+- [x] **Step 2: Back them up**
 
 ```bash
 STAMP=$(date +%Y%m%d-%H%M%S)
@@ -416,7 +428,7 @@ ssh -o ConnectTimeout=12 -i ~/.ssh/ugreen_nas_ed25519 leoleg@100.98.67.13 "
   ls -lh /volume1/docker/arr-stack-backups/*-$STAMP.tgz"
 ```
 
-- [ ] **Step 3: Verify the tarballs are readable and non-trivial**
+- [x] **Step 3: Verify the tarballs are readable and non-trivial**
 
 `STAMP` does not survive from Step 2 — that was its own shell. Re-derive it from
 the two newest tarballs, or the glob expands to a literal `*-.tgz`, matches
@@ -431,11 +443,11 @@ ssh -o ConnectTimeout=12 -i ~/.ssh/ugreen_nas_ed25519 leoleg@100.98.67.13 '
 
 Expected: two files, both with entries (not 0, not an error). **A 0-entry tarball is a failure, not a small one** — `tar` exits 0 on an empty directory.
 
-- [ ] **Step 4: Record the paths**
+- [x] **Step 4: Record the paths**
 
 Note both tarball paths in `.superpowers/sdd/2026-09-19-dns-adguard-router-migration/progress.md` so Task 4 can cite them.
 
-- [ ] **Step 5: Commit** — nothing to commit; this task's deliverable is on the NAS. Its proof is Step 3's output, pasted into the ledger.
+- [x] **Step 5: Commit** — nothing to commit; this task's deliverable is on the NAS. Its proof is Step 3's output, pasted into the ledger.
 
 ---
 
@@ -453,12 +465,12 @@ The services are stopped and nothing points at them. This removes the definition
 - Consumes: the volume backups from Task 3; the Task 1/2 decisions recorded in `docs/LOCAL-DNS.md`.
 - Produces: a stack with no NAS resolver. Task 6 removes the last DNS name that pointed at it.
 
-- [ ] **Step 1: Establish the current baseline so a new failure is visible**
+- [x] **Step 1: Establish the current baseline so a new failure is visible**
 
 Run: `./tests/run-tests.sh > /tmp/before-9.4.out 2>&1; grep -c '^not ok' /tmp/before-9.4.out`
 Expected: `28`. Record it; Step 7 compares against it.
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 Create `tests/no-nas-resolver.bats`:
 
@@ -499,12 +511,12 @@ setup() {
 }
 ```
 
-- [ ] **Step 3: Run it and watch it fail**
+- [x] **Step 3: Run it and watch it fail**
 
 Run: `./tests/run-tests.sh tests/no-nas-resolver.bats`
 Expected: the first two FAIL naming the services and the addresses; the third passes.
 
-- [ ] **Step 4: Remove the services**
+- [x] **Step 4: Remove the services**
 
 Delete from `docker-compose.arr-stack.yml`: the `dnscrypt-proxy:` and `pihole:` service blocks, the `dnscrypt-config:` and `pihole-etc-pihole:` volume declarations, and the `- ./pihole/dnsmasq.d:/etc/dnsmasq.d` line inside the pihole service.
 
@@ -519,20 +531,20 @@ Leave a note where each was:
   # a rollback is ever wanted. See docs/DNS-MIGRATION.md.
 ```
 
-- [ ] **Step 5: Remove configure-apps' Pi-hole step**
+- [x] **Step 5: Remove configure-apps' Pi-hole step**
 
 Delete `configure_pihole()` from `scripts/configure-apps.sh` and its call site. Remove the matching tests from `tests/configure-apps.bats` — including `configure-apps: --dry-run still names every step it would have taken`, whose partial-output assertion names the Pi-hole line, and the two `--dry-run touches nothing … Pi-hole` assertions.
 
-- [ ] **Step 6: Delete the now-dead mutation entries**
+- [x] **Step 6: Delete the now-dead mutation entries**
 
 Remove `configure-apps-pihole-dry-run-gate-removed` from `tests/mutation/corpus/configure-apps.sh`. It targets a function that no longer exists, and the harness errors on a mutation that changes nothing.
 
-- [ ] **Step 7: Run the suite and compare to the baseline**
+- [x] **Step 7: Run the suite and compare to the baseline**
 
 Run: `./tests/run-tests.sh > /tmp/after-9.4.out 2>&1; grep -c '^not ok' /tmp/after-9.4.out`
 Expected: `28`, or fewer. **A number above 28 is a regression** — diff the two failure lists before going on.
 
-- [ ] **Step 8: Deploy to the NAS and verify the stack still works**
+- [x] **Step 8: Deploy to the NAS and verify the stack still works**
 
 ```bash
 ./scripts/sync-nas.sh
@@ -544,7 +556,7 @@ ssh -o ConnectTimeout=15 -i ~/.ssh/ugreen_nas_ed25519 leoleg@100.98.67.13 '
 
 Expected: every remaining service `Up`; `pihole` and `dnscrypt-proxy` absent from `docker ps -a` only after Step 9.
 
-- [ ] **Step 9: Remove the stopped containers**
+- [x] **Step 9: Remove the stopped containers**
 
 ```bash
 ssh -o ConnectTimeout=15 -i ~/.ssh/ugreen_nas_ed25519 leoleg@100.98.67.13 \
@@ -558,7 +570,7 @@ Two commands, not one `&&`/`||` chain: chained, a `docker rm` that fails short-c
 
 **Keep the volumes.** Step 11 verifies the backups restore, and the volumes stay until it passes.
 
-- [ ] **Step 10: Verify the backup restores, before the PR**
+- [x] **Step 10: Verify the backup restores, before the PR**
 
 Step 9 deferred to this, so it has to actually happen here — `tar tzf` counting entries is not a restore.
 
@@ -572,11 +584,11 @@ ssh -o ConnectTimeout=15 -i ~/.ssh/ugreen_nas_ed25519 leoleg@100.98.67.13 '
 
 Expected: `pihole-FTL.db` extracted, and its first 16 bytes start `S Q L i t e   f o r m a t 3`. If it does not, **stop** — do not remove the volumes, and fix the backup first.
 
-- [ ] **Step 11: Mark 9.4 done in the migration plan**
+- [x] **Step 11: Mark 9.4 done in the migration plan**
 
 Set `- [ ] **9.4 Only then**` to `- [x] **9.4 Only then**` in `docs/superpowers/plans/2026-09-19-dns-adguard-router-migration.md`, citing the backup paths from Task 3. **Task 8 asserts that plan has no open boxes** — an unticked box makes that check permanently red.
 
-- [ ] **Step 12: Commit and open the PR**
+- [x] **Step 12: Commit and open the PR**
 
 ```bash
 git add docker-compose.arr-stack.yml scripts/configure-apps.sh tests/configure-apps.bats \
@@ -605,7 +617,7 @@ Then wait for CI green, `gh pr merge --squash`, `git checkout main && git fetch 
 - Consumes: Task 4 (the services must be gone first — retiring the checks while the stores exist would delete live coverage).
 - Produces: nothing; this is removal.
 
-- [ ] **Step 1: Find every reference, so none is left dangling**
+- [x] **Step 1: Find every reference, so none is left dangling**
 
 ```bash
 grep -rn "check-dns-duplicates\|check-domains\|check_dns_duplicates\|check_domains" \
@@ -615,7 +627,7 @@ grep -rn "check-dns-duplicates\|check-domains\|check_dns_duplicates\|check_domai
 
 Record the list. Every line is either deleted, updated, or justified in the commit message.
 
-- [ ] **Step 2: Delete the files and the two call sites**
+- [x] **Step 2: Delete the files and the two call sites**
 
 ```bash
 git rm scripts/lib/check-dns-duplicates.sh scripts/lib/check-domains.sh \
@@ -625,21 +637,21 @@ git rm scripts/lib/check-dns-duplicates.sh scripts/lib/check-domains.sh \
 
 Then remove lines 42–43 and the calls at 143 and 150 from `scripts/pre-commit`.
 
-- [ ] **Step 3: Update the prose that named them**
+- [x] **Step 3: Update the prose that named them**
 
 In `scripts/lib/check-dns-divergence.sh`, both comments describe what the deleted check covered. Rewrite them to say the check was retired with the store, and that `check-dns-divergence.sh` is now the only thing comparing the two stores. Same for `tests/lib-common.bats:479` and the `--why` in `tests/mutation/corpus/common.sh` — **no backticks in corpus prose**.
 
-- [ ] **Step 4: Let the oracles name anything still stale**
+- [x] **Step 4: Let the oracles name anything still stale**
 
 Run: `./tests/run-tests.sh tests/shellcheck.bats tests/mutation-corpus.bats`
 Expected: PASS. If `shellcheck.bats`'s no-sweep oracle or `CONTRIBUTING.md`'s scripts-tree oracle names a deleted file, update that inventory — the oracle tests exist to catch exactly this.
 
-- [ ] **Step 5: Run the suite and compare**
+- [x] **Step 5: Run the suite and compare**
 
 Run: `./tests/run-tests.sh > /tmp/after-8.6.out 2>&1; grep -c '^not ok' /tmp/after-8.6.out`
 Expected: no new failures against the Task 4 baseline.
 
-- [ ] **Step 6: Repoint the two scripts that still default to the NAS resolver**
+- [x] **Step 6: Repoint the two scripts that still default to the NAS resolver**
 
 Both read the resolver this phase removes, and neither is covered by any other task:
 
@@ -654,11 +666,11 @@ dns-parity.sh:36:        DEFAULT_A="${NAS_DNS_IP:-192.168.110.246}:53"
 
 A bare invocation after Task 4 queries a resolver that no longer exists and reports whatever an empty answer looks like. Repoint both defaults at the router (`192.168.8.1`) and update the usage text in each file's header, which still names the NAS Pi-hole.
 
-- [ ] **Step 7: Mark 8.6 done in the migration plan**
+- [x] **Step 7: Mark 8.6 done in the migration plan**
 
 Set `- [ ] **8.6**` to `- [x] **8.6**` in `docs/superpowers/plans/2026-09-19-dns-adguard-router-migration.md`, with a line saying what was retired and that the fixtures survive. **Task 8 asserts that plan has no open boxes** — a task that changes a phase without ticking it leaves that check permanently red.
 
-- [ ] **Step 8: Commit, PR, merge**
+- [x] **Step 8: Commit, PR, merge**
 
 ```bash
 git add -A
@@ -682,7 +694,7 @@ The name still resolves (`192.168.110.250`, Traefik) but its route was retired i
 - Consumes: Task 5 (`check-domains.sh` asserted this name resolves, so the name must not be retired before the check is gone, or that check fails — that ordering is the whole reason these two tasks are adjacent).
 - Produces: no DNS record for a service that no longer exists.
 
-- [ ] **Step 1: Confirm the ordering constraint is satisfied**
+- [x] **Step 1: Confirm the ordering constraint is satisfied**
 
 ```bash
 grep -rn "pihole.lan" scripts/lib/check-domains.sh tests/lib-domains.bats 2>/dev/null || echo "check retired — safe to proceed"
@@ -690,11 +702,11 @@ grep -rn "pihole.lan" scripts/lib/check-domains.sh tests/lib-domains.bats 2>/dev
 
 Expected: `check retired — safe to proceed`. If those files still exist, do Task 5 first: `tests/lib-domains.bats` asserts the domains check queries every published name, so retiring the name while the check lives is a red test.
 
-- [ ] **Step 2: Remove the record**
+- [x] **Step 2: Remove the record**
 
 Delete `address=/pihole.lan/TRAEFIK_LAN_IP` from `pihole/dnsmasq.d/02-local-dns.conf.example`.
 
-- [ ] **Step 3: Re-run both generators**
+- [x] **Step 3: Re-run both generators**
 
 ```bash
 ./scripts/dnsmasq-local-names.sh          # the router's dnsmasq
@@ -703,7 +715,7 @@ Delete `address=/pihole.lan/TRAEFIK_LAN_IP` from `pihole/dnsmasq.d/02-local-dns.
 
 Both parse that one file, so both drop the name together. AdGuard restarts as part of this — expect a sub-second DNS blip.
 
-- [ ] **Step 4: Verify from a client that the name is gone and the rest are not**
+- [x] **Step 4: Verify from a client that the name is gone and the rest are not**
 
 ```bash
 ssh -o ConnectTimeout=8 pi@pi1.local '
@@ -715,12 +727,12 @@ ssh -o ConnectTimeout=8 pi@pi1.local '
 
 Expected: `pihole.lan` empty; `sonarr.lan` → `192.168.110.250`; `blocked` → `0.0.0.0`; `public` a real address.
 
-- [ ] **Step 5: Run the suite**
+- [x] **Step 5: Run the suite**
 
 Run: `./tests/run-tests.sh tests/dnsmasq-local-names.bats tests/router-dns.bats tests/no-nas-resolver.bats`
 Expected: PASS. If `dnsmasq-local-names.bats` pins the record count, update it — 19 names become 18.
 
-- [ ] **Step 6: Commit, PR, merge**
+- [x] **Step 6: Commit, PR, merge**
 
 ```bash
 git add -A
@@ -744,7 +756,7 @@ Nine months of incident records exist for less change than this. The repo's conv
 - Consumes: every measurement in this plan and in `.superpowers/sdd/2026-09-19-dns-adguard-router-migration/progress.md`.
 - Produces: the durable record. Nothing depends on it.
 
-- [ ] **Step 1: Write the document**
+- [x] **Step 1: Write the document**
 
 Create `docs/DNS-MIGRATION.md` following the exit-node log's shape: **Status at a glance**, **Commit-by-commit audit** (`#104`–the removal PR), **The plan's phases — planned vs actual**, **Corrections — where the plan was wrong**, **Live-only state that is not in this repo**, **Open items**.
 
@@ -757,7 +769,7 @@ It must contain, with the numbers as measured:
 - that 9.3's stated method is unusable because 9.1 stops the container, with the database evidence instead;
 - live-only state: `router/firewall.user`, `router/arrdns-watchdog.sh`, `/etc/arrdns-port`, the crontab entry, `firewall.@include[0].reload='1'`;
 
-- [ ] **Step 2: Fix the docs that still describe a NAS resolver**
+- [x] **Step 2: Fix the docs that still describe a NAS resolver**
 
 ```bash
 grep -rn "NAS Pi-hole\|nas resolver\|172\.20\.0\.5" docs/*.md CLAUDE.md README.md | grep -v "^docs/DNS-MIGRATION.md" | grep -v "^docs/superpowers/"
@@ -765,16 +777,16 @@ grep -rn "NAS Pi-hole\|nas resolver\|172\.20\.0\.5" docs/*.md CLAUDE.md README.m
 
 Each hit is either updated or explicitly marked historical. `CLAUDE.md`'s DNS section already says the services are stopped — update it to say removed.
 
-- [ ] **Step 3: Verify the links and the doc scan**
+- [x] **Step 3: Verify the links and the doc scan**
 
 Run: `./tests/run-tests.sh tests/lib-doc-links.bats`
 Expected: PASS. Broken relative links fail this.
 
-- [ ] **Step 4: Mark 9.5 done in the migration plan**
+- [x] **Step 4: Mark 9.5 done in the migration plan**
 
 Set `- [ ] **9.5 Record the retirement**` to `- [x]`, pointing at `docs/DNS-MIGRATION.md`. **Task 8 asserts that plan has no open boxes.**
 
-- [ ] **Step 5: Commit, PR, merge**
+- [x] **Step 5: Commit, PR, merge**
 
 ```bash
 git add -A
@@ -865,7 +877,7 @@ gh pr create --base main --head fix/dns-close-soak --fill
 - Consumes: Task 4 (the Pi-hole service must be gone before its token is).
 - Produces: nothing.
 
-- [ ] **Step 1: Check whether the Homepage token is still needed**
+- [x] **Step 1: Check whether the Homepage token is still needed**
 
 ```bash
 grep -rn "PIHOLE_API_TOKEN\|HOMEPAGE_VAR_PIHOLE" --include="*.yaml" --include="*.yml" --include="*.example" .
@@ -873,14 +885,14 @@ grep -rn "PIHOLE_API_TOKEN\|HOMEPAGE_VAR_PIHOLE" --include="*.yaml" --include="*
 
 Expected after Task 4: only the compose line and the `.env.example` line, with no `services.yaml` consumer — the widget that used it was removed in `#109`.
 
-- [ ] **Step 2: Remove the dead wiring**
+- [x] **Step 2: Remove the dead wiring**
 
 Delete the `HOMEPAGE_VAR_PIHOLE_API_TOKEN=${PIHOLE_API_TOKEN}` line from `docker-compose.utilities.yml` and the `PIHOLE_API_TOKEN=` line from `.env.example`.
 
 Run: `./tests/run-tests.sh tests/env-vars.bats`
 Expected: PASS. This suite checks `.env.example` against compose usage, so it is the oracle for whether anything still wants the variable.
 
-- [ ] **Step 3: Make the watchdog log survive a router reboot**
+- [x] **Step 3: Make the watchdog log survive a router reboot**
 
 `/var/log` is tmpfs, so every transition is lost when the router reboots — including the boot-time fallback, which is the one transition most worth having afterwards. Point the log at the overlay instead:
 
@@ -900,7 +912,7 @@ to
 LOG_FILE=/etc/arrdns-watchdog.log
 ```
 
-- [ ] **Step 4: Deploy and confirm the log lands there**
+- [x] **Step 4: Deploy and confirm the log lands there**
 
 ```bash
 ssh -i ~/.ssh/gl_router_ed25519 root@100.70.123.86 'cat > /usr/sbin/arrdns-watchdog.sh' < router/arrdns-watchdog.sh
@@ -917,7 +929,7 @@ Expected: `--status` works, `LOG_FILE=/etc/arrdns-watchdog.log`, and `df` shows 
 
 Proving the log *gets created* is not available here — it only appears on a transition — so asserting the configured path is the honest check, and the first real transition after this is what confirms it. Do not write `ls ... || echo "not created yet"`: that prints the same line for a healthy router and a typo'd path, which is the equivalence this repo's guards exist to avoid.
 
-- [ ] **Step 5: Commit, PR, merge**
+- [x] **Step 5: Commit, PR, merge**
 
 ```bash
 git add docker-compose.utilities.yml .env.example router/arrdns-watchdog.sh
@@ -940,7 +952,7 @@ gh pr create --base main --head fix/dns-small-cleanups --fill
 - Consumes: nothing.
 - Produces: a closed deferred list, so nobody re-triages it.
 
-- [ ] **Step 1: Verify each item against the code**
+- [x] **Step 1: Verify each item against the code**
 
 ```bash
 # 6: outbox_depth must say something when find fails
@@ -965,7 +977,7 @@ grep -c 'n "\$dir"' scripts/lib/queue_high_water.sh                             
 
 Expected: every count as annotated, and the `awk` guard exits 0. Any that does not match is a genuinely open item and gets fixed here instead of marked.
 
-- [ ] **Step 2: Mark the file closed**
+- [x] **Step 2: Mark the file closed**
 
 Add to the top of `deferred-minors.md`:
 
@@ -976,7 +988,7 @@ Add to the top of `deferred-minors.md`:
 > Kept for the record, not as a work list.
 ```
 
-- [ ] **Step 3: Record the closure where it can be found**
+- [x] **Step 3: Record the closure where it can be found**
 
 ```bash
 git check-ignore -v .superpowers/sdd/2026-09-20-bound-ingest-io/deferred-minors.md
@@ -1003,7 +1015,7 @@ Three files have been sitting uncommitted in the main checkout through the whole
 - Consumes: nothing.
 - Produces: a clean tree.
 
-- [ ] **Step 1: See exactly what is loose**
+- [x] **Step 1: See exactly what is loose**
 
 ```bash
 git status --short
@@ -1012,7 +1024,7 @@ git diff --stat docs/MAINTENANCE.md
 
 Expected at the time of writing: `M docs/MAINTENANCE.md`, and two untracked plans — `2026-09-19-user-timers-survive-reboot.md` and `2026-09-20-bound-ingest-io.md`.
 
-- [ ] **Step 2: Establish whether each is wanted**
+- [x] **Step 2: Establish whether each is wanted**
 
 ```bash
 git log --oneline -1 origin/main -- docs/MAINTENANCE.md
@@ -1021,11 +1033,11 @@ git show origin/main:docs/MAINTENANCE.md | diff - docs/MAINTENANCE.md | head -40
 
 The two plans describe work that has already merged (`#102`, `#103`). The `MAINTENANCE.md` diff is the ingest plan's Task 5 documentation.
 
-- [ ] **Step 3: Land them, or discard them deliberately**
+- [x] **Step 3: Land them, or discard them deliberately**
 
 If the diff is the ingest plan's documented outcome, commit it with a message that says so. If it is superseded, `git checkout -- docs/MAINTENANCE.md` and say in the commit that it was superseded — the one outcome that is not acceptable is leaving it loose for another session to trip over.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 ```bash
 git status --short          # expect no unexpected output
