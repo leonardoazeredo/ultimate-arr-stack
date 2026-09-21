@@ -15,7 +15,7 @@ mutation firewall-user-no-boot-selfcheck \
   --file router/firewall.user \
   --bats tests/firewall-user.bats \
   --test "firewall-user: AdGuard silent falls back to dnsmasq, and records it" \
-  --why "Removes the probe that runs before the house is pointed at AdGuard. The firewall starts at S19 and AdGuard Home at S99, with 48 init scripts and `network` between them, so on a router reboot this leaves every client redirected at a resolver that is not listening yet - the exact moment this migration promised would never exist. The watchdog cannot cover it: it needs three consecutive failures and cron starts at S50, inside the window" \
+  --why "Removes the probe that runs before the house is pointed at AdGuard. The firewall starts at S19 and AdGuard Home at S99, with 48 init scripts and network between them, so on a router reboot this leaves every client redirected at a resolver that is not listening yet - the exact moment this migration promised would never exist. The watchdog cannot cover it: it needs three consecutive failures and cron starts at S50, inside the window" \
   --apply 'perl -0pi -e "s/if \[ \"\x24ARRDNS_PORT\" = \"3053\" \]; then/if false; then/" "$F"'
 
 mutation firewall-user-probe-always-falls-back \
