@@ -263,12 +263,30 @@ current=$(printf 'uci -q get %s.address || true\n' "$(q "$section")" | remote 2>
           | tr ' ' '\n' | grep . | sort || true)
 
 # Which of the current records this script owns, and which of those are stale.
+#
+# Ownership is decided by NAME or by ANSWER, and the second half is load-bearing.
+# By name alone, a name retired from the record file drops out of `owned_names`
+# and its router record becomes "foreign, left alone" -- so retiring a name did
+# nothing at all, and the run reported "no change" while the name went on
+# resolving. That is what happened to pihole.lan on 2026-09-21, and it is the
+# one case where this script has to delete a record it no longer declares.
+#
+# A record pointing at Traefik's macvlan, or at the zone's own answer, is one
+# this script wrote, whatever it is named: those two answers are its own
+# constants. A record pointing anywhere else is still left alone, which is what
+# the foreign bucket is for.
+is_owned() {
+    local name="$1" answer="$2"
+    printf '%s\n' "$owned_names" | grep -qx "$name" && return 0
+    [[ "$answer" == "$DNS_DNSMASQ_TRAEFIK_IP" || "$answer" == "$DNS_DNSMASQ_ZONE_ANSWER" ]]
+}
 owned=""
 stale=""
 while IFS= read -r entry; do
     [[ -n "$entry" ]] || continue
     name="${entry#/}"; name="${name%%/*}"
-    printf '%s\n' "$owned_names" | grep -qx "$name" || continue
+    answer="${entry##*/}"
+    is_owned "$name" "$answer" || continue
     owned="$owned$entry"$'\n'
     printf '%s\n' "$desired" | grep -qx "$entry" || stale="$stale$entry"$'\n'
 done <<<"$current"
@@ -299,7 +317,11 @@ if [[ "$desired" == "$(printf '%s' "$owned" | sort)" ]]; then
 fi
 
 say "dnsmasq-local-names: the router's records differ from the record file:"
-say "  - wanted:              ${#wanted[@]} records (18 hostnames at $DNS_DNSMASQ_TRAEFIK_IP, plus /$DNS_DNSMASQ_ZONE_NAME/$DNS_DNSMASQ_ZONE_ANSWER)"
+# The hostname count is derived, not written as a number. It was 18 and became 17
+# when pihole.lan was retired, and a literal here would then have printed
+# "18 records (18 hostnames ... plus /lan/::)" — arithmetic that does not add up,
+# in the one line a reader uses to decide whether the run understood the file.
+say "  - wanted:              ${#wanted[@]} records ($(( ${#wanted[@]} - 1 )) hostnames at $DNS_DNSMASQ_TRAEFIK_IP, plus /$DNS_DNSMASQ_ZONE_NAME/$DNS_DNSMASQ_ZONE_ANSWER)"
 say "  - already there:       $current_owned"
 say "  - within those, stale: $current_stale"
 say "  - left alone:          $current_foreign record(s) this script does not own"

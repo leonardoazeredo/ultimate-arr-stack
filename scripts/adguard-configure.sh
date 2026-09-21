@@ -263,6 +263,15 @@ if [[ "$DRY_RUN" == "1" ]]; then
     exit 0
 fi
 
+# The dispatcher flag, read here — past every path that writes nothing, before
+# the first thing that does — so the check at the end can prove this run did not
+# move any client's queries. Compared against this reading rather than against a
+# literal: it was 0 while Phase 3 staged the resolver, the migration then turned
+# it on for good, and the literal made a correct run print FAIL afterwards, which
+# is how a guard stops being read. Whatever it is now, this script must not change
+# it, and a read on a run that writes nothing would only cost an ssh call.
+dns_enabled_before=$(printf 'uci -q get adguardhome.config.dns_enabled\n' | remote 2>/dev/null | tr -d '[:space:]')
+
 # --- stage it on the router -------------------------------------------------
 #
 # A quoted heredoc, so nothing in the config is expanded on the way, and the
@@ -407,13 +416,14 @@ else
     fail "example.com answered nothing after ${AGH_DNS_TRIES}s. The encrypted upstreams are configured and not resolving — check that bootstrap_dns can still reach the DoH hostnames"
 fi
 
-# 5. the redirect is still off: this stages a resolver, it does not put one in
-#    every client's path (that is Phase 6)
+# 5. the dispatcher flag is where it was: this script stages a resolver and
+#    installs its rewrites, it does not decide whether the house uses it. That is
+#    the firewall redirect, which is Phase 6's decision and stays decided.
 enabled=$(printf 'uci -q get adguardhome.config.dns_enabled\n' | remote 2>/dev/null | tr -d '[:space:]')
-if [[ "$enabled" == "0" ]]; then
-    say "ok: dns_enabled is still 0, so no client's queries were moved"
+if [[ "$enabled" == "$dns_enabled_before" ]]; then
+    say "ok: dns_enabled is still ${enabled:-<unset>}, so this run did not move any client's queries"
 else
-    fail "dns_enabled is '${enabled:-<nothing>}', not 0. Phase 3 stages a resolver; putting it in the path is the firewall redirect and Phase 6's decision"
+    fail "dns_enabled moved from '${dns_enabled_before:-<nothing>}' to '${enabled:-<nothing>}' during this run. Writing the config and the rewrites must not change which resolver the house is pointed at — that is the firewall redirect and Phase 6's decision"
 fi
 
 # ...and one more, because the four above would all pass on a config whose
@@ -425,5 +435,5 @@ else
     fail "the live config carries $rewrites_now rewrites, not ${#rewrite_args[@]} — AdGuard Home did not keep what was installed"
 fi
 
-say "adguard-configure: OK. $AGH_CONFIG on $AGH_ROUTER carries ${#upstreams[@]} encrypted upstreams, ${#rewrite_args[@]} .lan rewrites and $filter_count filter entries; dns_enabled is 0."
+say "adguard-configure: OK. $AGH_CONFIG on $AGH_ROUTER carries ${#upstreams[@]} encrypted upstreams, ${#rewrite_args[@]} .lan rewrites and $filter_count filter entries; dns_enabled is unchanged at ${enabled:-<unset>}."
 say "adguard-configure: the pre-migration config is at $backup on the router."

@@ -223,12 +223,17 @@ apply_once() {
 # --- 3.2 the rewrites -------------------------------------------------------
 
 @test "agh-config: one rewrite per name in the repo's record, and no others" {
-    [ "${#REWRITE_PAIRS[@]}" -eq 18 ] || fail "expected 18 names, got ${#REWRITE_PAIRS[@]}"
+    # Counted from the record file, not written as a number. It was 18 and became
+    # 17 when pihole.lan was retired, and this assertion's whole job is to notice
+    # the rewrite set and the record diverging -- a literal here fails on a
+    # retirement, which is the one change it is least supposed to object to.
+    local expected; expected=$(agh_dnsmasq_hostnames < "$DNSMASQ_CONF" | grep -c .)
+    [ "${#REWRITE_PAIRS[@]}" -eq "$expected" ] || fail "expected $expected names, got ${#REWRITE_PAIRS[@]}"
 
     apply_once
     local domains
     domains=$(grep -E '^    - domain: ' "$BATS_TEST_TMPDIR/once.yaml" | sed 's/^    - domain: //')
-    [ "$(printf '%s\n' "$domains" | grep -c .)" -eq 18 ]
+    [ "$(printf '%s\n' "$domains" | grep -c .)" -eq "$expected" ]
 
     local name
     while IFS= read -r name; do
@@ -245,8 +250,9 @@ apply_once() {
 @test "agh-config: every rewrite answers Traefik's macvlan address and is enabled" {
     apply_once
     local out="$BATS_TEST_TMPDIR/once.yaml"
-    [ "$(grep -c '^      answer: 192.168.110.250$' "$out")" -eq 18 ]
-    [ "$(grep -c '^      enabled: true$' "$out")" -eq 18 ]
+    local expected; expected=$(agh_dnsmasq_hostnames < "$DNSMASQ_CONF" | grep -c .)
+    [ "$(grep -c '^      answer: 192.168.110.250$' "$out")" -eq "$expected" ]
+    [ "$(grep -c '^      enabled: true$' "$out")" -eq "$expected" ]
 }
 
 @test "agh-config: an inline-empty rewrites list is replaced, and the block shape is too" {
@@ -398,7 +404,10 @@ refusal_emits_nothing() {
 @test "agh-config: the hostnames come from the tracked dnsmasq record" {
     run agh_dnsmasq_hostnames < "$DNSMASQ_CONF"
     [ "$status" -eq 0 ]
-    [ "${#lines[@]}" -eq 18 ]
+    # The record file is the source of this number; the parser has to return one
+    # name per address line and nothing else, so the count is derived from the
+    # same file rather than pinned -- 18 before pihole.lan was retired.
+    [ "${#lines[@]}" -eq "$(grep -c '^address=/[^/]*/TRAEFIK_LAN_IP$' "$DNSMASQ_CONF")" ]
     printf '%s\n' "${lines[@]}" | grep -qxF 'sonarr.lan'
     printf '%s\n' "${lines[@]}" | grep -qxF 'magnetio.lan'
 

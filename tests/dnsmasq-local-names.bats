@@ -244,7 +244,7 @@ rendered_addresses() {
     grep '^address=' "$DNSMASQ_RENDERED_CONF" 2>/dev/null || true
 }
 
-# The 19 records the script should write: the record file with the placeholder
+# The records the script should write: the record file with the placeholder
 # resolved, plus the apex.
 #
 # SORTED WITH THE APEX IN, deliberately. `/lan/::` sorts before every
@@ -261,7 +261,7 @@ wanted_records() {
     } | sort
 }
 
-# Write the record set — 18 hostnames at Traefik's macvlan, plus the apex — to a
+# Write the record set — every hostname at Traefik's macvlan, plus the apex — to a
 # file, one record per line. Every seeding path reads this file rather than a
 # shell variable: `$(wanted_records)` and every `grep` capture in a command
 # substitution strip the trailing newline or rejoin the lines, and a fixture
@@ -317,10 +317,14 @@ seed_applied() {
     run env bash "$SCRIPT"
     [ "$status" -eq 0 ] || { echo "first run exited $status:"; echo "$output"; return 1; }
 
+    # Derived from the record file, not written as 19. It was 19, then 18 when
+    # pihole.lan was retired, and a literal here is only ever fixed by bumping
+    # it -- which is how a test stops saying anything about the set it checks.
+    local expected; expected=$(wanted_records | wc -l | tr -d ' ')
     local count_first
     count_first=$(state_addresses | wc -l | tr -d ' ')
-    [ "$count_first" -eq 19 ] || {
-        echo "first run wrote $count_first address records, expected 19:"
+    [ "$count_first" -eq "$expected" ] || {
+        echo "first run wrote $count_first address records, expected $expected:"
         state_addresses
         return 1
     }
@@ -332,8 +336,8 @@ seed_applied() {
 
     local count_second
     count_second=$(state_addresses | wc -l | tr -d ' ')
-    [ "$count_second" -eq 19 ] || {
-        echo "a second run left $count_second address records, not 19 —"
+    [ "$count_second" -eq "$expected" ] || {
+        echo "a second run left $count_second address records, not $expected —"
         echo "uci add_list appends duplicates happily:"
         state_addresses
         return 1
@@ -384,7 +388,7 @@ seed_applied() {
     state_addresses | grep -qxF '/lan/::' || {
         echo "no /lan/:: record:"; state_addresses; return 1
     }
-    [ "$(state_addresses | wc -l | tr -d ' ')" -eq 19 ] || {
+    [ "$(state_addresses | wc -l | tr -d ' ')" -eq "$(wanted_records | wc -l | tr -d ' ')" ] || {
         echo "wrong record count:"; state_addresses; return 1
     }
 }
@@ -452,7 +456,7 @@ seed_applied() {
     # forced out: with a rendered-config read that returns NOTHING, the case
     # above still passes — every record reads as missing, so "the missing record
     # is named" is satisfied by a check that cannot see any record at all. Here
-    # the config genuinely carries all 19 and the run must say so.
+    # the config genuinely carries every record and the run must say so.
     #
     # UCI is short the apex so the script reaches the reload and the checks;
     # the rendered file carries every record and RENDER_SKIP holds it that way.
@@ -467,7 +471,7 @@ seed_applied() {
         echo "exited $status — a rendered config carrying every record failed:"
         echo "$output"; return 1
     }
-    [[ "$output" == *"all 19 records are in the running config"* ]] || {
+    [[ "$output" == *"all $(wanted_records | wc -l | tr -d ' ') records are in the running config"* ]] || {
         echo "the rendered config was not read back:"; echo "$output"; return 1
     }
 }
@@ -528,6 +532,34 @@ seed_applied() {
     [[ "$output" == *"no change"* ]]
 }
 
+@test "dnsmasq-local-names: a name retired from the record file loses its record" {
+    # pihole.lan was retired on 2026-09-21, and this case exists because the
+    # retirement did NOT remove it. Ownership was decided by NAME against the
+    # record file, so dropping a name from that file moved its router record
+    # straight into the foreign bucket -- "a record this script does not own,
+    # left alone" -- and the retired name went on resolving. The run reported
+    # "no change" while doing it, which is the worst shape a removal can fail in.
+    #
+    # Ownership is by name OR by answer now. This case and the one above are a
+    # pair: this one says a record pointing at Traefik's macvlan is ours whatever
+    # it is called, that one says a record pointing anywhere else is not.
+    cat "$(wanted_file)" > "$BATS_TEST_TMPDIR/retired"
+    printf '/pihole.lan/192.168.110.250\n' >> "$BATS_TEST_TMPDIR/retired"
+    seed_router "$BATS_TEST_TMPDIR/retired"
+    : > "$STUB_LOG"
+
+    run env bash "$SCRIPT"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+
+    state_addresses | grep -qxF '/pihole.lan/192.168.110.250' && {
+        echo "the retired record survived the run:"; state_addresses; return 1
+    }
+    state_addresses | grep -qxF '/sonarr.lan/192.168.110.250' || {
+        echo "the rebuild lost a record it still wants:"; state_addresses; return 1
+    }
+    assert_stub_called uci "del_list dhcp.cfg01411c.address=/pihole.lan/192.168.110.250"
+}
+
 @test "dnsmasq-local-names: a record this script does not own is not deleted" {
     # A hand-added record must survive: only the names this script owns are
     # replaced. Enforced over a change, because a no-op run has nothing to be
@@ -551,7 +583,9 @@ seed_applied() {
     state_addresses | grep -qxF '/admin-one-off.lan/10.0.0.9' || {
         echo "a record this script does not own was deleted:"; state_addresses; return 1
     }
-    [ "$(state_addresses | wc -l | tr -d ' ')" -eq 20 ] || {
+    # Every record it owns, plus the one it must leave alone.
+    local expected=$(( $(wanted_records | wc -l | tr -d ' ') + 1 ))
+    [ "$(state_addresses | wc -l | tr -d ' ')" -eq "$expected" ] || {
         echo "the rebuild duplicated records instead of replacing them:"
         state_addresses; return 1
     }
@@ -576,7 +610,7 @@ seed_applied() {
     state_addresses | grep -qxF '/sonarr.lan/10.9.9.9' && {
         echo "the stale address survived:"; state_addresses; return 1
     }
-    [ "$(state_addresses | wc -l | tr -d ' ')" -eq 19 ] || {
+    [ "$(state_addresses | wc -l | tr -d ' ')" -eq "$(wanted_records | wc -l | tr -d ' ')" ] || {
         echo "wrong record count:"; state_addresses; return 1
     }
 }
@@ -631,7 +665,7 @@ seed_applied() {
     }
     assert_stub_called uci "add_list dhcp.cfg01411c.address=/sonarr.lan/192.168.110.250"
     assert_stub_not_called uci "add_list dhcp.dnsmasq"
-    [ "$(state_addresses | wc -l | tr -d ' ')" -eq 19 ]
+    [ "$(state_addresses | wc -l | tr -d ' ')" -eq "$(wanted_records | wc -l | tr -d ' ')" ]
 }
 
 @test "dnsmasq-local-names: the records go over ssh on stdin, through the jump host" {
