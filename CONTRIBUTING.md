@@ -361,12 +361,10 @@ scripts/
     ├── check-hardcoded-domain.sh  # Detect domain/hostname in tracked files
     ├── check-env-backup.sh     # Compare .env.nas.backup with NAS
     ├── check-uptime-monitors.sh   # Verify Uptime Kuma monitors
-    ├── check-dns-duplicates.sh # Detect duplicate .lan domains
     ├── check-dns-divergence.sh # Diff the two .lan stores the DNS migration holds
     ├── dns-matrix.sh           # Evaluate the DNS baseline matrix against a resolver
     ├── dns-parity.sh           # Compare that matrix across two resolvers, vantages named
     ├── router-dns.sh           # Judge the router's DNS state (pools, redirect, binds)
-    ├── check-domains.sh        # Verify domain accessibility
     ├── check-doc-links.sh      # Resolve internal markdown links
     ├── check-image-versions.sh # Check for stale Docker image tags
     ├── configure-helpers.sh    # HTTP/JSON helpers for configure-apps.sh

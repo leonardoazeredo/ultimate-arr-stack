@@ -31,7 +31,12 @@ setup() {
     source "$REPO_ROOT/scripts/lib/dns-parity.sh"
 }
 
-NAS_DNS_IP="${NAS_DNS_IP:-192.168.110.246}"
+# The router, not the NAS. Until 2026-09-21 this was the NAS Pi-hole at
+# 192.168.110.246; the container was removed in Phase 9.4, and a query sent to
+# its old address now meets the router's DNS redirect and is answered by AdGuard
+# anyway -- so the old default would have gone on "answering" for a resolver
+# that is not there. Both stores this script compares are on the router now.
+ROUTER_DNS_IP="${ROUTER_DNS_IP:-192.168.8.1}"
 AGH_JUMP="${AGH_JUMP:-pi@pi1.local}"
 AGH_ADDR="${AGH_ADDR:-192.168.8.1:3053}"
 
@@ -45,10 +50,10 @@ dig_answers() {
     [[ "$out" == *"status: NOERROR"* ]] && [[ "$out" == *"ANSWER SECTION"* ]]
 }
 
-require_nas() {
+require_router_dnsmasq() {
     command -v dig >/dev/null 2>&1 || skip "dig not installed - cannot query any resolver"
-    dig_answers example.com "@$NAS_DNS_IP" \
-        || skip "the NAS Pi-hole at $NAS_DNS_IP did not answer example.com from here"
+    dig_answers example.com "@$ROUTER_DNS_IP" \
+        || skip "the router at $ROUTER_DNS_IP did not answer example.com from here"
 }
 
 require_agh() {
@@ -63,8 +68,8 @@ require_agh() {
         || skip "AdGuard Home at $AGH_ADDR did not answer through $AGH_JUMP (port 3053 is dropped from every client VLAN): ${out:-no output}"
 }
 
-@test "dns-parity live: the NAS Pi-hole answers from here" {
-    require_nas
+@test "dns-parity live: the router answers from here" {
+    require_router_dnsmasq
 }
 
 @test "dns-parity live: the router's AdGuard Home answers through the jump host" {
@@ -84,14 +89,15 @@ require_agh() {
 }
 
 @test "dns-parity live: the report names the vantage each side was queried from" {
-    require_nas
+    require_router_dnsmasq
     require_agh
 
     # Two resolvers reached from different places, which is the case the report
-    # exists for. The result itself is Phase 3's business; what is asserted is
-    # that a reader can tell how each side was reached.
-    run dns_parity_endpoint "$NAS_DNS_IP:53"
-    [ "$output" = "$NAS_DNS_IP:53" ]
+    # exists for: the router's dnsmasq is queried from here, its AdGuard Home
+    # only through pi1. The result itself is Phase 3's business; what is
+    # asserted is that a reader can tell how each side was reached.
+    run dns_parity_endpoint "$ROUTER_DNS_IP:53"
+    [ "$output" = "$ROUTER_DNS_IP:53" ]
 
     run dns_parity_endpoint "jump=$AGH_JUMP:$AGH_ADDR"
     [ "$output" = "$AGH_ADDR (via $AGH_JUMP)" ]

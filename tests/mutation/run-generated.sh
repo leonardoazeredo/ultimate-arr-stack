@@ -70,7 +70,6 @@ TARGETS=(
   "scripts/lib/check-doc-links.sh:tests/lib-doc-links.bats:^doc-links: "
   "scripts/lib/check-yaml-syntax.sh:tests/lib-yaml-syntax.bats:^yaml-syntax: "
   "scripts/lib/check-env-backup.sh:tests/lib-env-backup.bats:^env-backup: "
-  "scripts/lib/check-dns-duplicates.sh:tests/lib-dns-duplicates.bats:^dns-duplicates: "
   # scripts/lib/common.sh IS here now, and the reason it was not is worth
   # keeping: it was swept once on the theory that being sourced by three tested
   # files made it covered, and produced 78 mutants of which 78 survived. Sourced
@@ -79,7 +78,6 @@ TARGETS=(
   # say nothing beyond "this file has no tests" - something README.md's derived
   # no-sweep list already says, for free.
   "scripts/lib/common.sh:tests/lib-common.bats:^common: "
-  "scripts/lib/check-domains.sh:tests/lib-domains.bats:^domains: "
   "scripts/restart-stack.sh:tests/restart-stack.bats:^restart-stack: "
   "setup-hooks.sh:tests/setup-hooks.bats:^setup-hooks: "
   "scripts/ensure-tailscale-relay-port.sh:tests/ensure-relay-port.bats:^ensure-relay-port: "

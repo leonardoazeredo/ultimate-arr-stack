@@ -1,8 +1,14 @@
 #!/bin/bash
 # dns-matrix-check.sh — check the committed baseline matrix against one resolver.
 #
-#   ./scripts/dns-matrix-check.sh                       the NAS Pi-hole, port 53
+#   ./scripts/dns-matrix-check.sh                       the router's dnsmasq, port 53
 #   ./scripts/dns-matrix-check.sh 192.168.8.1 3053      AdGuard Home from pi1
+#
+# The default used to be the NAS Pi-hole at 192.168.110.246. That container was
+# removed with the rest of the NAS resolver on 2026-09-21 (Phase 9.4), and a
+# query sent to its old address now meets the router's redirect and is answered
+# by AdGuard anyway -- so the old default would still "work" while naming a
+# resolver that is not there. The router answers both sides now.
 #
 # This is the single-resolver half of the migration's acceptance testing. The
 # two-resolver parity check (3.6) is a separate script; both share the row
@@ -18,7 +24,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/dns-matrix.sh
 source "$SCRIPT_DIR/lib/dns-matrix.sh"
 
-RESOLVER="${1:-${NAS_DNS_IP:-192.168.110.246}}"
+RESOLVER="${1:-${ROUTER_DNS_IP:-192.168.8.1}}"
 PORT="${2:-53}"
 FIXTURE="${3:-$DNS_MATRIX_FIXTURE}"
 

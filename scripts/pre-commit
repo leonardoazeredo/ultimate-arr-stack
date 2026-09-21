@@ -39,8 +39,6 @@ source "$SCRIPT_DIR/lib/check-conflicts.sh"
 source "$SCRIPT_DIR/lib/check-hardcoded-domain.sh"
 source "$SCRIPT_DIR/lib/check-env-backup.sh"
 source "$SCRIPT_DIR/lib/check-uptime-monitors.sh"
-source "$SCRIPT_DIR/lib/check-dns-duplicates.sh"
-source "$SCRIPT_DIR/lib/check-domains.sh"
 source "$SCRIPT_DIR/lib/check-image-versions.sh"
 source "$SCRIPT_DIR/lib/check-doc-links.sh"
 
@@ -114,7 +112,7 @@ echo -e "${BLUE}5. Checking for hardcoded domain...${NC}"
 # warning and returns 0; the NAS *hostname* is private and returns 1, which
 # check-hardcoded-domain.sh:58 documents as blocking. This used to be a bare
 # call, which discarded that distinction -- and under `set -e` a bare call that
-# returns 1 kills the hook outright, skipping checks 6-11 and the summary.
+# returns 1 kills the hook outright, skipping checks 6-9 and the summary.
 if check_hardcoded_domain; then
     :
 else
@@ -137,23 +135,9 @@ check_uptime_monitors
 echo ""
 
 # ==========================================
-# CHECK 8: DNS Duplicates (WARNS)
+# CHECK 8: Image Version Staleness (WARNS)
 # ==========================================
-echo -e "${BLUE}8. Checking for duplicate .lan domains...${NC}"
-check_dns_duplicates
-echo ""
-
-# ==========================================
-# CHECK 9: Domain Accessibility (WARNS)
-# ==========================================
-echo -e "${BLUE}9. Checking domain accessibility...${NC}"
-check_domains
-echo ""
-
-# ==========================================
-# CHECK 10: Image Version Staleness (WARNS)
-# ==========================================
-echo -e "${BLUE}10. Checking for image updates...${NC}"
+echo -e "${BLUE}8. Checking for image updates...${NC}"
 # Timeout after 30s to prevent slow registries from blocking commits
 _timeout_cmd=""
 command -v timeout &>/dev/null && _timeout_cmd="timeout"
@@ -168,9 +152,9 @@ fi
 echo ""
 
 # ==========================================
-# CHECK 11: Documentation Links (BLOCKS)
+# CHECK 9: Documentation Links (BLOCKS)
 # ==========================================
-echo -e "${BLUE}11. Checking documentation links...${NC}"
+echo -e "${BLUE}9. Checking documentation links...${NC}"
 if check_doc_links; then
     echo -e "    ${GREEN}OK${NC}: All internal links valid"
 else

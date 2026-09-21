@@ -102,7 +102,7 @@ mutation common-ssh-available-rejects-configured-host \
   --file scripts/lib/common.sh \
   --bats tests/lib-common.bats \
   --test "common: is_ssh_available is true when the host is set and the port answers" \
-  --why "is_ssh_available now returns 1 for a host that IS configured, so it can never report an open port. Every caller is the same shape - 'if ! is_ssh_available; then SKIP' in check-env-backup.sh, check-dns-duplicates.sh and check-uptime-monitors.sh - so the NAS checks do not fail, they report OK without looking, on a NAS that is up" \
+  --why "is_ssh_available now returns 1 for a host that IS configured, so it can never report an open port. Every caller is the same shape - 'if ! is_ssh_available; then SKIP' in check-env-backup.sh and check-uptime-monitors.sh - so the NAS checks do not fail, they report OK without looking, on a NAS that is up" \
   --apply 'perl -pi -e '"'"'s/\[\[ -z "\$nas_host" \]\] && return 1/\[\[ -n "\$nas_host" \]\] && return 1/'"'"' "$F"'
 
 mutation common-ssh-available-guard-negated \

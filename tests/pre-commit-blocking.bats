@@ -26,7 +26,7 @@
 #
 # The commit is still rejected, so this hides behind a correct-looking exit
 # code. What is lost is everything else: the later checks never run (including
-# the BLOCKING check 11), no summary prints, no --no-verify hint prints, and
+# the BLOCKING check 9), no summary prints, no --no-verify hint prints, and
 # the count could never exceed 1 even if it did print.
 #
 # It is also blocking BY ACCIDENT, which makes it fragile in the worst
@@ -45,6 +45,9 @@ setup() {
     load helpers/stubs
     stub_init
     command -v git >/dev/null 2>&1 || skip "no host git binary"
+
+    # How many checks the hook declares. See the note above run_hook().
+    CHECKS=9
 
     # Everything the hook reaches for that would otherwise leave this machine.
     # forbid() stays armed on all of them: a pre-commit hook has no business
@@ -87,7 +90,14 @@ setup() {
 }
 
 # Stage $2 as $1, for each pair given, then run the real hook.
-# Sets: $status, $output, and $checks_run (how many of the 11 printed a header).
+# Sets: $status, $output, and $checks_run (how many of the CHECKS printed a
+# header).
+#
+# CHECKS is a literal on purpose. Deriving it from the hook's own text would
+# agree with a hook that had quietly lost a check block, which is the one thing
+# these tests are here to notice; deleting a check should mean editing this
+# number deliberately. It was 11 until the two NAS-resolver checks were retired
+# with the store they read (Phase 8.6 of the DNS migration, 2026-09-21).
 run_hook() {
     while [[ $# -gt 0 ]]; do
         printf '%s\n' "$2" > "$FX/$1"
@@ -118,7 +128,7 @@ secret_line() { cat "$REPO_ROOT/tests/fixtures/fake-wireguard-key.env"; }
     run_hook clean.md 'nothing interesting here'
     [ "$status" -eq 0 ]
     [[ "$output" == *"PASSED"* ]]
-    [ "$checks_run" -eq 11 ]
+    [ "$checks_run" -eq "$CHECKS" ]
 }
 
 @test "pre-commit: a staged secret is reported by the summary, not by dying" {
@@ -126,7 +136,7 @@ secret_line() { cat "$REPO_ROOT/tests/fixtures/fake-wireguard-key.env"; }
     [ "$status" -eq 1 ]
     [[ "$output" == *"Possible WireGuard private key"* ]]
     # The point of the test: it got all the way to the end.
-    [ "$checks_run" -eq 11 ]
+    [ "$checks_run" -eq "$CHECKS" ]
     [[ "$output" == *"BLOCKED"* ]]
     [[ "$output" == *"1 error(s) found"* ]]
     [[ "$output" == *"--no-verify"* ]]
@@ -139,16 +149,16 @@ secret_line() { cat "$REPO_ROOT/tests/fixtures/fake-wireguard-key.env"; }
     # is inside the loop that BUILDS this message, before it is ever echoed.
     [[ "$output" == *"NAS hostname"* ]]
     [[ "$output" == *"leaky.md"* ]]
-    [ "$checks_run" -eq 11 ]
+    [ "$checks_run" -eq "$CHECKS" ]
     [[ "$output" == *"BLOCKED"* ]]
 }
 
 @test "pre-commit: checks after the first failure still run" {
     # Check 5 is the one that aborts mid-library. If the hook survives it,
-    # checks 6-11 -- including the BLOCKING check 11 -- report as normal.
+    # checks 6-9 -- including the BLOCKING check 9 -- report as normal.
     run_hook leaky.md 'deploy to zqxhost tonight'
     [[ "$output" == *"6. "* ]]
-    [[ "$output" == *"11. "* ]]
+    [[ "$output" == *"9. "* ]]
 }
 
 @test "pre-commit: two independent errors are counted as two" {
@@ -159,7 +169,7 @@ secret_line() { cat "$REPO_ROOT/tests/fixtures/fake-wireguard-key.env"; }
     run_hook secret.conf "$(secret_line)" host.md 'deploy to zqxhost tonight'
     [ "$status" -eq 1 ]
     [[ "$output" == *"2 error(s) found"* ]]
-    [ "$checks_run" -eq 11 ]
+    [ "$checks_run" -eq "$CHECKS" ]
 }
 
 @test "pre-commit: no check fired a forbidden operation" {

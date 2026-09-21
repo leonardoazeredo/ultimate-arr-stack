@@ -476,9 +476,10 @@ real_repo() {
     # fail. Measured: mutating the guard on :219 to `-n`, and separately to
     # `||`, left this whole file green. Neither mutant is dead code. Every
     # caller is the same shape -- `if ! is_ssh_available; then SKIP` in
-    # check-env-backup.sh, check-dns-duplicates.sh and check-uptime-monitors.sh
-    # -- so a guard stuck at 1 does not fail a check, it makes three of them
-    # skip silently on a NAS that is up.
+    # check-env-backup.sh and check-uptime-monitors.sh (check-dns-duplicates.sh
+    # was a third until it was retired with the store it read, 2026-09-21) --
+    # so a guard stuck at 1 does not fail a check, it makes them skip silently
+    # on a NAS that is up.
     #
     # `timeout` EXECs its argument (docs/TEST-HARDENING-LOG.md §8), so the stub
     # has to be a real executable; a shell function would never be reached.

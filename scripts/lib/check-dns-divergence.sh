@@ -12,9 +12,11 @@
 # flips, and by then the name is being answered by the wrong store, or by
 # neither.
 #
-# scripts/lib/check-dns-duplicates.sh does not cover this and never did. It
-# compares the NAS's 02-local-dns.conf against pihole.toml *inside the Pi-hole
-# container* and returns 0 on every arm. It is not a router-vs-AdGuard check.
+# scripts/lib/check-dns-duplicates.sh sat beside this file and did not cover
+# this, and never did: it compared the NAS's 02-local-dns.conf against
+# pihole.toml *inside the Pi-hole container*, and returned 0 on every arm. It
+# was retired on 2026-09-21 with the store it read (Phase 8.6 of the DNS
+# migration), so this file is now the only check comparing two stores at all.
 #
 # WHY IT FAILS RATHER THAN WARNS
 #
@@ -274,8 +276,9 @@ dns_divergence_check() {
     # A store that defines one name twice is undecidable here: which of the two
     # addresses that store means is not this guard's to guess, and guessing
     # picks whichever line the sort put first -- an agreement nothing in either
-    # file supports. check-dns-duplicates.sh covers the Pi-hole side of this;
-    # neither store in this pair has such a check yet.
+    # file supports. check-dns-duplicates.sh covered the Pi-hole side of this
+    # until 2026-09-21; it is gone with the store, and neither store in this
+    # pair has such a check now.
     repeated=$(printf '%s\n' "$repo_names" | sort | uniq -d | head -1)
     if [[ -n "$repeated" ]]; then
         printf 'SKIP: the repo-side .lan record defines %s more than once -- which address wins is not something to guess\n' \
