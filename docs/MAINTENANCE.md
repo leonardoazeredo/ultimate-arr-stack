@@ -146,6 +146,52 @@ systemctl --user enable --now queue-cleanup.timer
 systemctl --user list-timers queue-cleanup.timer     # confirm it is armed
 ```
 
+### After every reboot: the user timers may not have armed
+
+The eight `--user` timers can come up inactive after a reboot, and nothing on the
+box says so. The user manager starts before `/home` is usable, so it reads
+`~/.config/systemd/user/` while that directory is not yet there, loads none of
+the unit files, and brings `timers.target` up active and empty. `is-enabled`
+reports every timer as enabled the whole time and the `timers.target.wants/`
+symlinks stay intact, so every signal a person would check looks correct.
+
+Measured twice. 2026-09-19: `user@1000.service` active 00:05:06, `home.mount`
+00:05:36. 2026-09-20: `user@1000.service` active 19:07:38, `home.mount`
+19:08:06 — and on that boot the manager had not loaded a single unit file by the
+time someone started one by hand at 19:22.
+
+Check, then fix:
+
+```bash
+./scripts/check-user-timers.sh     # exit 0 running, exit 1 dead; names the remedy
+./scripts/rearm-user-timers.sh     # daemon-reload, then start timers.target
+systemctl --user list-timers       # confirm NEXT is set, not just that eight print
+```
+
+Both steps are required and the order matters. `daemon-reload` makes the unit
+files visible to the running manager and starts nothing; `start timers.target`
+is what arms them. A reload alone leaves all eight listed with `NEXT` at `-`,
+which reads like success. Measured on this box 2026-09-20: a stopped but enabled
+timer, with `timers.target` already active, is re-armed by
+`systemctl --user start timers.target`.
+
+**This is automated.** `scripts/arr-stack-user-timers.service` is a *system*
+unit, not a `--user` one, that runs the rearm script as leoleg once the user
+manager is up. The script polls for the unit directory rather than ordering on a
+mount, because UGOS mounts the volumes outside systemd's view. Install once,
+with root:
+
+```bash
+sudo install -m 644 scripts/arr-stack-user-timers.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now arr-stack-user-timers.service
+```
+
+A drop-in adding `RequiresMountsFor=/home/leoleg` to `user@1000.service` was
+tried first, on 2026-09-20, and does nothing: `home.mount` has an empty
+`FragmentPath`, so it does not exist as a unit until UGOS has already performed
+the mount, and the directive therefore has nothing to order against.
+
 ### Backlog search (systemd timer, every 4 hours)
 
 Neither arr searches its own backlog. They search for new releases (RSS) and for
@@ -278,6 +324,131 @@ blocklisting it would forbid the one release the provider is known to have
 cached. A fresh search is then triggered for the episodes that were removed —
 or the film, for Radarr — spaced 30 seconds apart, because a burst of searches
 answers `429` and Sonarr disables that indexer for the rest of the run.
+
+---
+
+## Holding the usenet ingest down
+
+`usenet-blackhole.timer` is a user timer, and `arr-stack-user-timers.service`
+re-arms every enabled timer in `timers.target.wants` about 29 seconds after a
+boot. A `systemctl --user stop` therefore lasts only until the next reboot, and
+a reboot is not a way to hold this path down.
+
+To hold it down across boots, disable it rather than stopping it, and put it
+back explicitly:
+
+```bash
+# Hold down (survives a reboot, because `is-enabled` stays disabled)
+systemctl --user disable --now usenet-blackhole.timer
+
+# Confirm: this must print `disabled`, not `enabled`
+systemctl --user is-enabled usenet-blackhole.timer
+
+# Release
+systemctl --user enable --now usenet-blackhole.timer
+```
+
+Do **not** `mask` the timer as a hold. `scripts/rearm-user-timers.sh` exits 1
+whenever any `*.timer` in the unit directory is inactive, so a masked timer
+turns a deliberate hold into a failed system unit on every boot.
+
+**Do not arm the timer while the outbox is deep. Drain it by hand instead.**
+Those are two different instructions, and an earlier version of this paragraph
+collapsed them into one: it said not to start a pass at all, which leaves no way
+to empty the queue, because the queue only drains by running passes.
+
+- **Do not arm the timer.** `systemctl --user enable --now usenet-blackhole.timer`
+  starts a pass every 2 minutes with nobody watching, which is how the box was
+  wedged on 2026-09-20.
+- **Do run passes by hand, one at a time, and read each one.** `./scripts/usenet-blackhole.sh --apply`
+  is bounded to a single round of `FETCH_WORKERS` (3) releases: `run()` sorts the
+  finished releases least-recently-attempted first and takes the front three, so
+  one hand-run can no longer pull a whole 21-release backlog onto the pool.
+  Repeat until the outbox is below the mark.
+- **The producers stand down on their own.** `scripts/stremio-library-sync.sh`
+  and `scripts/backlog-search.sh` both source `scripts/lib/queue_high_water.sh`
+  and exit 0 without queueing anything once the outbox holds 50 NZBs or more
+  (`QUEUE_HIGH_WATER`, counted by `outbox_depth`). Nothing has to be stopped by
+  hand, and the queue does not refill while the drain is being walked down.
+
+As of 2026-09-20 the queue stood at 588 NZBs with 21 releases already complete
+at TorBox and owed a local download, including four staged `payload.zip` files
+of 33.19, 27.59, 12.10 and 9.04 GB, against a pool whose metadata was already at
+91.5%. That is the state a sequence of hand-run passes has to walk out of.
+
+**Do not delete the staging directory to reclaim the 113 GB it holds.** Every
+one of those directories is a live key in `logs/usenet-blackhole-state.json`,
+`sweep_staging` keeps them on purpose, and `fetch` wipes and re-downloads its
+own staging path anyway. Deleting them frees space and buys nothing.
+
+### Measuring whether one fetch stream beats three
+
+`FETCH_WORKERS` is 3, and no one has measured whether three concurrent fetches
+finish more releases per hour than one on this pool. The only observation is a
+single pass that cannot separate the concurrency from a 21-release pile-up, a
+flapping gate, a Time Machine client and Docker churn.
+
+With the ingest held down and the box quiet, patch `FETCH_WORKERS` to 1 on a
+branch, sync, and hand-run one pass with this sampler alongside. It reads
+`/proc` only and needs no root:
+
+```bash
+while :; do
+  printf '%s ' "$(date +%s)"
+  awk '/^full/{print $2, $3}' /proc/pressure/io
+  for d in sda sdb; do printf '%s ' "$(cut -d' ' -f1-8 /sys/block/$d/stat)"; done
+  echo
+  sleep 1
+done
+```
+
+Read off two numbers: releases completed per minute, and the delta in fields 3
+and 7 of `/sys/block/*/stat` (sectors read and written) per release. If one
+stream delivers 80% or more of the three-stream rate, set `FETCH_WORKERS` to 1 —
+the array is two rotational spindles, and the concurrency is buying queue depth
+rather than throughput. Record the two rates here when it is done.
+
+### Storage steps that are not in this repo
+
+These are host configuration on the NAS, applied by hand and persisted by
+UGOS-side mechanism, in the same category as the macvlan shim and the UGOS
+firewall rules. Run them with the ingest held down and the box quiet.
+
+**btrfs metadata is at 91.5% of its allocated chunk.** `/volume1` reported
+Metadata,DUP 4.58 GiB used of 5.00 GiB, against a `max_commit_ms` of 38,952 —
+the healthy reference in `btrfs(5)` is 2 ms.
+
+```bash
+btrfs filesystem usage -h /volume1          # before
+btrfs balance start -musage=50 /volume1     # the balance itself is I/O heavy
+btrfs filesystem usage -h /volume1          # after: expect Used below 60%
+cat /sys/fs/btrfs/*/commit_stats            # compare last_commit_ms before/after
+```
+
+**The two mirror legs disagree about request size.** `sda` has
+`max_sectors_kb=512` and `sdb` has `2048`, on identical
+`WDC WD201KFGX-68` firmware. RAID1 inherits the minimum, and `sda` issued 8.8%
+more write requests for byte-identical totals. Raise the smaller one, then
+confirm both legs report the same value and that their request counts converge:
+
+```bash
+for d in sda sdb; do echo "$d $(cat /sys/block/$d/queue/max_sectors_kb)"; done
+echo 2048 > /sys/block/sda/queue/max_sectors_kb     # needs root
+```
+
+**Lower the dirty-page ceiling.** The box has 7.52 GiB of RAM (MemTotal
+7,884,640 kB, which is 8.07 GB; `free -m` reports 7,699 MiB), and
+`vm.dirty_ratio=20` permits 1.61 GB of dirty pages (20% of that 8.07 GB, since
+the ratio is a fraction of bytes and the 7.52 GiB is the same memory expressed
+in GiB). Three concurrent downloads plus an extract plus a RAR unpack can cross
+that in seconds. This reduces peak throughput on a rotational array, so measure
+before adopting it:
+
+```bash
+sysctl vm.dirty_bytes vm.dirty_background_bytes          # read first
+sysctl -w vm.dirty_bytes=268435456                       # 256 MiB, needs root
+sysctl -w vm.dirty_background_bytes=67108864             # 64 MiB
+```
 
 ---
 

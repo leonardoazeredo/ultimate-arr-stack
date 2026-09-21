@@ -311,6 +311,7 @@ old "14 tests" claim went stale.
 - `scripts/adguard-configure.sh`
 - `scripts/arr-backup.sh`
 - `scripts/backup-prune.sh`
+- `scripts/check-user-timers.sh`
 - `scripts/detect-credential-drift.sh`
 - `scripts/detect-vpn-zombies.sh`
 - `scripts/dns-matrix-check.sh`
@@ -322,9 +323,11 @@ old "14 tests" claim went stale.
 - `scripts/lib/check-dns-divergence.sh`
 - `scripts/lib/dns-matrix.sh`
 - `scripts/lib/dns-parity.sh`
+- `scripts/lib/queue_high_water.sh`
 - `scripts/lib/router-dns.sh`
 - `scripts/post-merge`
 - `scripts/pre-commit`
+- `scripts/rearm-user-timers.sh`
 - `scripts/sync-nas.sh`
 - `scripts/usenet-blackhole-status.sh`
 - `terraform/apply.sh`

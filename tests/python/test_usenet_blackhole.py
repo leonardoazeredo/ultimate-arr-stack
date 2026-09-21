@@ -1584,7 +1584,20 @@ def test_finished_releases_are_fetched_concurrently(tmp_path, monkeypatch):
 def test_the_fetch_pool_is_bounded(tmp_path, monkeypatch):
     # Unbounded would stack an unrar per completed release on a NAS that is
     # also transcoding, and the arr's importer reads the same disk.
-    nzb_dir, watch, state_path, listing = several_jobs(tmp_path, m.FETCH_WORKERS * 2)
+    #
+    # What this test still proves is that the fetches overlap at all --
+    # `peak >= 2` is the assertion with teeth. The `peak <= FETCH_WORKERS` line
+    # is a cheap invariant, not an independent proof of the bound: the slice in
+    # `run()` already caps `to_fetch` at FETCH_WORKERS upstream, so the pool can
+    # never be handed more than that no matter how wide it is. No fixture size
+    # makes an uncapped pool observable here; `usenet-blackhole-fetch-set-
+    # unbounded` is what covers the unbounded case.
+    #
+    # The fixture is one round's worth of jobs, not two. A fixture of
+    # FETCH_WORKERS * 2 leaves half of them `complete` in the state file by
+    # design and the empty-state assertion below could only pass against the
+    # unbounded defect.
+    nzb_dir, watch, state_path, listing = several_jobs(tmp_path, m.FETCH_WORKERS)
     lock = threading.Lock()
     live, peak = 0, 0
 
@@ -2450,3 +2463,123 @@ def test_an_unusable_release_at_fetch_time_is_not_reported(tmp_path, monkeypatch
           arr_keys={"SONARR_API_KEY": "sk"}, report_failures=True)
 
     assert arr.posts == []
+
+
+def test_a_pass_fetches_one_round_and_leaves_the_rest(tmp_path, monkeypatch):
+    # 2026-09-20: one admitted pass pulled 21 releases, three at a time, for
+    # 53m12s, while the operator's --max-inflight 6 read 3 -- that ceiling
+    # counts jobs TorBox has NOT finished, and the fetch set never consulted
+    # it. The fetch set is now one round.
+    #
+    # Nine jobs, not three. With FETCH_WORKERS jobs the unbounded line fetches
+    # them all and this test passes against the defect, which is the exact
+    # shape of a guard that cannot fail.
+    nzb_dir, watch, state_path, listing = several_jobs(tmp_path, m.FETCH_WORKERS * 3)
+    started = []
+
+    def fake_fetch(torbox, key, job, watch_dir, staging_dir, out=print):
+        started.append(job["name"])
+        out(f"    fetched: {job['name']}")
+        return True
+
+    monkeypatch.setattr(m, "fetch", fake_fetch)
+    monkeypatch.setattr(m, "TorBox", lambda *a, **k: FakeTorBox(list_result=listing))
+    m.run(str(nzb_dir), str(watch), str(tmp_path / "staging"), state_path,
+          str(tmp_path / "f.log"), "key", apply_changes=True, out=lambda *a: None)
+
+    assert len(started) == m.FETCH_WORKERS
+    assert len(m.load_state(state_path)["jobs"]) == m.FETCH_WORKERS * 2
+
+
+def test_the_summary_names_the_three_numbers_separately(tmp_path, monkeypatch):
+    # "still in flight 24" next to a ceiling of 6 reads as a broken cap. It is
+    # not: 24 is the state file, 3 is the subset still holding a TorBox slot,
+    # and the I/O comes from a third count again -- finished at TorBox and not
+    # yet fetched. One word for three quantities is what made this look like a
+    # cap failure on 2026-09-20.
+    nzb_dir, watch, state_path, listing = several_jobs(tmp_path, m.FETCH_WORKERS + 2)
+    # One job still downloading at TorBox. Without it every job in the fixture
+    # is `complete`, so `at_torbox` is 0 and `owed` equals `outstanding` --
+    # which means a summary that hardcoded "0 still at TorBox" satisfied every
+    # assertion below. Replacing the real count with a literal 0 left all 148
+    # tests green. One in-progress job is what makes the three counts
+    # distinguishable, which is the entire point of this test.
+    listing[-1]["download_state"] = "downloading"
+    lines = []
+
+    monkeypatch.setattr(m, "fetch", lambda *a, **k: True)
+    monkeypatch.setattr(m, "TorBox", lambda *a, **k: FakeTorBox(list_result=listing))
+    m.run(str(nzb_dir), str(watch), str(tmp_path / "staging"), state_path,
+          str(tmp_path / "f.log"), "key", apply_changes=True, out=lines.append)
+
+    summary = [l for l in lines if l.strip().startswith("submitted ")][-1]
+    assert "outstanding 2" in summary
+    assert "1 owed local I/O" in summary
+    assert "1 still at TorBox" in summary
+    # The apply path reuses no line for the conflated label. Not the whole
+    # module: the dry-run branch returns before any of this runs, so it is
+    # outside the assertion -- the list below cannot see its output.
+    assert not any("in flight" in l for l in lines)
+    assert any(l.strip().startswith("outstanding:") for l in lines)
+
+
+def test_a_release_that_keeps_failing_does_not_hold_the_head_of_the_queue(tmp_path, monkeypatch):
+    # Before the rotation, the slice was taken from queue order, so a release
+    # whose fetch failed transiently kept the front of the queue for as long as
+    # it stayed in the state file -- and poll() never times a `complete` job
+    # out, so that is indefinitely. With FETCH_WORKERS releases failing and
+    # FETCH_WORKERS == the slice width, the budget was entirely consumed and
+    # every release behind them went unfetched forever.
+    #
+    # Which releases are "in front" is decided by the job keys, not by the
+    # fixture's loop order: save_state writes with sort_keys=True and the key
+    # is the hash of the NZB's bytes. The head has to be taken from that same
+    # order or the test proves nothing -- with a healthy release anywhere in
+    # the first FETCH_WORKERS it gets fetched, the head slides past the failing
+    # ones, and the queue drains to the same stragglers with or without the
+    # rotation. The version of this test that named `Rel-0` through
+    # `Rel-<FETCH_WORKERS-1>` passed against the unrotated code for exactly
+    # that reason.
+    nzb_dir, watch, state_path, listing = several_jobs(tmp_path, m.FETCH_WORKERS * 2)
+    head = sorted(os.listdir(nzb_dir),
+                  key=lambda n: m.job_key(os.path.join(nzb_dir, n)))[:m.FETCH_WORKERS]
+    stuck = {os.path.splitext(n)[0] for n in head}
+    assert len(stuck) == m.FETCH_WORKERS
+
+    def fake_fetch(torbox, key, job, watch_dir, staging_dir, out=print):
+        if job["name"] in stuck:
+            raise m.TorBoxError("transient")
+        out(f"    fetched: {job['name']}")
+        return True
+
+    monkeypatch.setattr(m, "fetch", fake_fetch)
+    monkeypatch.setattr(m, "TorBox", lambda *a, **k: FakeTorBox(list_result=listing))
+    for _ in range(2):
+        m.run(str(nzb_dir), str(watch), str(tmp_path / "staging"), state_path,
+              str(tmp_path / "f.log"), "key", apply_changes=True, out=lambda *a: None)
+
+    remaining = {j["name"] for j in m.load_state(state_path)["jobs"].values()}
+    assert remaining == stuck, "the slice did not rotate past the failing head"
+
+
+def test_an_attempt_survives_a_fetch_that_kills_the_pass(tmp_path, monkeypatch):
+    # The mark has to reach disk before the fetch starts, not at the pass's
+    # end. A fetch killed by SIGKILL or the OOM killer never returns, so a mark
+    # written only by the trailing save_state is lost -- and the release keeps
+    # an empty last_fetch_attempt, sorting to the head of every later pass and
+    # re-running the crash. That is the head-of-line freeze the rotation
+    # removes, in the case where it matters most.
+    nzb_dir, watch, state_path, listing = several_jobs(tmp_path, m.FETCH_WORKERS)
+
+    def killed(torbox, key, job, watch_dir, staging_dir, out=print):
+        raise SystemExit("killed mid-fetch")
+
+    monkeypatch.setattr(m, "fetch", killed)
+    monkeypatch.setattr(m, "TorBox", lambda *a, **k: FakeTorBox(list_result=listing))
+    with pytest.raises(SystemExit):
+        m.run(str(nzb_dir), str(watch), str(tmp_path / "staging"), state_path,
+              str(tmp_path / "f.log"), "key", apply_changes=True, out=lambda *a: None)
+
+    jobs = m.load_state(state_path)["jobs"]
+    assert jobs, "the pass lost every job; the fixture proves nothing"
+    assert all(j.get("last_fetch_attempt") for j in jobs.values())

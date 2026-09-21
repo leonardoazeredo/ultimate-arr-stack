@@ -76,6 +76,8 @@ DEFAULT_COOLDOWN_HOURS=6
 
 # shellcheck source=scripts/lib/env-file.sh
 . "${SCRIPT_DIR}/lib/env-file.sh"
+# shellcheck source=scripts/lib/queue_high_water.sh
+. "${SCRIPT_DIR}/lib/queue_high_water.sh"
 
 APPLY=false
 VERBOSE=false
@@ -168,6 +170,25 @@ if [[ -z "$SONARR_KEY" ]] && [[ -z "$RADARR_KEY" ]]; then
   log "ERROR: Could not get API keys for Sonarr or Radarr. Check SONARR_API_KEY / RADARR_API_KEY are set in .env."
   exit 1
 fi
+
+# Queued searches become NZBs, and every NZB becomes local I/O for the
+# blackhole. The backlog this walks was measured at 4,614 missing episodes
+# across 71 series against a drain of about 24 releases an hour, so a deep
+# outbox means this pass is queueing work the host cannot absorb.
+#
+# Below the key checks, not above them. The gate exits 0 -- that is what makes
+# it a pause rather than a failure -- so sitting in front of them it turned
+# "SONARR_API_KEY and RADARR_API_KEY are both missing, which is an error" into
+# "skipping this pass", and the keys could stay wrong for as long as the outbox
+# stayed deep. A configuration fault has to be reported even on a pass that has
+# nothing else to do.
+NZB_DIR="$(outbox_dir)"
+OUTBOX_NOW="$(outbox_depth "$NZB_DIR")"
+if outbox_over_high_water "$NZB_DIR"; then
+  echo "Outbox: $OUTBOX_NOW NZBs waiting (mark ${QUEUE_HIGH_WATER}); skipping this pass"
+  exit 0
+fi
+echo "Outbox: $OUTBOX_NOW NZBs waiting (mark ${QUEUE_HIGH_WATER})"
 
 # The Python half lives in its own file rather than a heredoc: bats cannot reach
 # a heredoc, universalmutator cannot parse one, and pytest cannot import one.

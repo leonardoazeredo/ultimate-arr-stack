@@ -130,7 +130,12 @@ Three guards, committed to `fix/nas-load-protection`:
   host reads as I/O-stalled, which is the state that made the 23:07 restart walk
   the volume in the first place.
 
-**These are committed, not deployed.** The NAS has not been synced or
+**These are committed, not deployed.** *(This paragraph records the state on
+2026-09-19 and is kept because the deploy sequence below is still the sequence.
+Two things have changed since: the guards did ship, and the NAS is no longer in
+the state that made arming them safe. Read
+[§8](#8-the-recurrence-of-2026-09-20) before following any step here.)* The NAS
+has not been synced or
 `daemon-reload`ed, and the installed unit under `~/.config/systemd/user/` is a
 plain copy rather than a symlink, so the two can drift with nothing to say so. As
 of this writing the NAS still runs uncapped. The deploy is a deliberate single
@@ -156,6 +161,11 @@ and the third is baked into an image that only a rebuild replaces. In order:
    488 NZBs still queued at the reboot — the state that wedged the box.
    `grep -m1 max-inflight ~/.config/systemd/user/usenet-blackhole.service` should
    print `--max-inflight 6` before the timer is armed.
+   **Do not arm the timer while the outbox is deep.** On 2026-09-20 the queue
+   stood at 588 NZBs with 21 releases already complete at TorBox and owed a
+   local download, against metadata at 91.5%. Arming the ingest into that state
+   re-enters the failure this document records. See *Holding the usenet ingest
+   down* in [`docs/MAINTENANCE.md`](MAINTENANCE.md#holding-the-usenet-ingest-down).
 4. **Rebuild duc.**
    `docker compose -f docker-compose.utilities.yml up -d --build duc`, and
    **never** with `--remove-orphans`: this stack's services are split across
@@ -186,19 +196,39 @@ Two items are live on the box right now, not architectural:
 - **488 NZBs were still queued at the reboot**, and the blackhole timer is
   currently inactive, so nothing is submitting. Both need a decision before this
   ingest path is exercised again.
-- **The user timers did not arm after that reboot.** On the boot after this
-  incident the user manager started at 00:05:04, 29 seconds after boot, while the
-  unit files live under `/home`, a separate btrfs subvolume on the LVM/md pool.
-  `timers.target` came up active and empty, and all eight user timers were left
-  inactive while `is-enabled` still reported every one of them as enabled.
-  Confirming when `/home` actually mounts relative to `user@1000.service` is a
-  prerequisite for fixing it; that is a plan of its own.
+- **The user timers did not arm after that reboot — diagnosed, remediated, and
+  now automated.** The user manager starts before `/home` is usable: it read
+  `~/.config/systemd/user/` while that directory was still absent, loaded none
+  of the eight unit files, and brought `timers.target` up active and empty,
+  while `is-enabled` reported every one of them as enabled. Measured on two
+  boots — 2026-09-19 `user@1000.service` 00:05:06 against `home.mount` 00:05:36,
+  and 2026-09-20 19:07:38 against 19:08:06, where the manager had loaded no unit
+  file at all until a timer was started by hand.
+
+  Ordering the race away does not work, and that was measured too: a drop-in
+  adding `RequiresMountsFor=/home/leoleg` to `user@1000.service` was installed
+  and the next boot was unchanged, because `home.mount` carries an empty
+  `FragmentPath` and does not exist as a unit until UGOS has already performed
+  the mount. `scripts/rearm-user-timers.sh` polls for the unit directory and
+  then does the two steps that are actually required — `daemon-reload`, which
+  makes the units visible and starts nothing, and `start timers.target`, which
+  arms them —
+  [`is armed`](MAINTENANCE.md#after-every-reboot-the-user-timers-may-not-have-armed).
+  `scripts/check-user-timers.sh` reports the dead state from the freshness of
+  the files the timers write, because nothing that runs unattended on this box
+  can reach the session D-Bus. Both ship with bats coverage and mutation corpus
+  entries, and `scripts/arr-stack-user-timers.service` runs the rearm as a
+  system unit at boot, which is a deliberate reversal of the earlier ruling that
+  no system unit would be shipped — the ground for it was "we have no root",
+  measured false on 2026-09-20 when `sudo` turned out to work with the owner's
+  password.
 
 The rest is capacity, and no guard in this repo removes it:
 
 - `overlay2` shares `/volume1` with the media library, so container churn
   competes with downloads for the same two disks.
-- 7.7 GB of RAM carries 30 containers.
+- It carries 30 containers on 7.52 GiB of RAM (MemTotal 7,884,640 kB;
+  `free -m` reports 7,699 MiB).
 - **Beszel's `data.db` is entirely empty** — zero rows in `systems`,
   `system_stats`, `container_stats` and `system_details`. The hub was never given
   a system, so the stack's own metrics layer recorded nothing across the whole
@@ -211,3 +241,68 @@ The rest is capacity, and no guard in this repo removes it:
   hours and by `indexer-guard` on an indexer ban. Under I/O starvation that is
   the loop in §3, and damping it means weakening healthchecks, which hides real
   failures.
+
+## 8. The recurrence of 2026-09-20
+
+The three guards in [§6](#6-what-was-done-about-it) shipped, and the host went
+into I/O starvation again. This section records what the second failure
+corrected, because §6 argues from numbers that turned out not to bound the
+thing they were meant to bound.
+
+**What the guards got right, and kept.** The duc start-up guard never fired a
+false scan: `docker logs duc` shows `Host I/O is stalled; skipping the start-up
+scan` on every restart, so the 2.9 Tb re-walk is genuinely gone. The pressure
+gate's own log shows it discriminating correctly — it skipped at 58.05% and
+27.33% and admitted a pass at a valid sub-20 reading. The gate works. It
+watches the wrong window.
+
+**What they did not bound.** `--max-inflight 6` counts jobs TorBox has *not*
+finished (`jobs_at_torbox()` in `scripts/lib/usenet_blackhole.py`). The local I/O
+comes from jobs
+it *has* finished. At 21:22:32 the state file held 24 jobs, **21 of them
+complete**, so the guard read **3** at the exact moment 21 releases — two of
+them 30–38 GB — were owed a local download. The fetch set took all 21, with no
+reference to the ceiling anywhere on that path, and the string `in-flight cap
+reached` appears **zero times in 1,281 log lines across 72 passes**. A guard
+whose reading falls as the load rises cannot bound the load.
+
+There was no slice to cite for that: `to_fetch` was every finished release. The
+line this paragraph used to quote, `to_fetch = owed[:FETCH_WORKERS]` in `run()`,
+is the one this branch added to bound exactly this, and it did not exist on
+2026-09-20.
+
+Consequences measured: one admitted pass ran 53m12s; a second took load from
+8.47 to 50.18 and io full avg10 to 81.91% in twelve minutes; one release cost
+86.22 GB logical and 170.6 GB of platter writes to deliver a few GB, because
+the payload is written, extracted, and then RAR-unpacked before delivery.
+
+**The stall outlives its process.** After the ingest was killed at 21:25:06,
+io full avg10 was still 74.41% at load 39.02 a minute later. A stalled box does
+not recover when the producer stops; it recovers when the writeback drains and
+then only by reboot — four boots in two hours, one of them a hand-run
+`sudo reboot`.
+
+**The queue is a ratchet.** 488 NZBs at the 09-18 reboot, 572 at 21:17, 588 at
+21:56. Producers offer roughly 72 an hour against a drain ceiling near 24, and
+when the gate skips a pass the drain goes to zero while they keep running. The
+guard added for this, `scripts/lib/queue_high_water.sh`, stands both producers
+down at 50 NZBs rather than leaving the ratchet to the gate alone, and the fetch
+slice rotates least-recently-attempted first so the drain cannot freeze behind a
+release whose fetch keeps failing.
+
+**Two things this investigation corrected in its own first pass.** An active
+Time Machine backup was proposed as a co-driver; boot-wide, `smbd.service`
+wrote 887 MB, **0.70%** of pool writes, and the shares that supported the claim
+were selection on a peak. The gate's 20% threshold was proposed as sitting
+inside the idle noise band; the measured idle median is **~1.0%** and the gate
+is above it. Neither corrected claim appears in what follows.
+
+**What is still open and was not settled.** The pool was never
+bandwidth-saturated: whole-boot averages are 19.47 MB/s of writes and 9.85
+MB/s of reads against drives that do 253 MB/s sequential. The failure is
+latency and queue depth, not throughput. Random 4 KiB reads cost 16.9 ms at
+p50 and 17.9 ms at the mean, so about 59 IOPS at queue depth 1 from the median
+and about 56 from the mean, and btrfs metadata sits at 91.5%. The
+largest single writer over that boot was **decypharr at 67.07% of pool writes**
+(84.77 GB) — the torrent path, which no guard in §6 touches, and which has had
+no investigation of its own.

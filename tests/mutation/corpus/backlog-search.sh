@@ -41,3 +41,25 @@ mutation backlog-search-reaches-for-the-unbounded-command \
   --test "^backlog-search: the script never shells out to an unbounded arr command" \
   --why "MissingEpisodeSearch searches the whole backlog in one command, cannot be cancelled once started, and had to be killed by restarting Sonarr on 2026-09-13. This entry proves the guard that keeps the unbounded command out of the script can actually fail" \
   --apply 'perl -pi -e "s/^        python3 /        python3 MissingEpisodeSearch /" "$F"'
+
+# --- the queue check is not reached ----------------------------------------
+
+mutation backlog-search-queue-check-removed \
+  --file scripts/backlog-search.sh \
+  --bats tests/backlog-search.bats \
+  --test "backlog-search: a deep outbox stands the pass down" \
+  --why "the call site is the load-bearing half: the library can answer whether the outbox is deep, but only this line acts on it. With the check gone the four-hourly sweep keeps queueing a whole backlog slice -- 4,614 missing episodes across 71 series, measured -- into an outbox the drain clears at about 24 releases an hour, and every one of those NZBs becomes multi-GB local I/O. The library's own tests stay green, so nothing else notices" \
+  --apply 'perl -0777 -pi -e "s/\Qif outbox_over_high_water \E.*?\nfi\n//s" "$F"'
+
+# --- the queue check is ordered above the key checks -----------------------
+#
+# The gate exits 0 -- it is a pause, not a failure. Above the key checks that
+# makes the two indistinguishable: "neither API key is set" reads as "nothing
+# to do this pass", and a pass that has nothing else to do never reports it.
+
+mutation backlog-search-queue-gate-hides-the-key-check \
+  --file scripts/backlog-search.sh \
+  --bats tests/backlog-search.bats \
+  --test "backlog-search: a deep outbox does not hide a missing API key" \
+  --why "moves the gate back above the key checks, which is where it shipped. Both keys missing is a configuration error and the gate answers 'skipping this pass' with exit 0 instead, so the fault stays invisible for as long as the outbox stays deep -- and the outbox stays deep exactly when the stack is least healthy. Stremio's gate has always sat below its key guards; this one is the same shape now" \
+  --apply 'python3 -c "import sys;p=sys.argv[1];L=open(p).read().split(chr(10));q=next(i for i,l in enumerate(L) if l.startswith(\"NZB_DIR=\"));qe=next(i for i in range(q,len(L)) if L[i].rstrip()==\"fi\");g=L[q:qe+1];R=L[:q]+L[qe+1:];k=next(i for i,l in enumerate(R) if l.startswith(\"if [[ -z \"));open(p,\"w\").write(chr(10).join(R[:k]+g+R[k:]))" "$F"'

@@ -53,6 +53,8 @@ MAX_LOG_LINES=2000
 
 # shellcheck source=scripts/lib/env-file.sh
 . "${SCRIPT_DIR}/lib/env-file.sh"
+# shellcheck source=scripts/lib/queue_high_water.sh
+. "${SCRIPT_DIR}/lib/queue_high_water.sh"
 
 APPLY=false
 BACKFILL=false
@@ -147,6 +149,24 @@ else
   echo "Per-pass cap: default"
 fi
 echo "========================================"
+
+# The requests this pass creates become NZBs, and every NZB becomes local I/O
+# for the blackhole. Measured 2026-09-20: the outbox reached 588 while the
+# pressure gate was refusing passes, because standing a pass down takes the
+# drain to zero and leaves the producers running -- so the queue only grew
+# while the host was being protected from it.
+#
+# Checked in both modes, for the same reason the key checks are: the one thing
+# an operator does with a dry run is decide whether applying is safe, and a dry
+# run that reports "12 new items" while the outbox is 588 deep answers the
+# wrong question.
+NZB_DIR="$(outbox_dir)"
+OUTBOX_NOW="$(outbox_depth "$NZB_DIR")"
+if outbox_over_high_water "$NZB_DIR"; then
+  echo "Outbox: $OUTBOX_NOW NZBs waiting (mark ${QUEUE_HIGH_WATER}); skipping this pass"
+  exit 0
+fi
+echo "Outbox: $OUTBOX_NOW NZBs waiting (mark ${QUEUE_HIGH_WATER})"
 
 mkdir -p "$NAS_STACK_DIR/logs"
 

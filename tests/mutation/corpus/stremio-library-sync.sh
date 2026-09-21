@@ -158,3 +158,12 @@ mutation stremio-library-lookup-failure-ends-the-pass \
 	--test "the extracted modules pass their pytest suite" \
 	--why "a lookup that could not be made is not an answer, and one odd title must not decide the fate of everything behind it in the queue. Propagating it ends the pass on the first failure and leaves every later title unexamined for another ten minutes -- and if the provider is unhappy for an hour, that is six passes that each examine one title. With the handler in place the pass notes it, leaves the item pending for a retry, and carries on to the next" \
 	--apply 'python3 -c "import sys;p=sys.argv[1];s=open(p).read();old=\"            lookup_failures += 1\";new=\"            raise err\";assert old in s, old;s=s.replace(old,new,1);open(p,\"w\").write(s)" "$F"'
+
+# --- the queue check is not reached ----------------------------------------
+
+mutation stremio-sync-queue-check-removed \
+  --file scripts/stremio-library-sync.sh \
+  --bats tests/stremio-library-sync.bats \
+  --test "stremio-library-sync: a deep outbox stands the pass down" \
+  --why "the guard is a library and a call site, and only the call site is load-bearing. With the check gone the sync keeps requesting while the outbox is 588 deep and the drain is stopped -- the arrangement that built the backlog which wedged the host on 2026-09-20. Nothing else in the suite notices, because the library's own tests still pass" \
+  --apply 'perl -0777 -pi -e "s/\Qif outbox_over_high_water \E.*?\nfi\n//s" "$F"'
