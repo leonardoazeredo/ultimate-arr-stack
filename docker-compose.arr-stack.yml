@@ -50,10 +50,9 @@ volumes:
     name: arr-stack_bazarr-config
   decypharr-config:
     name: arr-stack_decypharr-config
-  dnscrypt-config:
-    name: arr-stack_dnscrypt-config
-  pihole-etc-pihole:
-    name: arr-stack_pihole-etc-pihole
+  # dnscrypt-config and pihole-etc-pihole were declared here until 2026-09-21.
+  # Both volumes are still on the NAS with their data; the backups taken before
+  # Phase 9.4 removed the services are in /volume1/docker/arr-stack-backups/.
 
 #########################
 # Networks              #
@@ -415,85 +414,14 @@ services:
       start_period: 30s
 
 # ═══════════════════════════════════════════════════════════════════════════
-  # DNSCRYPT-PROXY - DNS over HTTPS/DNSCrypt proxy. Encrypts DNS queries.
-  # No web UI. Used internally by Pi-hole at 172.20.0.6:5053
-  # Protocols: DoH (DNS over HTTPS), DNSCrypt, Anonymized DNS
+  # PI-HOLE and DNSCRYPT-PROXY lived here until 2026-09-21. DNS moved to AdGuard
+  # Home on the router (192.168.8.1:53, admin on :3000) and nothing in the stack
+  # pointed at them any more, so Phase 9.4 removed both definitions: no
+  # `docker compose up` can bring them back, which a stopped container cannot
+  # promise -- Docker restarts a stopped `restart: always` container when the
+  # daemon restarts. The two config volumes are still on the NAS, and were backed
+  # up to /volume1/docker/arr-stack-backups/ first. See docs/DNS-MIGRATION.md.
   # ═══════════════════════════════════════════════════════════════════════════
-  dnscrypt-proxy:
-    image: klutchell/dnscrypt-proxy:2.1.16
-    container_name: dnscrypt-proxy
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    networks:
-      arr-core:
-        ipv4_address: 172.20.0.6
-    volumes:
-      - dnscrypt-config:/config
-    environment:
-      - TZ=${TZ}
-    restart: always
-    logging: *default-logging
-    healthcheck:
-      test: ["CMD", "/usr/local/bin/dnsprobe", "google.com", "127.0.0.1:5053"]
-      interval: 30s
-      timeout: 10s
-      retries: 2
-      start_period: 30s
-
-  # ═══════════════════════════════════════════════════════════════════════════
-  # PI-HOLE - STOPPED 2026-09-21 (DNS migration Phase 9.1). It no longer answers
-  # anything: DNS moved to AdGuard Home on the router, and nothing in the stack
-  # points here. `docker update --restart=no` keeps it down across a reboot, and
-  # Phase 9.4 removes the container after a week with no traffic to it. The
-  # `pihole.lan` route is retired with it, since its upstream no longer exists.
-  # Kept only so a rollback is one `docker start` away.
-  # For: Home Pro + Anywhere setups
-  # Configure upstream DNS: Settings → DNS → Custom = 172.20.0.6#5053
-  # ═══════════════════════════════════════════════════════════════════════════
-  pihole:
-    image: pihole/pihole:2026.07.2
-    container_name: pihole
-    depends_on:
-      dnscrypt-proxy:
-        condition: service_healthy
-    ports:
-      - "${NAS_IP}:53:53/tcp"  # Bind to NAS IP (not 0.0.0.0) to avoid conflict with host dnsmasq on 127.0.0.1:53
-      - "${NAS_IP}:53:53/udp"  # NAS_IP MUST be a static IP — DHCP IPs aren't ready at boot, causing exit 128
-      - "8081:80"  # Web UI (local network access)
-    networks:
-      arr-core:
-        ipv4_address: 172.20.0.5
-    environment:
-      - TZ=${TZ}
-      - FTLCONF_webserver_api_password=${PIHOLE_UI_PASS}
-      - FTLCONF_dns_listeningMode=all
-      - FTLCONF_misc_etc_dnsmasq_d=true
-    volumes:
-      - pihole-etc-pihole:/etc/pihole
-      - ./pihole/dnsmasq.d:/etc/dnsmasq.d
-    security_opt:
-      - no-new-privileges:false  # Pi-hole FTL needs setcap to apply capabilities
-    cap_drop:
-      - ALL
-    cap_add:
-      - CHOWN           # File ownership during startup
-      - NET_ADMIN       # DNS server binding
-      - NET_RAW         # Raw socket access for DHCP/DNS
-      - SYS_NICE        # Priority scheduling for FTL
-      - SETUID          # Drop privileges after startup
-      - SETGID          # Drop privileges after startup
-      - SETFCAP         # Apply capabilities to FTL binary
-      - DAC_OVERRIDE    # Access config files during startup
-    restart: always
-    logging: *default-logging
-    healthcheck:
-      test: ["CMD", "dig", "@127.0.0.1", "-p", "53", "google.com", "+short"]
-      interval: 30s
-      timeout: 10s
-      retries: 2
-      start_period: 30s
 
   # ═══════════════════════════════════════════════════════════════════════════
   # SEERR (formerly Jellyseerr) - Request portal. Users request movies/shows here.

@@ -5,8 +5,8 @@
 # Safe to run: tests/configure-apps.bats sources the script rather than
 # executing it, answers every docker question from a fixture directory, points
 # CONFIGURE_ENV_FILE and TMPDIR at throwaway paths, and keeps the stub harness
-# on PATH. The mutation that deletes a --dry-run gate below therefore reaches
-# forbid() rather than a live `docker restart pihole`.
+# on PATH. Every mutation below therefore reaches forbid() rather than a live
+# container, which matters most for the ones that leave a check out.
 
 mutation configure-apps-help-fixed-line-range \
   --file scripts/configure-apps.sh \
@@ -84,13 +84,6 @@ mutation configure-apps-sab-summary-step-always-shown \
   --test "configure-apps: the SABnzbd manual step appears only when SABnzbd is running" \
   --why "tells every operator to go and enter usenet credentials into a container this stack may not run. A remaining-steps list that names steps that do not apply stops being read" \
   --apply 'sed -i "/^print_summary()/,/^}/ s@if \[\[ \"\$SABNZBD_RUNNING\" == true \]\]; then@if true; then@" "$F"'
-
-mutation configure-apps-pihole-dry-run-gate-removed \
-  --file scripts/configure-apps.sh \
-  --bats tests/configure-apps.bats \
-  --test "configure-apps: --dry-run still names every step it would have taken" \
-  --why "drops the dry-run early return out of configure_pihole, which rewrites upstream DNS and then restarts the container serving the whole house's DNS. One gate being right says nothing about the others - each configure_* function carries its own copy of the check. Scored against the names-every-step test rather than touches-nothing, and the reason is worth keeping: configure_pihole now returns early when the container is not running (Phase 8.5 of the DNS migration), so in a test environment where Pi-hole is absent the mutant touches nothing either - the two gates are equivalent there, and the mutant survived. Removing the dry-run gate is still caught, but only by the output assertion: a mutant that takes a different early return prints no Would line, which the side-effect assertion cannot see. The touches-nothing test is not weakened; it stopped being the one that discriminates here" \
-  --apply 'sed -i "/^configure_pihole()/,/^}/ s@if \[\[ \"\$DRY_RUN\" == true \]\]; then@if false; then@" "$F"'
 
 # --- Entries below close gaps the generative sweep found, not gaps anyone
 # --- thought of first. run-generated.sh reported them as survivors against the
