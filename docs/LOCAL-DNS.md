@@ -173,8 +173,11 @@ Two consequences worth keeping:
   watchdog above is what keeps it from being *two* points.
 - **The NAS Pi-hole and dnscrypt-proxy are stopped** as of 2026-09-21 (Phase 9.1
   of the migration): `docker stop`, not removed, volumes kept. Nothing points at
-  them and nothing is listening on the NAS's `:53`. `docker start pihole
-  dnscrypt-proxy` brings them back if a rollback is ever needed; they are removed
+  them and nothing is listening on the NAS's `:53`. Both were given
+  `docker update --restart=no`, because `docker stop` alone is not durable:
+  Docker restarts a manually stopped `restart: always` container when the daemon
+  restarts. `docker start pihole dnscrypt-proxy` brings them back if a rollback
+  is ever needed; they are removed
   only after a week with no traffic to them (9.2/9.3) and that lands as its own
   PR (9.4).
 - **The `pi2-dns` stack (Pi-hole + dnscrypt-proxy on the Pi 3) is a standby, not a
