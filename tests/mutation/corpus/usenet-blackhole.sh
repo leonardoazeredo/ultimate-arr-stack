@@ -556,5 +556,21 @@ mutation usenet-blackhole-fetch-set-unbounded \
   --file scripts/lib/usenet_blackhole.py \
   --bats tests/python-suite.bats \
   --test "the extracted modules pass their pytest suite" \
-  --why "restores the line that let a single admitted pass pull 21 releases, two of them 30-38 GB, three at a time for 53m12s. Measured that day: load went 8.47 -> 50.18 and io full avg10 to 81.91%, and the value the operator's ceiling compared against was 3 because it counts jobs still AT TorBox. The pass cost 86.22 GB logical and 170.6 GB of platter writes to deliver a few GB of media. This entry also carries the unbounded-pool hazard the retired usenet-blackhole-fetch-pool-unbounded used to cover: with the slice gone, to_fetch is again every finished release, so the pool runs unbounded even though its own ceiling reads FETCH_WORKERS" \
+  --why "restores the line that let a single admitted pass pull 21 releases, two of them 30-38 GB, three at a time for 53m12s. Measured that day: load went 8.47 -> 50.18 and io full avg10 to 81.91%, and the value the operator's ceiling compared against was 3 because it counts jobs still AT TorBox. The pass cost 86.22 GB logical and 170.6 GB of platter writes to deliver a few GB of media. This entry also carries the unbounded-pool hazard the retired usenet-blackhole-fetch-pool-unbounded used to cover: with the slice gone, to_fetch is again every finished release, so the pass is unbounded -- an unbounded pass, still a 3-wide pool, because max_workers=FETCH_WORKERS survives this edit (measured with the slice removed, 9 finished jobs: peak 3 concurrent fetches)" \
   --apply 'sed -i.bak "s@to_fetch = owed\[:FETCH_WORKERS\]@to_fetch = owed@" "$F" && rm -f "$F.bak"'
+
+# --- a failing release pinned to the head of the queue ----------------------
+#
+# The slice bounds a pass, but taking it from the head as it arrives makes the
+# head fixed: `state["jobs"]` is insertion-ordered and a job stays in it until
+# its fetch succeeds. poll() returns a `complete` job at the DONE branch, long
+# before any stall or timeout logic, so a release whose fetch keeps failing
+# transiently is never bounded by anything -- it just occupies the budget again
+# on the next pass.
+
+mutation usenet-blackhole-fetch-slice-pinned-to-the-head \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "removes the rotation, restoring a fixed head. A release whose fetch fails transiently is never bounded by poll -- it is already past the DONE branch -- so with FETCH_WORKERS such releases in front, the whole per-pass budget is consumed and every release behind them is never attempted. That is worse than slow: the outbox guard stands both producers down while the queue is deep, so the drain freezes and the queue stays deep. Measured 2026-09-20: passes fetched 2, 2, 1, 1, 0 and then zero for every pass after" \
+  --apply 'sed -i.bak "/^    owed\.sort(key=lambda item:/d" "$F" && rm -f "$F.bak"'

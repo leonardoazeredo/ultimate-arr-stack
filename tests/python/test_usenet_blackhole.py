@@ -2516,6 +2516,47 @@ def test_the_summary_names_the_three_numbers_separately(tmp_path, monkeypatch):
     assert "outstanding 2" in summary
     assert "1 owed local I/O" in summary
     assert "1 still at TorBox" in summary
-    # No line in the pass reuses the conflated label.
+    # The apply path reuses no line for the conflated label. Not the whole
+    # module: the dry-run branch returns before any of this runs, so it is
+    # outside the assertion -- the list below cannot see its output.
     assert not any("in flight" in l for l in lines)
     assert any(l.strip().startswith("outstanding:") for l in lines)
+
+
+def test_a_release_that_keeps_failing_does_not_hold_the_head_of_the_queue(tmp_path, monkeypatch):
+    # Before the rotation, the slice was taken from queue order, so a release
+    # whose fetch failed transiently kept the front of the queue for as long as
+    # it stayed in the state file -- and poll() never times a `complete` job
+    # out, so that is indefinitely. With FETCH_WORKERS releases failing and
+    # FETCH_WORKERS == the slice width, the budget was entirely consumed and
+    # every release behind them went unfetched forever.
+    #
+    # Which releases are "in front" is decided by the job keys, not by the
+    # fixture's loop order: save_state writes with sort_keys=True and the key
+    # is the hash of the NZB's bytes. The head has to be taken from that same
+    # order or the test proves nothing -- with a healthy release anywhere in
+    # the first FETCH_WORKERS it gets fetched, the head slides past the failing
+    # ones, and the queue drains to the same stragglers with or without the
+    # rotation. The version of this test that named `Rel-0` through
+    # `Rel-<FETCH_WORKERS-1>` passed against the unrotated code for exactly
+    # that reason.
+    nzb_dir, watch, state_path, listing = several_jobs(tmp_path, m.FETCH_WORKERS * 2)
+    head = sorted(os.listdir(nzb_dir),
+                  key=lambda n: m.job_key(os.path.join(nzb_dir, n)))[:m.FETCH_WORKERS]
+    stuck = {os.path.splitext(n)[0] for n in head}
+    assert len(stuck) == m.FETCH_WORKERS
+
+    def fake_fetch(torbox, key, job, watch_dir, staging_dir, out=print):
+        if job["name"] in stuck:
+            raise m.TorBoxError("transient")
+        out(f"    fetched: {job['name']}")
+        return True
+
+    monkeypatch.setattr(m, "fetch", fake_fetch)
+    monkeypatch.setattr(m, "TorBox", lambda *a, **k: FakeTorBox(list_result=listing))
+    for _ in range(2):
+        m.run(str(nzb_dir), str(watch), str(tmp_path / "staging"), state_path,
+              str(tmp_path / "f.log"), "key", apply_changes=True, out=lambda *a: None)
+
+    remaining = {j["name"] for j in m.load_state(state_path)["jobs"].values()}
+    assert remaining == stuck, "the slice did not rotate past the failing head"

@@ -621,7 +621,7 @@ def render_html(summary):
 
     counts = " &middot; ".join([
         f'{totals.get("jobs", 0)} job(s)',
-        f'{totals.get("in_flight", 0)} in flight',
+        f'{totals.get("in_flight", 0)} still at TorBox',
         f'{totals.get("complete", 0)} complete',
         f'{totals.get("stalled", 0)} stalled',
         f'{totals.get("failed", 0)} failed',

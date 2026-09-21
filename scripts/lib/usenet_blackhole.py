@@ -860,6 +860,23 @@ def pending_nzbs(nzb_dir, state):
     return out
 
 
+def jobs_at_torbox(state):
+    """How many state entries still hold one of TorBox's ten slots.
+
+    Not `len(state["jobs"])`: a job stays in the state file until its fetch
+    succeeds, and a finished one no longer holds a slot -- so counting it would
+    lower the effective ceiling for good on a release whose fetch keeps
+    failing, which is also never timed out.
+
+    Two callers need the same population. `submit` compares it against
+    --max-inflight, and the pass summary prints it as the number that ceiling
+    was measured against. Counted in two places they drifted once already, and
+    a summary counting something else is what made a working ceiling read as a
+    broken one.
+    """
+    return sum(1 for j in state["jobs"].values() if not j.get("complete"))
+
+
 def submit(torbox, nzb_dir, state, out=print, max_inflight=0):
     """Upload new NZBs, stopping at the in-flight ceiling. Returns the count.
 
@@ -879,7 +896,7 @@ def submit(torbox, nzb_dir, state, out=print, max_inflight=0):
         # release whose fetch keeps failing, which is also never timed out.
         # Recomputed per iteration so jobs submitted earlier in this same pass
         # have no flag yet and count too.
-        inflight = sum(1 for j in state["jobs"].values() if not j.get("complete"))
+        inflight = jobs_at_torbox(state)
         # Ahead of the call, not after it: each create is a call against the
         # 60-an-hour budget, and a pass already at its ceiling has nothing to
         # ask -- the refusal would be bought with a call that bought nothing.
@@ -1348,7 +1365,12 @@ def run(nzb_dir, watch_dir, staging_dir, state_path, failed_log, api_key,
         for key, name, path in pending_nzbs(nzb_dir, state):
             out(f"    would submit: {name}")
         for key, job in state["jobs"].items():
-            out(f"    in flight: {job['name']} (torbox id {job.get('torbox_id')})")
+            # `pending`, not `in flight`: the header above this block prints
+            # `outstanding:`, and the pass summary names three different
+            # populations. A per-job line labelled "in flight" under an
+            # "outstanding" header puts two names on one screen for numbers
+            # that are not the same one.
+            out(f"    pending: {job['name']} (torbox id {job.get('torbox_id')})")
         return 0
 
     torbox = TorBox(api_key)
@@ -1436,12 +1458,31 @@ def run(nzb_dir, watch_dir, staging_dir, state_path, failed_log, api_key,
     # admitted it. A new --fetch-budget flag would be a second knob for a
     # quantity that already has one.
     #
-    # First N by the order `results` arrives in. Not by size or age: sorting
-    # would make which releases go first depend on something no test pins, and
-    # the remainder is not lost -- those jobs stay `complete` in the state
-    # file and the next pass picks them up.
+    # Least-recently-attempted first. `state["jobs"]` is insertion-ordered and a
+    # job stays in it until its fetch succeeds, so slicing the head as it
+    # arrives pins the same releases at the front of every pass: a release whose
+    # fetch keeps failing transiently occupies the whole budget and everything
+    # behind it is never attempted. Measured 2026-09-20 with three such releases
+    # and FETCH_WORKERS=3: the pass fetched 2, 2, 1, 1, 0 and then zero for every
+    # pass after, with the drain frozen and the outbox guard standing the
+    # producers down for as long as it stayed that way.
+    #
+    # Not by size or age: rotation only has to be fair, and sorting on a
+    # quantity nothing here bounds would only move the unfairness.
+    #
+    # ISO-8601 in UTC, the same shape `submitted_at` uses, so the comparison is
+    # lexicographic and a job that has never been attempted (empty string) sorts
+    # first.
     owed = [(key, name) for key, name, status in results if status == "complete"]
+    owed.sort(key=lambda item: state["jobs"][item[0]].get("last_fetch_attempt", ""))
     to_fetch = owed[:FETCH_WORKERS]
+    attempted_at = datetime.now(timezone.utc).isoformat()
+    # Marked before the fetch runs, deliberately: an attempt that crashes the
+    # process still counts as attempted, so a release that kills the pass is not
+    # attempted again next time at the expense of one that has never been tried.
+    # The save_state that follows the fetch block persists it.
+    for key, _name in to_fetch:
+        state["jobs"][key]["last_fetch_attempt"] = attempted_at
     if len(owed) > len(to_fetch):
         out(f"  {len(owed)} releases are ready: fetching {len(to_fetch)} this pass, "
             f"{len(owed) - len(to_fetch)} wait for a later one")
@@ -1490,7 +1531,7 @@ def run(nzb_dir, watch_dir, staging_dir, state_path, failed_log, api_key,
     # I/O, which is what actually reaches the disks. Calling all three "in
     # flight" is what made a working ceiling read as a broken one.
     outstanding = len(state["jobs"])
-    at_torbox = sum(1 for j in state["jobs"].values() if not j.get("complete"))
+    at_torbox = jobs_at_torbox(state)
     out(f"  submitted {submitted}, fetched {fetched}, outstanding {outstanding} "
         f"({outstanding - at_torbox} owed local I/O, {at_torbox} still at TorBox)")
     return 0
