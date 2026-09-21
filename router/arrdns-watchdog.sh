@@ -116,24 +116,35 @@ trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT INT TERM
 
 # -------------------------------------------------------------------- states
 
+# Operator intent comes first, and before the probe. `dns_enabled` is the switch
+# GL.iNet's own UI writes; falling back sets it to 0, so seeing 0 while AdGuard
+# is still the target means a person turned it off on purpose. Honour that.
+#
+# Immediately is the point. This check used to sit inside the `probe_ok` branch,
+# so an operator who disabled AdGuard *and stopped it* fell through to the
+# probe-failure path and waited three cycles — and for all three, every client
+# was still redirected at a dead resolver. The operator's own action would have
+# caused the outage this script exists to prevent. Reading intent before health
+# closes that window: one cron tick, whatever AdGuard is doing.
+#
+# MODE=adguard is required so the watchdog never mistakes its own fallback for an
+# operator's decision. After it falls back it records mode=fallback, and
+# dns_enabled=0 alongside that is its own doing, not something to undo.
+if [ "$MODE" = adguard ] && [ "$(dns_enabled)" != "1" ]; then
+  log "dns_enabled=0 while AdGuard Home is the target: treating as deliberate, holding DNS on dnsmasq"
+  [ "$(current_port)" = "$FALLBACK_PORT" ] || apply_port "$FALLBACK_PORT"
+  write_state fallback operator 0
+  exit 0
+fi
+
 if probe_ok; then
   case "$MODE" in
     adguard)
-      # dns_enabled is the switch GL.iNet's own UI writes. Falling back sets it
-      # to 0, so seeing 0 while AdGuard answers means a person turned it off on
-      # purpose -- honour that and stop treating AdGuard as the target, rather
-      # than re-enabling it behind their back every minute.
-      if [ "$(dns_enabled)" != "1" ]; then
-        log "AdGuard Home answers but dns_enabled=0: treating as deliberate, holding DNS on dnsmasq"
-        write_state fallback operator 0
-        [ "$(current_port)" = "$FALLBACK_PORT" ] || apply_port "$FALLBACK_PORT"
-      else
-        [ "$(current_port)" = "$ADG_PORT" ] || {
-          log "restoring DNS to AdGuard Home on $ADG_PORT"
-          apply_port "$ADG_PORT"
-        }
-        write_state adguard - 0
-      fi
+      [ "$(current_port)" = "$ADG_PORT" ] || {
+        log "restoring DNS to AdGuard Home on $ADG_PORT"
+        apply_port "$ADG_PORT"
+      }
+      write_state adguard - 0
       ;;
     fallback)
       if [ "$REASON" = operator ]; then
