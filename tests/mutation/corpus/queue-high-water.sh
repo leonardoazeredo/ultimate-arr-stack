@@ -23,3 +23,12 @@ mutation queue-high-water-counts-non-nzbs \
   --test "queue-high-water: only .nzb files count" \
   --why "dropping the -name filter counts a partially written file, an operator's note and a stray directory as queue depth. The guard then trips early and stops a stack whose queue is actually below the mark -- a protection that fails closed, on a timer that runs every ten minutes, with the only evidence being a log line saying the outbox is deep when it is not" \
   --apply 'sed -i.bak "s@ -name .\*\.nzb.@@" "$F" && rm -f "$F.bak"'
+
+# --- the pipeline failure reaches the caller -------------------------------
+
+mutation queue-high-water-pipeline-failure-propagates \
+  --file scripts/lib/queue_high_water.sh \
+  --bats tests/lib-queue-high-water.bats \
+  --test "queue-high-water: an unreadable outbox reads as zero and does not abort the caller" \
+  --why "both producers run under 'set -euo pipefail' and assign this straight into a command substitution. An existing-but-unreadable outbox makes 'find' exit 1, pipefail carries it up the pipeline and 'set -e' ends the producer pass -- so the guard against an overloaded host takes the timer down instead, and the log's last line is a depth count rather than an error anyone can act on. The documented contract is 'never fails', and this is the entry that says so mechanically" \
+  --apply 'sed -i.bak "s@ || true@@g" "$F" && rm -f "$F.bak"'

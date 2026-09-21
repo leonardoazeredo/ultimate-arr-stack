@@ -76,6 +76,8 @@ DEFAULT_COOLDOWN_HOURS=6
 
 # shellcheck source=scripts/lib/env-file.sh
 . "${SCRIPT_DIR}/lib/env-file.sh"
+# shellcheck source=scripts/lib/queue_high_water.sh
+. "${SCRIPT_DIR}/lib/queue_high_water.sh"
 
 APPLY=false
 VERBOSE=false
@@ -160,6 +162,19 @@ else
   echo "Mode: DRY RUN (limit ${LIMIT} season(s)/run, film cooldown ${COOLDOWN}h)"
 fi
 echo "========================================"
+
+# Queued searches become NZBs, and every NZB becomes local I/O for the
+# blackhole. The backlog this walks was measured at 4,614 missing episodes
+# across 71 series against a drain of about 24 releases an hour, so a deep
+# outbox means this pass is queueing work the host cannot absorb.
+MEDIA_ROOT_VALUE="$(env_value "$ENV_FILE" MEDIA_ROOT || true)"
+NZB_DIR="${USENET_NZB_DIR:-${MEDIA_ROOT_VALUE:-$NAS_STACK_DIR/data}/usenet/blackhole/nzb}"
+OUTBOX_NOW="$(outbox_depth "$NZB_DIR")"
+if outbox_over_high_water "$NZB_DIR"; then
+  echo "Outbox: $OUTBOX_NOW NZBs waiting (mark ${QUEUE_HIGH_WATER}); skipping this pass"
+  exit 0
+fi
+echo "Outbox: $OUTBOX_NOW NZBs waiting (mark ${QUEUE_HIGH_WATER})"
 
 SONARR_KEY=$(env_value "$ENV_FILE" SONARR_API_KEY || true)
 RADARR_KEY=$(env_value "$ENV_FILE" RADARR_API_KEY || true)

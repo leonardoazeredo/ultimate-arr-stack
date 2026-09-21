@@ -41,3 +41,12 @@ mutation backlog-search-reaches-for-the-unbounded-command \
   --test "^backlog-search: the script never shells out to an unbounded arr command" \
   --why "MissingEpisodeSearch searches the whole backlog in one command, cannot be cancelled once started, and had to be killed by restarting Sonarr on 2026-09-13. This entry proves the guard that keeps the unbounded command out of the script can actually fail" \
   --apply 'perl -pi -e "s/^        python3 /        python3 MissingEpisodeSearch /" "$F"'
+
+# --- the queue check is not reached ----------------------------------------
+
+mutation backlog-search-queue-check-removed \
+  --file scripts/backlog-search.sh \
+  --bats tests/backlog-search.bats \
+  --test "backlog-search: a deep outbox stands the pass down" \
+  --why "the call site is the load-bearing half: the library can answer whether the outbox is deep, but only this line acts on it. With the check gone the four-hourly sweep keeps queueing a whole backlog slice -- 4,614 missing episodes across 71 series, measured -- into an outbox the drain clears at about 24 releases an hour, and every one of those NZBs becomes multi-GB local I/O. The library's own tests stay green, so nothing else notices" \
+  --apply 'perl -0777 -pi -e "s/\Qif outbox_over_high_water \E.*?\nfi\n//s" "$F"'

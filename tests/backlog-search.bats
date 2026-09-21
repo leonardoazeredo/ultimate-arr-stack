@@ -199,3 +199,21 @@ setup() {
         "$REPO_ROOT/scripts/backlog-search.sh"
     assert_failure
 }
+
+# --- the outbox high-water gate --------------------------------------------
+
+@test "backlog-search: a deep outbox stands the pass down" {
+    # Same coupling as the stremio sync, and a bigger unit of work: this pass
+    # queues a whole slice of a backlog the log measured at 4,614 episodes
+    # across 71 series against a drain of about 24 releases an hour.
+    printf 'MEDIA_ROOT=%s/media\n' "$WORK" >> "$ENV"
+    mkdir -p "$WORK/media/usenet/blackhole/nzb"
+    local i
+    for ((i = 0; i < 50; i++)); do
+        : > "$WORK/media/usenet/blackhole/nzb/Rel-$i-GRP.nzb"
+    done
+
+    run "$RUN" --apply
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"skipping this pass"* ]]
+}

@@ -74,3 +74,18 @@ seed_outbox() {
     # what the queue reached on 2026-09-20; this is what it is allowed to reach.
     [ "$QUEUE_HIGH_WATER" = "50" ]
 }
+
+@test "queue-high-water: an unreadable outbox reads as zero and does not abort the caller" {
+    # Both producers run under `set -euo pipefail` and assign this straight
+    # into a command substitution. An existing-but-unreadable directory made
+    # `find` exit 1, which pipefail propagated and `set -e` turned into a dead
+    # producer timer -- a guard that stops the pass it exists to pace. The
+    # documented contract is "never fails", so this pins it.
+    mkdir -p "$OUTBOX"
+    chmod 000 "$OUTBOX"
+    run bash -c 'set -euo pipefail; . "$1"; X="$(outbox_depth "$2")"; printf "depth=%s" "$X"' \
+        _ "$LIB" "$OUTBOX"
+    chmod 755 "$OUTBOX"
+    [ "$status" -eq 0 ]
+    [ "$output" = "depth=0" ]
+}

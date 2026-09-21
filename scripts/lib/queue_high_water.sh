@@ -37,7 +37,12 @@ QUEUE_HIGH_WATER="${QUEUE_HIGH_WATER:-50}"
 outbox_depth() {
   local dir="${1-}"
   [[ -n "$dir" && -d "$dir" ]] || { printf '0'; return 0; }
-  find "$dir" -maxdepth 1 -type f -name '*.nzb' 2>/dev/null | wc -l | tr -d ' '
+  # `|| true` on the pipeline, because both callers run under `set -euo
+  # pipefail` and assign this straight into a command substitution. `find`
+  # exits 1 on a directory it cannot read -- existing but not searchable --
+  # and pipefail propagated that into a dead producer timer. The stdout is
+  # still what the substitution captures; only the exit status is neutralised.
+  find "$dir" -maxdepth 1 -type f -name '*.nzb' 2>/dev/null | wc -l | tr -d ' ' || true
 }
 
 # 0 (true) when a producer should stand down for this pass.
