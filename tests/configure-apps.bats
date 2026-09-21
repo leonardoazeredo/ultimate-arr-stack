@@ -2,14 +2,14 @@
 # scripts/configure-apps.sh — the API-driven app configurator.
 #
 # This is the most destructive script in the repo that a test is allowed near:
-# it POSTs configuration into five live services and restarts two containers.
+# it POSTs configuration into four live services and restarts one container.
 # Everything here runs behind tests/helpers/stubs.bash, and the headline test is
 # the one that drives the WHOLE script with --dry-run and asserts that forbid()
 # was never tripped — i.e. that the dry-run gate really does sit in front of
 # every mutation, rather than in front of most of them.
 #
 # The script is sourced rather than executed. Its `main` runs only under the
-# BASH_SOURCE guard, so sourcing gives direct access to the eight functions the
+# BASH_SOURCE guard, so sourcing gives direct access to the seven functions the
 # refactor split out.
 
 setup() {
@@ -361,8 +361,8 @@ EOF
 # --------------------------------------------------------- the dry-run boundary
 
 @test "configure-apps: a full --dry-run run reaches no mutating operation at all" {
-    # THE test in this file. Every configure_* function has its own dry-run
-    # early return; this drives all five through main and asserts the harness
+    # The test in this file. Every configure_* function has its own dry-run
+    # early return; this drives all four through main and asserts the harness
     # never had to stop anything. A per-function assertion would pass even if
     # one function's gate were in the wrong place.
     echo sabnzbd >> "$FIX/running"
@@ -373,14 +373,13 @@ EOF
     assert_output --partial "[dry-run] Would:"
 }
 
-@test "configure-apps: --dry-run touches nothing in the arrs, Bazarr or Pi-hole" {
+@test "configure-apps: --dry-run touches nothing in the arrs or Bazarr" {
     run "$DRIVER" main --dry-run
     assert_success
     # The named mutations, one per service, asserted on the argv actually used.
     assert_stub_not_called curl "rootfolder"
     assert_stub_not_called curl "downloadclient"
     assert_stub_not_called docker "restart"
-    assert_stub_not_called docker "pihole-FTL"
     assert_nothing_forbidden
 }
 
@@ -388,7 +387,6 @@ EOF
     run "$DRIVER" main --dry-run
     assert_output --partial "Would: Add root folder /data/media/tv"
     assert_output --partial "Would: Add root folder /data/media/movies"
-    assert_output --partial "Would: Set Pi-hole upstream DNS"
 }
 
 @test "configure-apps: main stops at prerequisites and configures nothing" {
