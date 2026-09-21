@@ -111,21 +111,26 @@ targets_used() { grep -oE 'to-ports [0-9]+' "$IPT_LOG" | awk '{print $2}' | sort
     [ "$(cat "$PORT_FILE")" = "53" ]
 }
 
-@test "firewall-user: every client bridge is redirected, on both transports" {
+@test "firewall-user: every client interface is redirected, on both transports" {
     port_file 3053
     dig_answers
 
     bash "$FIREWALL"
 
+    # The list is derived here from the same set the include carries, and the
+    # total is computed from it rather than written as a number: a hardcoded 10
+    # was correct until the tailnet joined, and would have been "fixed" by
+    # bumping it rather than by noticing which interface was missing.
+    local -a ifaces=(br-lan.1 br-lan.10 br-lan.20 br-lan.30 br-guest tailscale0)
     local iface
-    for iface in br-lan.1 br-lan.10 br-lan.20 br-lan.30 br-guest; do
+    for iface in "${ifaces[@]}"; do
         # RED if the interface list were narrowed — GL.iNet's own dispatcher
         # covers only br-lan.1 and br-guest, which is how three VLANs ended up
         # unfiltered once already.
         [[ "$(grep -c -- "-i $iface -p udp --dport 53" "$IPT_LOG")" -ge 1 ]]
         [[ "$(grep -c -- "-i $iface -p tcp --dport 53" "$IPT_LOG")" -ge 1 ]]
     done
-    [ "$(grep -c -- '-j REDIRECT' "$IPT_LOG")" -eq 10 ]
+    [ "$(grep -c -- '-j REDIRECT' "$IPT_LOG")" -eq "$(( ${#ifaces[@]} * 2 ))" ]
 }
 
 @test "firewall-user: already on dnsmasq, it does not probe AdGuard" {
@@ -156,4 +161,18 @@ targets_used() { grep -oE 'to-ports [0-9]+' "$IPT_LOG" | awk '{print $2}' | sort
     # deletes — and the loop has to stop once they are gone.
     [ "$(grep -c -- '-t nat -D PREROUTING' "$IPT_LOG")" -eq 2 ]
     [ "$(cat "$RULES_FILE")" = "0" ]
+}
+
+@test "firewall-user: the tailnet is redirected when it is in scope" {
+    port_file 3053
+    dig_answers
+
+    bash "$FIREWALL"
+
+    # RED while ARRDNS_IFACES omits tailscale0. A tailnet device would resolve
+    # through dnsmasq and get no ad blocking, unlike every device at home -- which
+    # is the state this was measured in on 2026-09-21: a tailnet query for a
+    # blocklisted name returned a real address while a bridge client got 0.0.0.0.
+    [[ "$(grep -c -- "-i tailscale0 -p udp --dport 53" "$IPT_LOG")" -ge 1 ]]
+    [[ "$(grep -c -- "-i tailscale0 -p tcp --dport 53" "$IPT_LOG")" -ge 1 ]]
 }
