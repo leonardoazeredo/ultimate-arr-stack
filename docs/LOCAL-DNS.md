@@ -209,6 +209,24 @@ off without taking internet access with it. AdGuard Home runs on
 `arr-stack-router`, listening on `:3053`, and **it is the resolver every client
 reaches** — `adguardhome.config.dns_enabled='1'`.
 
+**The admin UI is reachable from the maintenance VLAN only**, by design and
+deliberately. `zone_vlan10_input` allows a client VLAN to reach the router on DHCP
+and DNS alone, so `http://192.168.8.1:3000` answers from the maintenance VLAN and
+nowhere else. Measured 2026-09-21:
+
+```
+router itself                302
+pi1 - maintenance VLAN eth0  302
+pi1 - VLAN20 wlan0           000
+NAS - VLAN10                 000
+```
+
+That is the same posture as the router's own admin UI. Making it a `.lan` name
+behind Traefik would need a rule letting the NAS reach `router:3000` — which
+widens what a compromised container on the NAS can touch on the router, for one
+UI that is already reachable. Decided against on 2026-09-21; decide it explicitly
+if it ever matters.
+
 One thing about it is not obvious from the GL.iNet UI and cost real time to find:
 **the vendor's own AdGuard dispatch covers only `br-lan.1` and `br-guest`.** On
 this firmware `dns_enabled='1'` cannot put `vlan10`, `vlan20` or `vlan30` on
