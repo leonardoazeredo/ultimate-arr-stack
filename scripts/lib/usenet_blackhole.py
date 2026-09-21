@@ -169,6 +169,27 @@ STALE_STAGING_HOURS = 1.0
 # against a transcode; raise it only with a measurement of the NAS's own load.
 FETCH_WORKERS = 3
 
+# What each fetch caps its download at, in kilobytes per second, or 0 for no
+# cap at all.
+#
+# Bounding the pass was not enough. Measured 2026-09-21: one bounded pass still
+# wedged this NAS's btrfs pool -- `io full avg10` above 55%, a btrfs commit of
+# 87 seconds, the box unreachable over SSH -- while two concurrent curls pulled
+# ~17 MB/s and the pool absorbed ~50 MB/s of writes. A nocow staging directory
+# and lowered dirty-page ceilings shaved the peak without removing the stall,
+# so what is left is the rate the fetches pull at. This is that, and curl
+# applies it as `--limit-rate`.
+#
+# PER FETCH, not per pass. Three workers each honouring this still move up to
+# three times the number between them, so read it as the per-stream ceiling and
+# size the aggregate against FETCH_WORKERS. A reader who takes it for a total
+# picks a value three times too large.
+#
+# Zero is the resting value in this commit, on purpose: the number that
+# actually holds on this box is being measured against the live pool, and a
+# guess written here would cap every download from a constant nobody re-reads.
+DEFAULT_FETCH_RATE_LIMIT = 0
+
 # How long to stop submitting after TorBox refuses one with a 429.
 #
 # `createusenetdownload` is limited to 60 calls an hour, and a pass that finds a
@@ -1202,7 +1223,8 @@ def discard_nzb(nzb_dir, name):
         pass
 
 
-def fetch(torbox, key, job, watch_dir, staging_dir, out=print):
+def fetch(torbox, key, job, watch_dir, staging_dir, out=print,
+          fetch_rate_limit=DEFAULT_FETCH_RATE_LIMIT):
     """Download the finished release into the watch folder.
 
     Staged outside the watch folder and renamed into place, because the arr
@@ -1211,6 +1233,11 @@ def fetch(torbox, key, job, watch_dir, staging_dir, out=print):
     before its contents are written gets imported half-empty, and one that
     merely *sits* in the watch folder -- `.incoming-` included -- is read as a
     finished download.
+
+    `fetch_rate_limit` is curl's `--limit-rate`, in kilobytes per second, and
+    it caps THIS download alone: with FETCH_WORKERS going at once the pool
+    still takes the sum. 0 adds no flag at all, so a default pass invokes
+    exactly the curl it always did.
     """
     name = job["name"]
     dest = os.path.join(watch_dir, name)
@@ -1238,8 +1265,19 @@ def fetch(torbox, key, job, watch_dir, staging_dir, out=print):
         # download URLs carry the account token in their own query string, and
         # an argv copy is readable by anything on the box through
         # /proc/<pid>/cmdline -- the same leak the shell wrapper used to have.
+        #
+        # `--limit-rate` is the only flag that varies, and only above 0: the
+        # off state has to stay the exact command this ran before the cap
+        # existed, so nothing is added for it.
+        argv = ["curl", "-sS", "-f", "-L", "--max-time", "3600"]
+        if fetch_rate_limit > 0:
+            # `k` is curl's own kilobyte suffix. The value is per fetch and not
+            # a budget for the pass: FETCH_WORKERS of these run at once, so the
+            # pool takes up to that many times this rate.
+            argv += ["--limit-rate", f"{fetch_rate_limit}k"]
+        argv += ["--config", "-"]
         subprocess.run(
-            ["curl", "-sS", "-f", "-L", "--max-time", "3600", "--config", "-"],
+            argv,
             input=f'url = "{quoted(link)}"\noutput = "{quoted(zip_path)}"\n',
             check=True,
             capture_output=True,
@@ -1322,7 +1360,8 @@ def sweep_staging(staging_dir, keep, older_than_hours=STALE_STAGING_HOURS,
     return removed
 
 
-def _fetch_one(torbox, key, job, watch_dir, staging_dir):
+def _fetch_one(torbox, key, job, watch_dir, staging_dir,
+               fetch_rate_limit=DEFAULT_FETCH_RATE_LIMIT):
     """Fetch one release, keeping its output to itself.
 
     `fetch` narrates as it goes, and those lines would interleave into
@@ -1332,7 +1371,13 @@ def _fetch_one(torbox, key, job, watch_dir, staging_dir):
     """
     lines = []
     try:
-        ok = fetch(torbox, key, job, watch_dir, staging_dir, out=lines.append)
+        # Passed only when there is one, for the same reason `fetch` adds no
+        # curl flag at 0: the off state invokes exactly the call this code made
+        # before the cap existed.
+        extra = ({"fetch_rate_limit": fetch_rate_limit}
+                 if fetch_rate_limit > 0 else {})
+        ok = fetch(torbox, key, job, watch_dir, staging_dir, out=lines.append,
+                   **extra)
         return ok, lines, None
     except Exception as err:  # noqa: BLE001 - classified by the caller
         return False, lines, err
@@ -1341,7 +1386,7 @@ def _fetch_one(torbox, key, job, watch_dir, staging_dir):
 def run(nzb_dir, watch_dir, staging_dir, state_path, failed_log, api_key,
         apply_changes=False, timeout_hours=24.0, stall_hours=4.0, verbose=False,
         out=print, arr_keys=None, report_failures=False, report_dry_run=False,
-        max_inflight=0):
+        max_inflight=0, fetch_rate_limit=DEFAULT_FETCH_RATE_LIMIT):
     """One pass: submit new NZBs, poll in-flight jobs, fetch completed ones.
 
     `report_failures` is off by default and reported off in the summary, so a
@@ -1352,6 +1397,11 @@ def run(nzb_dir, watch_dir, staging_dir, state_path, failed_log, api_key,
 
     `max_inflight` is the operator's ceiling on jobs in flight; 0 is no
     ceiling, so the default pass behaves exactly as it did before the flag.
+
+    `fetch_rate_limit` caps each download in kilobytes per second, per fetch --
+    three of them run at once, so the pool can still take three times the
+    value. 0 is no cap, and it is the default: the number is measured on the
+    live pool, not chosen here.
     """
     state = load_state(state_path)
 
@@ -1506,7 +1556,7 @@ def run(nzb_dir, watch_dir, staging_dir, state_path, failed_log, api_key,
         with ThreadPoolExecutor(max_workers=FETCH_WORKERS) as pool:
             pending = {
                 pool.submit(_fetch_one, torbox, key, state["jobs"][key],
-                            watch_dir, staging_dir): (key, name)
+                            watch_dir, staging_dir, fetch_rate_limit): (key, name)
                 for key, name in to_fetch
             }
             for future in as_completed(pending):
@@ -1585,6 +1635,27 @@ def non_negative_int(value):
     return count
 
 
+def fetch_rate_limit_kbps(value):
+    """argparse type for --fetch-rate-limit: a whole number of kB/s, not negative.
+
+    Zero is the off switch and is accepted, which is where this parts company
+    with `positive_hours`: there, zero is the value that fires the stall rule on
+    every job at once, while here it is curl's `--limit-rate` left off, which is
+    the behaviour this stack ran before the flag. A negative number is not a
+    rate at all: it would reach curl as `-Nk`, and a download that came back
+    uncapped, or failed outright, would be discovered from the pool's pressure
+    rather than at the argument.
+    """
+    try:
+        kbps = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a whole number: {value!r}")
+    if kbps < 0:
+        raise argparse.ArgumentTypeError(
+            f"must not be negative, got {value!r}")
+    return kbps
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("nzb_dir")
@@ -1601,6 +1672,13 @@ def main(argv=None):
     parser.add_argument("--max-inflight", type=non_negative_int, default=0,
                         help="stop submitting once this many jobs are in "
                              "flight (default: 0, no ceiling)")
+    parser.add_argument("--fetch-rate-limit", type=fetch_rate_limit_kbps,
+                        default=DEFAULT_FETCH_RATE_LIMIT,
+                        help=f"cap each download at this many kilobytes per "
+                             f"second, PER FETCH: {FETCH_WORKERS} downloads "
+                             f"run at once, so the pass can still pull "
+                             f"{FETCH_WORKERS} times this value "
+                             f"(default: 0, no cap)")
     parser.add_argument("--verbose", "-v", action="store_true")
     parser.add_argument("--report-failures", action="store_true",
                         help="tell the owning arr when a release fails for good")
@@ -1638,6 +1716,7 @@ def main(argv=None):
             report_failures=args.report_failures,
             report_dry_run=args.report_dry_run,
             max_inflight=args.max_inflight,
+            fetch_rate_limit=args.fetch_rate_limit,
         )
     except StateError as err:
         # One line, not a traceback: whoever reads the timer's log needs to know

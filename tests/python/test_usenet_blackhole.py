@@ -1681,6 +1681,141 @@ def test_a_permanent_failure_in_a_batch_drops_only_that_release(tmp_path, monkey
     assert "no unpacker" in open(failed_log).read()
 
 
+# --- the fetch rate limit --------------------------------------------------
+#
+# Measured 2026-09-21: a pass already bounded to FETCH_WORKERS releases still
+# wedged this NAS's btrfs pool -- io full avg10 above 55%, an 87-second btrfs
+# commit, the box unreachable over SSH -- with two curls pulling ~17 MB/s into
+# a pool absorbing ~50 MB/s of writes. The bound on the pass, the nocow
+# staging directory and the lowered dirty-page ceilings each shave the peak;
+# none removes the stall. The bytes per second the fetches pull is the
+# quantity left, and it goes to curl as --limit-rate.
+
+# The download command exactly as it stood before the flag, written out rather
+# than derived from the module. Off has to mean this list and nothing else, so
+# deriving it from the code under test would assert nothing.
+CURL_ARGV_WITHOUT_A_CAP = ["curl", "-sS", "-f", "-L", "--max-time", "3600",
+                           "--config", "-"]
+
+
+def serve_zip_recording_argv(monkeypatch, archive):
+    """`serve_zip`, and every argv the download curl was invoked with.
+
+    The same stub, one extra fact: a rate limit exists only as a flag on that
+    argv, so the test has to read it there.
+    """
+    seen = []
+
+    def fake_run(argv, **kwargs):
+        import shutil
+        seen.append(argv)
+        shutil.copy(str(archive), config_output(kwargs.get("input", "")))
+        return type("R", (), {"returncode": 0, "stderr": ""})()
+
+    monkeypatch.setattr(m.subprocess, "run", fake_run)
+    return seen
+
+
+def one_release_to_fetch(tmp_path):
+    """One completed job and a zip the download curl copies into place."""
+    nzb_dir, watch, state_path, listing = several_jobs(tmp_path, 1)
+    archive = tmp_path / "p.zip"
+    make_zip(str(archive), {"Rel-0-GRP/ep.mkv": b"v"})
+    return nzb_dir, watch, state_path, listing, archive
+
+
+def test_a_nonzero_fetch_rate_limit_reaches_the_download_curl(tmp_path, monkeypatch):
+    # Through run(), because the flag's only observable effect is the argv curl
+    # gets: a value that stops at run()'s signature, or at _fetch_one's, leaves
+    # the flag inert while every test that calls fetch() directly still passes.
+    nzb_dir, watch, state_path, listing, archive = one_release_to_fetch(tmp_path)
+    seen = serve_zip_recording_argv(monkeypatch, archive)
+    monkeypatch.setattr(m, "TorBox", lambda *a, **k: FakeTorBox(list_result=listing))
+
+    m.run(str(nzb_dir), str(watch), str(tmp_path / "staging"), state_path,
+          str(tmp_path / "f.log"), "key", apply_changes=True, out=lambda *a: None,
+          fetch_rate_limit=256)
+
+    assert seen == [["curl", "-sS", "-f", "-L", "--max-time", "3600",
+                     "--limit-rate", "256k", "--config", "-"]]
+    assert m.load_state(state_path)["jobs"] == {}
+
+
+def test_a_zero_fetch_rate_limit_is_the_command_the_stack_always_ran(tmp_path, monkeypatch):
+    # 0 is the off switch, and off has to mean the download command from before
+    # the flag existed -- byte for byte, not merely "no cap that matters".
+    nzb_dir, watch, state_path, listing, archive = one_release_to_fetch(tmp_path)
+    seen = serve_zip_recording_argv(monkeypatch, archive)
+    monkeypatch.setattr(m, "TorBox", lambda *a, **k: FakeTorBox(list_result=listing))
+
+    m.run(str(nzb_dir), str(watch), str(tmp_path / "staging"), state_path,
+          str(tmp_path / "f.log"), "key", apply_changes=True, out=lambda *a: None,
+          fetch_rate_limit=0)
+
+    assert seen == [CURL_ARGV_WITHOUT_A_CAP]
+    assert m.load_state(state_path)["jobs"] == {}
+
+
+def test_the_default_pass_caps_nothing(tmp_path, monkeypatch):
+    # No argument at all, which is what the timer runs. The default is the off
+    # state, and the off state is that exact argv.
+    nzb_dir, watch, state_path, listing, archive = one_release_to_fetch(tmp_path)
+    seen = serve_zip_recording_argv(monkeypatch, archive)
+    monkeypatch.setattr(m, "TorBox", lambda *a, **k: FakeTorBox(list_result=listing))
+
+    m.run(str(nzb_dir), str(watch), str(tmp_path / "staging"), state_path,
+          str(tmp_path / "f.log"), "key", apply_changes=True, out=lambda *a: None)
+
+    assert seen == [CURL_ARGV_WITHOUT_A_CAP]
+
+
+def test_the_fetch_rate_limit_ships_off():
+    # The cap is a mitigation for a measurement, not a preference: 0 until the
+    # number that holds on the live box is measured. Pinned so a stray edit
+    # cannot ship a nonzero default, which every uncapped pass has been paying
+    # for.
+    assert m.DEFAULT_FETCH_RATE_LIMIT == 0
+
+
+def test_the_fetch_rate_limit_comes_from_the_flag(tmp_path, monkeypatch):
+    # Through main(), because the flag is the operator's only way in. A
+    # validator that parses and a run() that accepts are still inert if the two
+    # are never connected.
+    seen = {}
+    monkeypatch.setattr(m, "run", lambda *a, **k: seen.update(k) or 0)
+
+    rc = m.main([str(tmp_path), str(tmp_path), str(tmp_path),
+                 str(tmp_path / "state.json"), str(tmp_path / "f.log"),
+                 "--fetch-rate-limit", "512"])
+
+    assert rc == 0
+    assert seen["fetch_rate_limit"] == 512
+
+
+def test_a_negative_fetch_rate_limit_is_refused_at_the_argument(tmp_path, capsys):
+    # A negative rate is not a rate. curl reads `--limit-rate -1k` as its own
+    # kind of nonsense, and a download that silently ran uncapped -- or not at
+    # all -- is worse than the argument being refused where it was typed.
+    with pytest.raises(SystemExit) as caught:
+        m.main([str(tmp_path), str(tmp_path), str(tmp_path),
+                str(tmp_path / "state.json"), str(tmp_path / "f.log"),
+                "--fetch-rate-limit", "-1"])
+    assert caught.value.code != 0
+    assert "must not be negative" in capsys.readouterr().err
+
+
+def test_a_non_numeric_fetch_rate_limit_is_refused_at_the_argument(tmp_path, capsys):
+    # The empty string is the one a shell hands over from an unset variable,
+    # and it must not reach the download as a missing flag.
+    for bad in ("", "abc"):
+        with pytest.raises(SystemExit) as caught:
+            m.main([str(tmp_path), str(tmp_path), str(tmp_path),
+                    str(tmp_path / "state.json"), str(tmp_path / "f.log"),
+                    "--fetch-rate-limit", bad])
+        assert caught.value.code != 0
+    assert "not a whole number" in capsys.readouterr().err
+
+
 # --- stale staging ---------------------------------------------------------
 
 def test_sweep_staging_removes_an_orphan_older_than_the_threshold(tmp_path):
