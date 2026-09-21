@@ -1480,9 +1480,19 @@ def run(nzb_dir, watch_dir, staging_dir, state_path, failed_log, api_key,
     # Marked before the fetch runs, deliberately: an attempt that crashes the
     # process still counts as attempted, so a release that kills the pass is not
     # attempted again next time at the expense of one that has never been tried.
-    # The save_state that follows the fetch block persists it.
+    #
+    # The mark is written to disk here, before the first fetch, and not left to
+    # the save_state at the end of the function. That one is unreachable when a
+    # fetch never returns -- SIGKILL, or the OOM killer on a box carrying 30
+    # containers and unpacking a 38 GB release -- and the mark it would have
+    # written is then lost with the process. The release keeps an empty
+    # `last_fetch_attempt`, sorts back to the head of every later pass, and the
+    # pass dies the same way again: the head-of-line freeze this rotation exists
+    # to remove, surviving in the one case where nothing else bounds it.
     for key, _name in to_fetch:
         state["jobs"][key]["last_fetch_attempt"] = attempted_at
+    if to_fetch:
+        save_state(state_path, state)
     if len(owed) > len(to_fetch):
         out(f"  {len(owed)} releases are ready: fetching {len(to_fetch)} this pass, "
             f"{len(owed) - len(to_fetch)} wait for a later one")

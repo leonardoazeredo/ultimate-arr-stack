@@ -574,3 +574,17 @@ mutation usenet-blackhole-fetch-slice-pinned-to-the-head \
   --test "the extracted modules pass their pytest suite" \
   --why "removes the rotation, restoring a fixed head. A release whose fetch fails transiently is never bounded by poll -- it is already past the DONE branch -- so with FETCH_WORKERS such releases in front, the whole per-pass budget is consumed and every release behind them is never attempted. That is worse than slow: the outbox guard stands both producers down while the queue is deep, so the drain freezes and the queue stays deep. Measured 2026-09-20: passes fetched 2, 2, 1, 1, 0 and then zero for every pass after" \
   --apply 'sed -i.bak "/^    owed\.sort(key=lambda item:/d" "$F" && rm -f "$F.bak"'
+
+# --- the attempt mark never reaches disk ------------------------------------
+#
+# Marking before the fetch only means anything if the mark is durable before the
+# fetch. Left to the save_state at the end of `run()`, a fetch that never returns
+# -- SIGKILL, or the OOM killer -- takes the mark with it, and the release sorts
+# back to the head of every later pass.
+
+mutation usenet-blackhole-attempt-mark-not-written-before-the-fetch \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "removes the save_state that writes the attempt mark before the first fetch, leaving only the one at the end of the pass. A fetch killed by SIGKILL or the OOM killer never returns, so that one is unreachable and the mark is lost with the process: the release keeps an empty last_fetch_attempt, sorts to the head of every subsequent pass, and kills it again the same way. The rotation was added to stop exactly that freeze, and this is the case where it was still live -- a 7.5 GiB box carrying 30 containers and unpacking 38 GB releases" \
+  --apply 'sed -i.bak "s@^        save_state(state_path, state)\$@        pass@" "$F" && rm -f "$F.bak"'

@@ -2560,3 +2560,26 @@ def test_a_release_that_keeps_failing_does_not_hold_the_head_of_the_queue(tmp_pa
 
     remaining = {j["name"] for j in m.load_state(state_path)["jobs"].values()}
     assert remaining == stuck, "the slice did not rotate past the failing head"
+
+
+def test_an_attempt_survives_a_fetch_that_kills_the_pass(tmp_path, monkeypatch):
+    # The mark has to reach disk before the fetch starts, not at the pass's
+    # end. A fetch killed by SIGKILL or the OOM killer never returns, so a mark
+    # written only by the trailing save_state is lost -- and the release keeps
+    # an empty last_fetch_attempt, sorting to the head of every later pass and
+    # re-running the crash. That is the head-of-line freeze the rotation
+    # removes, in the case where it matters most.
+    nzb_dir, watch, state_path, listing = several_jobs(tmp_path, m.FETCH_WORKERS)
+
+    def killed(torbox, key, job, watch_dir, staging_dir, out=print):
+        raise SystemExit("killed mid-fetch")
+
+    monkeypatch.setattr(m, "fetch", killed)
+    monkeypatch.setattr(m, "TorBox", lambda *a, **k: FakeTorBox(list_result=listing))
+    with pytest.raises(SystemExit):
+        m.run(str(nzb_dir), str(watch), str(tmp_path / "staging"), state_path,
+              str(tmp_path / "f.log"), "key", apply_changes=True, out=lambda *a: None)
+
+    jobs = m.load_state(state_path)["jobs"]
+    assert jobs, "the pass lost every job; the fixture proves nothing"
+    assert all(j.get("last_fetch_attempt") for j in jobs.values())

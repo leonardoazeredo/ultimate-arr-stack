@@ -257,7 +257,8 @@ gate's own log shows it discriminating correctly — it skipped at 58.05% and
 watches the wrong window.
 
 **What they did not bound.** `--max-inflight 6` counts jobs TorBox has *not*
-finished (`scripts/lib/usenet_blackhole.py:882`). The local I/O comes from jobs
+finished (`jobs_at_torbox()` in `scripts/lib/usenet_blackhole.py`). The local I/O
+comes from jobs
 it *has* finished. At 21:22:32 the state file held 24 jobs, **21 of them
 complete**, so the guard read **3** at the exact moment 21 releases — two of
 them 30–38 GB — were owed a local download. The fetch set took all 21, with no
