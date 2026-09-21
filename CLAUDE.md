@@ -115,6 +115,15 @@ Three things here are expensive to rediscover, and all three cost real time:
   which once left a fallback pointing every client at a stopped AdGuard. fw3 also
   does not flush the built-in `PREROUTING` chain, so the include strips its own
   rules before re-inserting them; without that, every reload stacks another ten.
+- **A router reboot has a window, and `router/firewall.user` closes it.** The
+  firewall starts at `S19` and AdGuard Home at `S99`, with 48 init scripts and
+  `network` (`S20`) between them — so for that span every client is redirected at
+  a resolver that is not listening. Nothing else catches it: the watchdog needs
+  three consecutive failures, and cron starts at `S50`, inside the window. So the
+  include probes AdGuard before choosing it, and falls back to dnsmasq — writing
+  that back to `/etc/arrdns-port` so the file, the rules and the watchdog agree.
+  The watchdog restores AdGuard on its next tick. `tests/firewall-user.bats`
+  covers all of it with `iptables` and `dig` stubbed.
 - **A query the router sends to its own address is not a client test.** It
   originates locally, takes OUTPUT, and never meets the redirect, so it answers
   from dnsmasq while clients are being sent elsewhere. Two conclusions in this
