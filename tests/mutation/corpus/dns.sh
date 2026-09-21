@@ -408,3 +408,19 @@ mutation router-dns-client-adguard-port-off-by-a-key \
   --test "router-dns: the AdGuard port comes from the dns section, not the http one" \
   --why "Drops the key test and takes the first line of the dns section, which is bind_hosts:. The port then parses as empty, and since the live test skips on an empty parse, the check that every client actually reaches AdGuard would skip for ever while reporting nothing wrong - a guard whose only reachable outcome is 'skipped'" \
   --apply 'perl -0pi -e "s/section == \"dns:\" && \x241 == \"port:\" \{/section == \"dns:\" {/" "$F"'
+
+# --- scripts/lib/dns-matrix.sh: the .lan AAAA row ----------------------------
+#
+# The only `.lan` row the two resolvers answer differently, and the only one
+# where pinning a literal is wrong: dnsmasq answers `::` (address=/lan/::),
+# AdGuard Home answers NODATA. Both are correct and 3.3 chose NODATA as
+# sufficient, having measured that musl's failure mode is AAAA NXDOMAIN rather
+# than an empty answer. The rule accepts both and must still refuse NXDOMAIN,
+# which is the one answer that actually breaks a musl client.
+
+mutation dns-matrix-lan-aaaa-accepts-nxdomain \
+  --file scripts/lib/dns-matrix.sh \
+  --bats tests/lib-dns-matrix.bats \
+  --test "dns-matrix: LAN_AAAA refuses NXDOMAIN" \
+  --why "Drops the status check from the LAN_AAAA rule, leaving 'no answer section is fine'. NXDOMAIN carries no answers, so it then satisfies the rule -- and NXDOMAIN on AAAA is precisely what musl turns into a hard resolution failure, the failure this whole row exists to catch. The AWS/musl trap in tests/alpine-dns-aaaa.bats only shows up through getaddrinfo, so a dig-level row that waves NXDOMAIN through removes the cheap early warning and leaves the expensive container test as the only thing standing between a broken .lan AAAA answer and the house" \
+  --apply 'perl -0pi -e "s/\[\[ \"\x24status\" == \"NOERROR\" \]\] \|\| return 1/:/" "$F"'

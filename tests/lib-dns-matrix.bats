@@ -161,3 +161,56 @@ seed_all_correct() {
     [ "$status" -eq 2 ]
     [[ "$output" == *"SKIP: cannot read fixture"* ]]
 }
+
+# --------------------------------------------------------------------------
+# The LAN_AAAA expectation — the one `.lan` row the two resolvers answer
+# differently, and the only one where pinning a literal would be wrong.
+#
+# dnsmasq (the fallback) holds `address=/lan/::` and answers the literal `::`.
+# AdGuard Home (the healthy path) answers NOERROR with no record, because its
+# DNS rewrites carry an IPv4 address only. Phase 3.3 settled this in favour of
+# NODATA, having measured that musl's hard failure is AAAA *NXDOMAIN* rather than
+# an empty answer. A row pinned to `::` would fail on the healthy path and pass
+# on the fallback, which is the exact inversion of what the row is for.
+#
+# These call the expectation directly rather than through a fixture: the question
+# is what the rule accepts, not how a fixture is parsed.
+
+@test "dns-matrix: LAN_AAAA accepts NODATA, which is what AdGuard Home answers" {
+    # RED if the rule demanded an answer section. AdGuard is what serves the
+    # house on the healthy path, so a rule that rejected NODATA would make the
+    # migration's own target state read as broken.
+    run dns_matrix_expectation_met LAN_AAAA NOERROR ""
+    [ "$status" -eq 0 ]
+}
+
+@test "dns-matrix: LAN_AAAA accepts the literal :: that dnsmasq answers" {
+    # RED if the rule were narrowed to NODATA alone. This is the watchdog's
+    # fallback state, and a house running on dnsmasq in an incident must not be
+    # scored against a rule that only the healthy resolver satisfies.
+    run dns_matrix_expectation_met LAN_AAAA NOERROR "::"
+    [ "$status" -eq 0 ]
+}
+
+@test "dns-matrix: LAN_AAAA refuses NXDOMAIN" {
+    # The whole point of the row: NXDOMAIN on AAAA is what musl turns into a hard
+    # resolution failure. RED if the status check were dropped, because NXDOMAIN
+    # carries no answers and would then satisfy the "no answer is fine" arm.
+    run dns_matrix_expectation_met LAN_AAAA NXDOMAIN ""
+    [ "$status" -eq 1 ]
+}
+
+@test "dns-matrix: LAN_AAAA refuses an unreachable resolver" {
+    # ERROR is "dig never reached anything", which must never read as an answer.
+    # RED if the rule accepted anything that was not NXDOMAIN.
+    run dns_matrix_expectation_met LAN_AAAA ERROR ""
+    [ "$status" -eq 1 ]
+}
+
+@test "dns-matrix: LAN_AAAA refuses an .lan name pointing at some other address" {
+    # RED if the answer set were not checked at all. A `.lan` name that resolves
+    # to an undeclared IPv6 address is a real misconfiguration, not a variant of
+    # `::`.
+    run dns_matrix_expectation_met LAN_AAAA NOERROR "2001:db8::1"
+    [ "$status" -eq 1 ]
+}

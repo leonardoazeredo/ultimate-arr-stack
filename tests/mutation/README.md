@@ -307,6 +307,7 @@ old "14 tests" claim went stale.
 - `duc-service/app/duc.cgi`
 - `duc-service/app/log.cgi`
 - `router/adguard-stage.sh`
+- `router/arrdns-watchdog.sh`
 - `scripts/adguard-configure.sh`
 - `scripts/arr-backup.sh`
 - `scripts/backup-prune.sh`

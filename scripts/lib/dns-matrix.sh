@@ -66,6 +66,32 @@ dns_matrix_expectation_met() {
             # either.
             [[ "$status" == "NOERROR" && -z "$answers" ]] && return 0
             ;;
+        LAN_AAAA)
+            # NOERROR carrying either `::` or nothing at all -- and never
+            # NXDOMAIN. This is the only .lan row the two resolvers answer
+            # differently, and the difference is deliberate.
+            #
+            # dnsmasq holds `address=/lan/::`, so it answers AAAA with the
+            # literal `::`. AdGuard Home's DNS rewrites carry an IPv4 address
+            # only, so it answers AAAA with NOERROR and no record (NODATA).
+            # Phase 3.3 of the migration plan decided the NODATA form is
+            # sufficient, and measured why: musl's hard failure is AAAA
+            # *NXDOMAIN*, not an empty answer. An AAAA query for a `.lan` name
+            # still resolves over IPv4 from a musl client under NODATA, which
+            # tests/alpine-dns-aaaa.bats asserts directly with a real container.
+            #
+            # So the requirement is "not NXDOMAIN", not "the literal `::`".
+            # Pinning `::` here would fail on the healthy path (AdGuard) and pass
+            # on the fallback path (dnsmasq) -- the exact inversion of what this
+            # row is for. Both accepted values are non-NXDOMAIN; NXDOMAIN and an
+            # unreachable resolver still fail.
+            [[ "$status" == "NOERROR" ]] || return 1
+            [[ -z "$answers" ]] && return 0
+            for answer in $answers; do
+                [[ "$answer" == "::" ]] || return 1
+            done
+            return 0
+            ;;
         *)
             # An address literal. Every answer has to be it, and there has to be
             # one: a resolver that returns the right address alongside a wrong

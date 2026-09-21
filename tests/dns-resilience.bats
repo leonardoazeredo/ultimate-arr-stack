@@ -80,7 +80,15 @@ setup() {
     LAN_NAME="${DNS_RESILIENCE_LAN_NAME:-sonarr.lan}"
     LAN_ADDR="${DNS_RESILIENCE_LAN_ADDR:-192.168.110.250}"
     BLOCKED_NAME="${DNS_RESILIENCE_BLOCKED_NAME:-doubleclick.net}"
-    LAN_AAAA="${DNS_RESILIENCE_LAN_AAAA:-::}"
+    # The `.lan` AAAA row is the one place the two resolvers legitimately answer
+    # differently: dnsmasq holds `address=/lan/::` and answers the literal `::`,
+    # while AdGuard Home answers NODATA because its DNS rewrites carry an IPv4
+    # address only. Phase 3.3 of the migration plan settled this in favour of
+    # NODATA, having measured that musl's hard failure is AAAA *NXDOMAIN* rather
+    # than an empty answer. LAN_AAAA accepts either and still refuses NXDOMAIN,
+    # which is the failure mode this row exists for. See the LAN_AAAA case in
+    # scripts/lib/dns-matrix.sh.
+    LAN_AAAA="${DNS_RESILIENCE_LAN_AAAA:-LAN_AAAA}"
 }
 
 # dns_matrix_ask <name> <qtype> <transport> — run the module's query and leave the
@@ -175,12 +183,14 @@ dns_matrix_require_both() {
 
 @test "dns-resilience: a .lan AAAA query gets an answer rather than NXDOMAIN" {
     require_lan_name
-    # Not merely "something came back". NXDOMAIN is an answer, and it is the one
-    # that breaks musl/Alpine clients: they treat AAAA NXDOMAIN as a hard failure
-    # rather than falling back to the A record. The expected literal is `::`,
-    # matching address=/lan/:: in the migration and the committed baseline.
+    # Not merely "something came back": NXDOMAIN is an answer, and it is the one
+    # that breaks musl/Alpine clients, which treat AAAA NXDOMAIN as a hard failure
+    # rather than falling back to the A record. What is NOT asserted is the
+    # literal `::` -- dnsmasq answers that, AdGuard Home answers NODATA, and 3.3
+    # decided NODATA is sufficient. LAN_AAAA accepts either, refuses NXDOMAIN,
+    # and refuses an unreachable resolver.
     dns_matrix_require "$LAN_NAME" AAAA udp "$LAN_AAAA" \
-        "the router's :53 did not answer $LAN_NAME AAAA with $LAN_AAAA (NXDOMAIN here is the failure mode that breaks musl/Alpine clients)"
+        "the router's :53 did not answer $LAN_NAME AAAA acceptably (NXDOMAIN here is the failure mode that breaks musl/Alpine clients; NODATA and '::' are both fine)"
 }
 
 @test "dns-resilience: a blocked name is blocked via the router over both transports" {

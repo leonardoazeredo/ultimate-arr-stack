@@ -109,17 +109,42 @@ musl_what_the_router_said() {
         || fail "getaddrinfo for $LAN_NAME failed outright through the router (getent exited $rc) - this is the musl/AAAA case. The router answered: $(musl_what_the_router_said)"
 }
 
-@test "alpine-dns: the AAAA answer for a .lan name is an address, not NXDOMAIN" {
+@test "alpine-dns: the AAAA answer for a .lan name is not NXDOMAIN" {
     require_container_dns_vantage
 
-    # Parity with the recorded NAS behaviour (3.3). The NAS answers `::`; the
-    # assertion is that an AAAA answer exists at all, because NXDOMAIN here is
-    # what breaks the musl client in the test above.
+    # What this row is for: musl treats an AAAA NXDOMAIN as a hard failure, so
+    # the AAAA query for a `.lan` name has to come back answered rather than
+    # refused. It must NOT be pinned to the literal `::`.
+    #
+    # The two resolvers answer this row differently and both are correct.
+    # dnsmasq, the fallback underneath, holds `address=/lan/::` and answers the
+    # literal `::`. AdGuard Home, the healthy path, answers NOERROR with no
+    # record at all, because its DNS rewrites carry an IPv4 address only. Phase
+    # 3.3 of the migration plan decided the NODATA form is sufficient, and
+    # measured why: musl's hard failure is AAAA *NXDOMAIN*, not an empty answer.
+    # Pinning `::` here would therefore fail on the healthy path and pass on the
+    # fallback -- the exact inversion of what this row is for. See the LAN_AAAA
+    # case in scripts/lib/dns-matrix.sh.
+    #
+    # Measured through the router on 2026-09-21, Alpine 3.20 with `--dns <router>`:
+    #   nslookup -type=AAAA sonarr.lan  ->  NODATA, rc 0
+    #   nslookup -type=A    sonarr.lan  ->  192.168.110.250
+    #   getent hosts        sonarr.lan  ->  192.168.110.250, rc 0
     run musl_sh "nslookup -type=AAAA $LAN_NAME"
+
     [[ "$output" != *"NXDOMAIN"* ]] \
         || fail "AAAA for $LAN_NAME came back NXDOMAIN, which musl treats as a hard failure: $output"
-    [[ "$output" == *"::"* ]] \
-        || fail "AAAA for $LAN_NAME did not return the recorded '::' parity answer: $output"
+    [[ "$output" != *"no servers could be reached"* && "$output" != *"timed out"* ]] \
+        || fail "the AAAA query for $LAN_NAME never reached a resolver, so nothing about .lan AAAA was tested: $output"
+
+    # If a record came back at all it has to be `::`, the only AAAA value the
+    # fixture records for a `.lan` name. Any other address would mean the name
+    # points somewhere nobody declared.
+    if [[ "$output" == *"Name:"* ]]; then
+        [[ "$output" == *"::"* ]] \
+            || fail "$LAN_NAME answered AAAA with a record that is not the recorded '::': $output"
+    fi
+    echo "$output"
 }
 
 # NOT tested, and why: that a Docker container can `connect()` to `::` and reach

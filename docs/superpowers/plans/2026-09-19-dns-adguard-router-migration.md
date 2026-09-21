@@ -454,19 +454,19 @@ The empty `/tmp/dnsmasq.d` next to a live 19-record rendered config is the proof
 
 Order by blast radius, smallest first. **The maintenance pool `lan` goes first**, not last and not omitted: it carries the fewest clients, an error there is visible immediately from pi1, and proceeding without it leaves the break-glass host pointing at the NAS. Then `vlan30`, `vlan20`, and `vlan10` last, because it holds the NAS itself and everything that depends on it. `guest` advertises no IPv4 resolver and is already on the router; leave it alone.
 
-- [ ] **5.1 Shorten the lease time** on the pool being moved (`12h` → `5m`) so both cutover **and rollback** propagate in minutes instead of half a day. Apply with `uci commit dhcp && /etc/init.d/dnsmasq reload`.
+- [x] **5.1 Shorten the lease time** on the pool being moved (`12h` → `5m`) so both cutover **and rollback** propagate in minutes instead of half a day. Apply with `uci commit dhcp && /etc/init.d/dnsmasq reload`. — Applied to all four pools on 2026-09-21.
 
-- [ ] **5.2 Move one pool**, by setting its `dhcp_option 6` to that VLAN's router address. Do not delete the option yet: setting it explicitly keeps the change visible and one command from reverting.
+- [x] **5.2 Move one pool**, by setting its `dhcp_option 6` to that VLAN's router address. Do not delete the option yet: setting it explicitly keeps the change visible and one command from reverting. — All four, on 2026-09-21: `lan`→192.168.8.1, `vlan10`→192.168.110.1, `vlan20`→192.168.120.1, `vlan30`→192.168.130.1.
 
-- [ ] **5.3 Verify from a real client on that VLAN:** public name resolves, `.lan` name resolves, a blocked name is blocked, and both transports work. Confirm the answer matrix for that client matches the baseline.
+- [x] **5.3 Verify from a real client on that VLAN:** public name resolves, `.lan` name resolves, a blocked name is blocked, and both transports work. Confirm the answer matrix for that client matches the baseline. — Verified from the NAS (VLAN10) and pi1 (VLAN20) on 2026-09-21.
 
-- [ ] **5.4 Observe for a fixed 24 hours** before touching the next pool. Do not tie the soak to the lease duration: 5.1 shortened it to 5 minutes, so "one full lease cycle" is not an observation window.
+- [ ] **5.4 Observe for a fixed 24 hours** before touching the next pool. Do not tie the soak to the lease duration: 5.1 shortened it to 5 minutes, so "one full lease cycle" is not an observation window. — **Deliberately not done, and the plan's sequencing was wrong here.** See Ruling D1 below: this phase's premise was that resolution was healthy and the risk was in moving it. On 2026-09-21 resolution was *already* down for the whole house, because every client pointed at a NAS that was unplugged. There was no healthy baseline to soak. All four pools moved in one action as outage recovery, not as a staged migration.
 
-- [ ] **5.5 Repeat for `lan`, `vlan30`, `vlan20`, then `vlan10`.** All four. The pool list here, in task 0.4, and in the Target architecture must agree; an earlier draft listed three pools in one place and four in another.
+- [x] **5.5 Repeat for `lan`, `vlan30`, `vlan20`, then `vlan10`.** All four. The pool list here, in task 0.4, and in the Target architecture must agree; an earlier draft listed three pools in one place and four in another. — All four moved together (Ruling D1). Backup of the pre-move state: `/root/dns-pools-backup-20260921-122846.txt`.
 
-- [ ] **5.6 Delete the now-redundant `dhcp_option 6` from all four pools** and reload dnsmasq, so dnsmasq advertises itself. This is the state the Target architecture describes and no earlier step produces. Verify by renewing a lease and confirming the client still receives the router.
+- [x] **5.6 Delete the now-redundant `dhcp_option 6` from all four pools** and reload dnsmasq, so dnsmasq advertises itself. This is the state the Target architecture describes and no earlier step produces. Verify by renewing a lease and confirming the client still receives the router. — Applied 2026-09-21. The rendered dnsmasq config now carries no `dhcp-option=<pool>,6` line for any pool, so dnsmasq advertises its own address, which is the same address the deleted option named (each pool's own VLAN gateway) — the change is client-invisible by construction. **The literal forced-renewal half was not performed**: pi1 needs a sudo password nobody has, and the NAS's only interface is the one it depends on, so there was no client that could be made to renew safely. Live evidence instead: dnsmasq is demonstrably serving these pools (a real `DHCPDISCOVER`/`DHCPOFFER` on `br-lan.1` at 13:32:35), and both real clients verified in 5.3 are resolving correctly through the router with `dhcp_option 6` already absent from their pools' configuration.
 
-- [ ] **5.7 Restore lease times to `12h`** once all pools are moved and stable.
+- [x] **5.7 Restore lease times to `12h`** once all pools are moved and stable. — All six pools are `12h` as of 2026-09-21 13:30.
 
 **Gate 5.** Every pool's clients resolve correctly against the router, with `dhcp_option 6` removed and each pool reverted to `12h`. The NAS resolver is still running and still correct, so **any pool can be reverted with one script run**. Rollback trigger: a pool's clients fail any row of the matrix → run `scripts/dns-rollback.sh`, which restores all four pools and reloads dnsmasq.
 
@@ -476,9 +476,9 @@ Order by blast radius, smallest first. **The maintenance pool `lan` goes first**
 
 Client-transparent: the address they query does not change, only which process answers it. Expect one sub-second DNS blip from the firewall reload.
 
-- [ ] **6.1 Capture the current `adg_redirect` chain state** so the flip's effect is observable and reversible.
+- [x] **6.1 Capture the current `adg_redirect` chain state** so the flip's effect is observable and reversible. — Captured; `adg_redirect` is declared unconditionally by `/etc/firewall.dns_order` and holds nothing while `dns_enabled='0'`, which is the baseline this plan's 1.2 assumed.
 
-- [ ] **6.2 Flip.**
+- [x] **6.2 Flip.** — Done 2026-09-21. `adg_redirect` then held `tcp`+`udp` `REDIRECT --to-ports 3053`.
 
 ```bash
 uci set adguardhome.config.dns_enabled='1'
@@ -486,9 +486,9 @@ uci commit adguardhome
 /etc/init.d/firewall reload
 ```
 
-- [ ] **6.3 Re-run the full acceptance set**: the parity harness against `:53` now (not 3053), the per-VLAN checks **from real clients on every VLAN — this is the first point at which that is possible**, blocking, `.lan`, the AAAA/musl test, and `tests/e2e/dns.spec.ts`.
+- [x] **6.3 Re-run the full acceptance set**: the parity harness against `:53` now (not 3053), the per-VLAN checks **from real clients on every VLAN — this is the first point at which that is possible**, blocking, `.lan`, the AAAA/musl test, and `tests/e2e/dns.spec.ts`.
 
-- [ ] **6.4 Confirm the revert works, then revert it.** Flip `dns_enabled='0'`, reload, confirm resolution returns to dnsmasq, then flip back to `'1'`. A rollback path that has never been executed is a hypothesis, not a plan.
+- [x] **6.4 Confirm the revert works, then revert it.** Flip `dns_enabled='0'`, reload, confirm resolution returns to dnsmasq, then flip back to `'1'`. A rollback path that has never been executed is a hypothesis, not a plan. — **Executed for real, twice**, as part of Phase 7.4 on 2026-09-21: the watchdog fell back to dnsmasq and recovered, and a real VLAN10 client (the NAS) kept resolving throughout while blocking was correctly dropped. See Ruling D7 — the first watchdog version made the fallback *look* correct while leaving every rule pointed at a dead AdGuard, which is why this revert had to be observed from a client rather than from the router.
 
 **Gate 6.** AdGuard Home serves every client; the NAS resolver is idle but still running; the revert has been executed once for real and restored service both ways. Rollback trigger: any acceptance failure → `dns_enabled='0'` plus firewall reload, seconds of degraded blocking at worst, no loss of resolution.
 
@@ -498,23 +498,74 @@ uci commit adguardhome
 
 Phase 6 leaves a new exposure: `dnsmasq` still listens on `:53` and works, but the redirect sends every query to AdGuard Home. If AdGuard Home stops answering, the redirect black-holes DNS for the whole house.
 
-- [ ] **7.1 Add a periodic health check on the router** that queries AdGuard Home on 3053 and, on repeated failure, sets `dns_enabled='0'` and reloads the firewall — falling back to the resolver still running underneath. This is the difference between "AdGuard crashed" and "the house has no internet".
+- [x] **7.1 Add a periodic health check on the router** that queries AdGuard Home on 3053 and, on repeated failure, sets `dns_enabled='0'` and reloads the firewall — falling back to the resolver still running underneath. This is the difference between "AdGuard crashed" and "the house has no internet". — `/usr/sbin/arrdns-watchdog.sh`, from `/etc/crontabs/root` every minute; source in `router/arrdns-watchdog.sh`. It probes for a real A record, not for a listening socket, because a resolver that is up and cannot resolve is no better than a dead one. **The first version could not fire**: `dig +short` writes `;; communications error ... connection refused` to *stdout* and exits 0, so a non-empty capture read a stopped AdGuard as healthy. Observed difference on a closed port: old probe UP, new probe DOWN.
 
-- [ ] **7.2 Make it two-way, or say plainly that it is not.** As specified, the watchdog only ever disables. Gate 7 previously required restoration to happen "without manual steps", which nothing here provides. Either add re-enable after sustained recovery, or restate the gate as one-way with a documented manual restore step.
+- [x] **7.2 Make it two-way, or say plainly that it is not.** — Two-way, and round-tripped for real: fallback after three consecutive failures at 12:42:43, recovery after three consecutive successes at 12:46:00, both driven by cron and both logged to `/var/log/arrdns-watchdog.log`. As specified, the watchdog only ever disables. Gate 7 previously required restoration to happen "without manual steps", which nothing here provides. Either add re-enable after sustained recovery, or restate the gate as one-way with a documented manual restore step.
 
-- [ ] **7.3 Bound it.** Require consecutive failures, log every transition, and never fight a deliberate `dns_enabled='0'`.
+- [x] **7.3 Bound it.** Require consecutive failures, log every transition, and never fight a deliberate `dns_enabled='0'`. — Three failures to fall back, three successes to restore, a `mkdir` lock so a slow reload cannot overlap the next tick, and a state file that records why: a `dns_enabled='0'` seen while AdGuard answers is treated as a deliberate operator choice (`reason=operator`) and is not re-enabled behind their back. That arm is written and reasoned about but has not been exercised.
 
-- [ ] **7.4 Test it by making AdGuard Home genuinely unhealthy** and confirming DNS recovers and the watchdog reports why. A watchdog never observed firing is a guard of unknown capability.
+- [x] **7.4 Test it by making AdGuard Home genuinely unhealthy** and confirming DNS recovers and the watchdog reports why. A watchdog never observed firing is a guard of unknown capability. — Done, and it is what caught the probe bug in 7.1. After that fix: `dns_enabled=0 port=53 adg_redirect=0 rules=10 targets=53`, with a real VLAN10 client (the NAS) still resolving `github.com` and `sonarr.lan` while AdGuard was stopped, and blocking correctly dropped (`doubleclick.net` -> a real address rather than `0.0.0.0`). Recovery restored `dns_enabled=1 port=3053 adg_redirect=2 targets=3053` and blocking returned.
 
 **Gate 7.** Killing AdGuard Home leaves the house resolving, the watchdog records the transition, and the documented restore path (manual or automatic, per 7.2) returns serving to AdGuard Home.
+
+### Phase 5-7 outcome, 2026-09-21
+
+Gates 5, 6 and 7 pass. Three things in this phase were wrong when executed, and
+two of them were introduced during it rather than by the plan.
+
+**The redirect did not put the VLANs on AdGuard Home.** The rules added during
+the cutover matched `-d 192.168.110.246`, so they only caught clients still
+addressing the NAS. A client that renewed its lease asked its own gateway,
+reached dnsmasq, and got no ad blocking — so the migration was being quietly
+undone by lease renewal, one client every five minutes. `dns_enabled`,
+`adg_redirect`, the per-pool `dhcp_option 6` and the `:53` binds all read green
+throughout, because every one of them judges a piece and nothing judged the
+connection between them. The vendor `dns_dispatcher` is wired only for
+`br-lan.1` and `br-guest`, which the plan's Evidence never checked.
+
+**fw3 does not re-run `/etc/firewall.user` on reload.** It is
+`firewall.@include[0]` with no `reload` option, and the option defaults to off,
+while `/etc/firewall.dns_order` sets `reload='1'`. So `fw3 reload` rebuilt the
+vendor chain and left the include's rules untouched. That made the first
+watchdog leave `dns_enabled='1'` with an empty `adg_redirect`, and — worse — made
+a *fallback* leave all ten rules pointed at a stopped AdGuard. Both are fixed by
+`uci set firewall.@include[0].reload='1'`. fw3 also does not flush the built-in
+`PREROUTING` chain, so the include now strips its own rules before inserting them;
+without that, every reload stacked another ten.
+
+**The `.lan` AAAA row is a deliberate difference, and the Phase 1 tests did not
+know it.** 3.3 concluded `::` need not be reproduced, and the parity harness
+excuses that row — but `tests/alpine-dns-aaaa.bats` and `tests/dns-resilience.bats`
+both asserted the literal `::`. That could never pass once AdGuard was in the
+path, because AdGuard answers NODATA while dnsmasq answers `::`, which is why the
+suite has carried those two red rows. The requirement is *not NXDOMAIN*: musl
+turns AAAA NXDOMAIN into a hard resolution failure, and an empty NOERROR is not
+that. Measured through the router from Alpine 3.20:
+
+```
+nslookup -type=AAAA sonarr.lan  ->  NODATA, rc 0
+nslookup -type=A    sonarr.lan  ->  192.168.110.250
+getent hosts        sonarr.lan  ->  192.168.110.250, rc 0
+```
+
+Both rows now use a `LAN_AAAA` expectation that accepts `::` or NODATA and still
+refuses NXDOMAIN, an unreachable resolver, and an undeclared address. Pinning
+either literal alone would fail on one resolver and pass on the other.
+
+**5.6's client-renewal check was not performed literally.** No client that could
+safely be made to renew was reachable: pi1 needs a sudo password, and the NAS's
+only interface is the one it depends on. The change is client-invisible by
+construction — dnsmasq advertises its own address, which is the same address the
+deleted option named — and the rendered config carries no `dhcp-option` line for
+any pool. Recorded as a gap rather than dressed up.
 
 ---
 
 ### Phase 8 — Repoint the NAS's consumers
 
-- [ ] **8.1 `docker-compose.arr-stack.yml`** — gluetun's `DNS_ADDRESS` from `172.20.0.5` to `192.168.110.1`, drop `depends_on: pihole: service_healthy`.
-- [ ] **8.2 Cold-boot test, before merging anything.** Reboot the NAS with the router answering, confirm gluetun reaches healthy and VPN egress works with no manual intervention. This is the assumption the 2026-08-27 38-hour outage falsified; do not assume it holds. Check the ingest timer and queue depth first — a reboot with an armed timer over a large watch folder is how the 2026-09-18 stall started, and it is not a DNS fault worth diagnosing inside this phase. See *Running this in parallel with other work*.
-- [ ] **8.3 `docker-compose.utilities.yml:304`** — the `172.20.0.5` DNS entry.
+- [x] **8.1 `docker-compose.arr-stack.yml`** — gluetun's `DNS_ADDRESS` from `172.20.0.5` to `192.168.110.1`, drop `depends_on: pihole: service_healthy`. — Changed on the branch and validated with `docker compose config` (exit 0; rendered `DNS_ADDRESS: 192.168.110.1`, no `depends_on`). **Not deployed and not merged: 8.2 gates it.**
+- [ ] **8.2 Cold-boot test, before merging anything.** Reboot the NAS with the router answering, confirm gluetun reaches healthy and VPN egress works with no manual intervention. This is the assumption the 2026-08-27 38-hour outage falsified; do not assume it holds. Check the ingest timer and queue depth first — a reboot with an armed timer over a large watch folder is how the 2026-09-18 stall started, and it is not a DNS fault worth diagnosing inside this phase. See *Running this in parallel with other work*. — **Blocked on a decision, not on work.** It requires rebooting the NAS, which takes the household's media server down, so it is the user's call. Prerequisites are already satisfied: `usenet-blackhole.timer` is `disabled` on the NAS, so the armed-timer-during-reboot hazard this task warns about cannot occur.
+- [x] **8.3 `docker-compose.utilities.yml:304`** — the `172.20.0.5` DNS entry. — That entry belongs to `uptime-kuma`; repointed to `192.168.110.1`. Validated with `docker compose config`.
 - [ ] **8.4 `traefik/dynamic/local-services.yml`** — the `pihole-lan` route.
 - [ ] **8.5 `scripts/configure-apps.sh`** — stop configuring a Pi-hole upstream; retire or repoint.
 - [ ] **8.6 `scripts/lib/check-dns-duplicates.sh` and `scripts/lib/check-domains.sh`** — these read the NAS Pi-hole's config, and `check-dns-duplicates.sh` compares `02-local-dns.conf` against `pihole.toml` inside the container. Both stores are being retired, so the check goes with them; 3.5 is what replaces it. Do not retire them before 3.5 passes.

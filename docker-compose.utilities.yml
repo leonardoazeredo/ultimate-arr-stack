@@ -301,7 +301,10 @@ services:
     depends_on:
       - docker-socket-proxy
     dns:
-      - 172.20.0.5  # Pi-hole, so .lan domains resolve (e.g. homeassistant.lan notifications)
+      # The router, not the Pi-hole container. 172.20.0.5 lived on the NAS and
+      # went away with it; the router answers .lan and public names with or
+      # without the NAS powered on.
+      - 192.168.110.1  # Router, so .lan domains resolve (e.g. homeassistant.lan notifications)
     restart: always
     ports:
       - "3001:3001"  # Local network access only
