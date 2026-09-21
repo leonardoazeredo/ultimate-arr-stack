@@ -197,7 +197,22 @@ _fake_uci_body() {
     cat <<'BODY'
 [ "${1:-}" = "-q" ] && shift
 case "${1:-}" in
-    get) sed -n "s/^$2=//p" "$STUB_DIR/uci.state" | head -1 ;;
+    get)
+        # AGH_FLIP_DNS_ENABLED_ON_READ=<n> changes the flag on the nth read of
+        # it, which is the only way to reproduce "something else moved the house
+        # while this script was installing". The CLI reads it once before writing
+        # anything and once after, and only a difference between the two says so.
+        # The counting and the mutation live here; the value itself still comes
+        # out of uci.state, so the fixture stays the single source for it.
+        if [ "$2" = "adguardhome.config.dns_enabled" ] && [ -n "${AGH_FLIP_DNS_ENABLED_ON_READ:-}" ]; then
+            n=$(cat "$STUB_DIR/uci.reads" 2>/dev/null || echo 0)
+            n=$((n + 1))
+            printf '%s\n' "$n" > "$STUB_DIR/uci.reads"
+            if [ "$n" -eq "$AGH_FLIP_DNS_ENABLED_ON_READ" ]; then
+                printf 'adguardhome.config.dns_enabled=0\n' > "$STUB_DIR/uci.state"
+            fi
+        fi
+        sed -n "s/^$2=//p" "$STUB_DIR/uci.state" | head -1 ;;
     *) : ;;
 esac
 BODY
@@ -311,7 +326,10 @@ backup_count() {
     [[ "$output" == *"ok: sonarr.lan -> 192.168.110.250"* ]]
     [[ "$output" == *"ok: doubleclick.net -> 0.0.0.0"* ]]
     [[ "$output" == *"ok: example.com"* ]]
-    [[ "$output" == *"ok: dns_enabled is still 0"* ]]
+    # The value is asserted back, not the literal 0: this script must leave the
+    # dispatcher flag where it found it, and what it finds it at is 1 now that
+    # the migration is live. Asserting 0 here made a correct run print FAIL.
+    [[ "$output" == *"ok: dns_enabled is still 0, so this run did not move any client's queries"* ]]
 
     assert_nothing_forbidden
 }
@@ -423,13 +441,30 @@ backup_count() {
     [[ "$output" == *"example.com"* ]]
 }
 
-@test "adguard-configure: dns_enabled moving off 0 fails the run" {
-    # Phase 3 stages a resolver; the firewall redirect that would put it in
-    # every client's path is Phase 6's business.
+@test "adguard-configure: a live router whose flag is already 1 is not a failure" {
+    # The migration's end state, and the one that used to fail: Phase 3 asserted
+    # dns_enabled was still 0, so once the house genuinely moved onto AdGuard
+    # every correct run ended in FAIL immediately after installing the config.
+    # Reading it before the change and comparing after keeps the property that
+    # mattered -- this script does not move the house -- without pinning a value
+    # the migration deliberately changed.
+    # The state has to be written before the run, not passed as a prefix: the uci
+    # stub answers from $STUB_DIR/uci.state, which setup() seeds from DNS_ENABLED
+    # once, and a prefix on the call would arrive too late to reach it.
     printf 'adguardhome.config.dns_enabled=1\n' > "$STUB_DIR/uci.state"
     configure
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"ok: dns_enabled is still 1, so this run did not move any client's queries"* ]]
+}
+
+@test "adguard-configure: dns_enabled moving during the run fails it" {
+    # The tripwire the check exists for. The stub flips the value the moment the
+    # run asks for it the second time, which is what "something changed who
+    # answers while this script was writing config" looks like from here.
+    printf 'adguardhome.config.dns_enabled=1\n' > "$STUB_DIR/uci.state"
+    DNS_ENABLED=1 AGH_FLIP_DNS_ENABLED_ON_READ=2 configure
     [ "$status" -ne 0 ]
-    [[ "$output" == *"dns_enabled"* ]]
+    [[ "$output" == *"dns_enabled moved from"* ]]
 }
 
 @test "adguard-configure: a resolver that is a moment late is polled, not probed once" {

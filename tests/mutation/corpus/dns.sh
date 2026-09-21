@@ -174,7 +174,7 @@ mutation router-access-swallows-the-error-text \
 # Phase 4.1 teaches the router's dnsmasq the .lan address records. Every mutation
 # below is a way of reporting that the records were installed while the router
 # serves none of them, or of leaving a duplicate behind on the second run. All
-# five are scored against tests/dnsmasq-local-names.bats, which runs the real
+# six are scored against tests/dnsmasq-local-names.bats, which runs the real
 # script against a stubbed router: a fake uci, a fake /var/etc, and a fake
 # dnsmasq init that re-renders the config the way the real one does.
 
@@ -182,7 +182,7 @@ mutation dnsmasq-local-second-run-appends \
   --file scripts/dnsmasq-local-names.sh \
   --bats tests/dnsmasq-local-names.bats \
   --test "a second run changes nothing" \
-  --why "Inverts the compare-first guard so a router that already carries the records never matches. uci add_list appends duplicates happily, so a second run leaves 19 more entries in flash - the state this script exists to avoid, and the one Gate 4's reboot would then carry" \
+  --why "Inverts the compare-first guard so a router that already carries the records never matches. uci add_list appends duplicates happily, so a second run leaves another full set of entries in flash - the state this script exists to avoid, and the one Gate 4's reboot would then carry" \
   --apply 'perl -0pi -e "s/if \[\[ \x22\x24desired\x22 == /if [[ \x22\x24desired\x22 != /" "$F"'
 
 mutation dnsmasq-local-no-reload \
@@ -205,6 +205,13 @@ mutation dnsmasq-local-section-picked-by-position \
   --test "the section is resolved, and the type is not mistaken for it" \
   --why "Replaces the structural section choice with the first section of type dnsmasq. This router carries two - the DHCP-serving one and wgclient1 for the WireGuard tunnel - and uci show dhcp does not promise their order. The records would land in the tunnel section, which the DHCP server never reads. It looked right in development only because the live router happens to list the main section first" \
   --apply 'perl -0pi -e "s/leasefile.*continue.*\n//" "$F"'
+
+mutation dnsmasq-local-ownership-by-name-only \
+  --file scripts/dnsmasq-local-names.sh \
+  --bats tests/dnsmasq-local-names.bats \
+  --test "a name retired from the record file loses its record" \
+  --why "Puts ownership back to the record file's NAMES alone, which is exactly how pihole.lan survived its own retirement on 2026-09-21: dropping the name from that file moved its router record into the foreign bucket - a record this script does not own, left alone - and the run reported no change while the name went on resolving. A retirement that silently does nothing is the worst shape this can fail in, because the run says it succeeded" \
+  --apply 'perl -0pi -e "s/\n    \[\[ \"\x24answer\" == .*\n/\n    return 1\n/" "$F"'
 
 mutation dnsmasq-local-apply-never-removes \
   --file scripts/dnsmasq-local-names.sh \
@@ -289,6 +296,19 @@ mutation adguard-stage-writes-the-plaintext-password \
   --test "adguard-stage: the user is written and a real login is required to pass" \
   --why "Writes the plaintext password where the bcrypt hash belongs. AdGuard cannot authenticate against it, so the router ends up with a credential nobody can use and a config file holding a secret in the clear" \
   --apply 'perl -0pi -e "s/-v h=\"\x24ADMIN_PASSWORD_HASH\"/-v h=\"\x24ADMIN_PASSWORD\"/" "$F"'
+
+# --- scripts/adguard-configure.sh -------------------------------------------
+#
+# The staging script for the router's AdGuard Home, which writes the .lan
+# rewrites and the encrypted upstreams into its config.yaml. It installs files;
+# it does not decide which resolver the house is pointed at.
+
+mutation adguard-configure-ignores-the-drift-check \
+  --file scripts/adguard-configure.sh \
+  --bats tests/adguard-configure.bats \
+  --test "adguard-configure: dns_enabled moving during the run fails it" \
+  --why "Puts the flag check back to comparing against a literal, which is the shape it had: the comparison then says nothing about whether the value moved while the config was being written, and the one thing this script must never do is change who answers for the house. Asserting a literal was also how every correct run came to print FAIL once the migration turned the flag on for good, so the two failures are the same edit seen from opposite ends" \
+  --apply 'perl -pi -e "s/\x24dns_enabled_before/0/g" "$F"'
 
 # --- scripts/lib/check-dns-divergence.sh ------------------------------------
 #

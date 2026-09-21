@@ -26,7 +26,6 @@ address=/sabnzbd.lan/TRAEFIK_LAN_IP
 
 # Infrastructure
 address=/traefik.lan/TRAEFIK_LAN_IP
-address=/pihole.lan/TRAEFIK_LAN_IP
 
 # Utilities
 address=/uptime.lan/TRAEFIK_LAN_IP
