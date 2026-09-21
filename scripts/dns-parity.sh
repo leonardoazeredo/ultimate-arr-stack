@@ -3,10 +3,14 @@
 # the answers. Phase 3.6 / Gate 3 of the DNS migration plan.
 #
 #   ./scripts/dns-parity.sh
-#       NAS Pi-hole at $NAS_DNS_IP (default 192.168.110.246) against the
-#       router's AdGuard Home at 192.168.8.1:3053, queried through pi1.
+#       the router's dnsmasq at 192.168.8.1:53 against the same router's AdGuard
+#       Home at 192.168.8.1:3053, queried through pi1. Both stores are on the
+#       router now: the NAS Pi-hole and its dnscrypt-proxy sidecar were removed
+#       on 2026-09-21 (Phase 9.4), so the comparison this script makes is
+#       dnsmasq-versus-AdGuard -- the two things the watchdog moves the house
+#       between -- not NAS-versus-router.
 #
-#   ./scripts/dns-parity.sh 192.168.110.246:53 'jump=pi@pi1.local:192.168.8.1:3053'
+#   ./scripts/dns-parity.sh 192.168.8.1:53 'jump=pi@pi1.local:192.168.8.1:3053'
 #       explicit, which is what a run from another vantage point needs.
 #
 #   ./scripts/dns-parity.sh A B tests/fixtures/dns-baseline.txt
@@ -33,7 +37,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/dns-parity.sh
 source "$SCRIPT_DIR/lib/dns-parity.sh"
 
-DEFAULT_A="${NAS_DNS_IP:-192.168.110.246}:53"
+DEFAULT_A="${ROUTER_DNS_IP:-192.168.8.1}:53"
 DEFAULT_B="jump=${ADGUARD_JUMP:-pi@pi1.local}:${ADGUARD_DNS_IP:-192.168.8.1}:${ADGUARD_DNS_PORT:-3053}"
 
 usage() {
@@ -43,7 +47,7 @@ usage: dns-parity.sh [resolver-a] [resolver-b] [fixture]
   resolver  host[:port]  or  jump=user@host:host[:port]
   fixture   defaults to tests/fixtures/dns-baseline.txt
 
-  ex: dns-parity.sh 192.168.110.246:53 jump=pi@pi1.local:192.168.8.1:3053
+  ex: dns-parity.sh 192.168.8.1:53 jump=pi@pi1.local:192.168.8.1:3053
 USAGE
 }
 
