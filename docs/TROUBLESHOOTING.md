@@ -17,7 +17,7 @@ answer:
    `ssh arr-stack-router '/usr/sbin/arrdns-watchdog.sh --status'`
    - `mode=fallback` — AdGuard Home stopped answering and the router moved the
      house to dnsmasq. **Resolution is still working**; only ad blocking is lost.
-     This is not an outage. `tail /var/log/arrdns-watchdog.log` has the reason.
+     This is not an outage. `tail /etc/arrdns-watchdog.log` has the reason.
    - `mode=adguard probe=down` — AdGuard is failing but the watchdog has not
      fired yet. Three consecutive failures are required, so this lasts up to
      about three minutes; then it falls back on its own.

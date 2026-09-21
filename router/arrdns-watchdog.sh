@@ -13,7 +13,11 @@
 
 PORT_FILE=/etc/arrdns-port
 STATE_FILE=/etc/arrdns-watchdog.state
-LOG_FILE=/var/log/arrdns-watchdog.log
+# /etc is the overlay filesystem and survives a reboot; /var/log is tmpfs and
+# does not. The one transition most worth having afterwards is the boot-time
+# fallback, which is exactly the one a tmpfs log loses. A few lines per
+# transition, so flash wear is not a concern.
+LOG_FILE=/etc/arrdns-watchdog.log
 LOCK_DIR=/var/run/arrdns-watchdog.lock
 
 ADG_PORT=3053
