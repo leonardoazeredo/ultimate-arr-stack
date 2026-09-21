@@ -146,6 +146,17 @@ part that used to live on the NAS:
    either way; only ad blocking is lost while degraded. Source:
    `router/arrdns-watchdog.sh`, and the redirect itself is `router/firewall.user`.
 
+   `router/firewall.user` also carries its own check, and it exists for one
+   specific case: the firewall starts at `S19` and AdGuard Home at `S99`, so on a
+   router reboot there is a window in which every client would be redirected at a
+   resolver that has not started yet. The watchdog cannot cover it — it needs
+   three consecutive failures and cron starts at `S50`, inside the window — so
+   the include probes AdGuard before choosing it and uses dnsmasq if it does not
+   answer, recording that in `/etc/arrdns-port` so the file, the rules and the
+   watchdog agree. The watchdog moves the house back on its next tick. If you
+   ever see clients on dnsmasq right after a router reboot, this is why, and it
+   is the intended behaviour rather than a fault.
+
 Two consequences worth keeping:
 
 - **The NAS being powered off no longer removes DNS from the house.** It used to:

@@ -33,11 +33,46 @@
 # rules in place and this script would stack another ten copies on top. Every
 # run therefore strips whatever is already there first. That delete loop is
 # why this file is safe to re-run at any time -- the watchdog relies on it.
-ARRDNS_PORT="$(cat /etc/arrdns-port 2>/dev/null)"
+# Path overridable so tests/firewall-user.bats can exercise this file on a host
+# with no router, the way tests/adguard-stage.bats does for AGH_INIT/AGH_CONFIG.
+# The default is the deployed path and nothing on the router sets the variable.
+ARRDNS_PORT_FILE="${ARRDNS_PORT_FILE:-/etc/arrdns-port}"
+# Same reason, and it must be a variable rather than a bare `dig`: a test that
+# cannot intercept the probe cannot prove what the probe decides.
+ARRDNS_DIG="${ARRDNS_DIG:-/usr/bin/dig}"
+
+ARRDNS_PORT="$(cat "$ARRDNS_PORT_FILE" 2>/dev/null)"
 case "$ARRDNS_PORT" in
   53|3053) ;;
   *) ARRDNS_PORT=3053 ;;
 esac
+
+# Self-check before pointing the house at AdGuard Home.
+#
+# The firewall starts at S19 and AdGuard Home at S99, so on a router reboot there
+# is a window in which every client is redirected to a resolver that is not
+# listening yet. Measured 2026-09-21: 48 init scripts run between those two, and
+# network comes up at S20, in the middle of it. Nothing else catches the window --
+# the watchdog requires three consecutive failures, and cron starts at S50, still
+# inside it.
+#
+# So: if the port file names AdGuard but AdGuard does not answer, use dnsmasq
+# instead, and write that back so the file, the rules and the watchdog all agree.
+# Resolution continues on dnsmasq (losing ad blocking, which is the same trade the
+# watchdog makes) and the watchdog moves the house back the moment AdGuard
+# answers -- one tick, because its adguard branch restores whenever the port file
+# disagrees with the port AdGuard is on.
+#
+# A probe that fails spuriously costs a reload's worth of ad blocking, and the
+# next tick puts it back. A probe that did not exist costs the whole house's DNS
+# for the length of the boot window.
+if [ "$ARRDNS_PORT" = "3053" ]; then
+  ARRDNS_ANSWER="$("$ARRDNS_DIG" +short +time=2 +tries=1 github.com A @127.0.0.1 -p 3053 2>/dev/null)"
+  if ! printf '%s\n' "$ARRDNS_ANSWER" | grep -qE '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'; then
+    printf '53\n' > "$ARRDNS_PORT_FILE"
+    ARRDNS_PORT=53
+  fi
+fi
 
 ARRDNS_IFACES="br-lan.1 br-lan.10 br-lan.20 br-lan.30 br-guest"
 
