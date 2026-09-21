@@ -227,8 +227,8 @@ The rest is capacity, and no guard in this repo removes it:
 
 - `overlay2` shares `/volume1` with the media library, so container churn
   competes with downloads for the same two disks.
-- 7.88 GB of RAM (`MemTotal`; `free -m` reports 7,699 MiB) carries 30
-  containers.
+- It carries 30 containers on 7.52 GiB of RAM (MemTotal 7,884,640 kB;
+  `free -m` reports 7,699 MiB).
 - **Beszel's `data.db` is entirely empty** — zero rows in `systems`,
   `system_stats`, `container_stats` and `system_details`. The hub was never given
   a system, so the stack's own metrics layer recorded nothing across the whole

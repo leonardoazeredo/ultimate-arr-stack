@@ -419,11 +419,11 @@ for d in sda sdb; do echo "$d $(cat /sys/block/$d/queue/max_sectors_kb)"; done
 echo 2048 > /sys/block/sda/queue/max_sectors_kb     # needs root
 ```
 
-**Lower the dirty-page ceiling.** The box has 7.88 GB of RAM (its `MemTotal`;
-`free -m` reports 7,699 MiB), and `vm.dirty_ratio=20` permits 1.58 GB of dirty
-pages. Three concurrent downloads plus an extract plus a RAR unpack can cross
-that in seconds. This reduces peak throughput on a rotational array, so measure
-before adopting it:
+**Lower the dirty-page ceiling.** The box has 7.52 GiB of RAM (MemTotal
+7,884,640 kB; `free -m` reports 7,699 MiB), and `vm.dirty_ratio=20` permits
+1.58 GB of dirty pages. Three concurrent downloads plus an extract plus a RAR
+unpack can cross that in seconds. This reduces peak throughput on a rotational
+array, so measure before adopting it:
 
 ```bash
 sysctl vm.dirty_bytes vm.dirty_background_bytes          # read first
