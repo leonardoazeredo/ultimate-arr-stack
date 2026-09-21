@@ -714,7 +714,13 @@ router_dns_client_path_check() {
     # tailscale0 is reported, never failed: the tailnet is a client population
     # too, but nobody has decided it should be filtered, and a guard that
     # invents scope is a guard that argues with its own operator.
-    if printf '%s\n' "$pr" | grep -qE '^tailscale0\t'; then
+    # [[:space:]], not \t. BSD grep accepts \t as a tab and GNU grep does not —
+    # it reads it as a literal 't' — so the original pattern matched on macOS and
+    # silently never matched on Linux, and the note simply never appeared there.
+    # tests/lib-router-dns.bats caught it on the first Linux CI run; a note that
+    # only prints on one platform is worse than no note, because the absence
+    # looks like a quiet router.
+    if printf '%s\n' "$pr" | grep -qE '^tailscale0[[:space:]]'; then
         local ts=0
         while IFS=$'\t' read -r _i _p _d _t _tp; do
             [[ "$_i" == "tailscale0" && "$_d" == "53" ]] || continue
