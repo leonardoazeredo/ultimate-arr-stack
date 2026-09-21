@@ -132,7 +132,10 @@ Three things here are expensive to rediscover, and all three cost real time:
 **The NAS Pi-hole and dnscrypt-proxy are stopped as of 2026-09-21** (Phase 9.1:
 `docker stop`, not removed, volumes kept — `arr-stack_pihole-etc-pihole` and
 `arr-stack_dnscrypt-config`). Nothing points at them and nothing is listening on
-the NAS's `:53` any more. To roll back to them, `docker start pihole
+the NAS's `:53` any more. Both were given `docker update --restart=no`, because
+plain `docker stop` is not durable — Docker restarts a manually stopped
+`restart: always` container when the daemon restarts, so a NAS reboot would have
+brought them back. To roll back to them, `docker start pihole
 dnscrypt-proxy` and repoint a DHCP pool — the containers are stopped, not
 retired, until a week of no traffic passes (9.2/9.3) and 9.4 removes them
 through its own PR. Full record: [docs/LOCAL-DNS.md](docs/LOCAL-DNS.md) and
