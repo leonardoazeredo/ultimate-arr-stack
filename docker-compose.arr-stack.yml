@@ -443,8 +443,12 @@ services:
       start_period: 30s
 
   # ═══════════════════════════════════════════════════════════════════════════
-  # PI-HOLE - DNS server. Enables .lan domains and blocks ads network-wide.
-  # Access: pihole.lan/admin | NAS_IP:8081/admin
+  # PI-HOLE - STOPPED 2026-09-21 (DNS migration Phase 9.1). It no longer answers
+  # anything: DNS moved to AdGuard Home on the router, and nothing in the stack
+  # points here. `docker update --restart=no` keeps it down across a reboot, and
+  # Phase 9.4 removes the container after a week with no traffic to it. The
+  # `pihole.lan` route is retired with it, since its upstream no longer exists.
+  # Kept only so a rollback is one `docker start` away.
   # For: Home Pro + Anywhere setups
   # Configure upstream DNS: Settings → DNS → Custom = 172.20.0.6#5053
   # ═══════════════════════════════════════════════════════════════════════════

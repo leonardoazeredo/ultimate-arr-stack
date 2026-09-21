@@ -173,7 +173,7 @@ magnetio-net (172.22.0.0/24) — isolated, only Gluetun + Magnetio's own contain
 │  ┌─── Path b: Tailscale (private mesh VPN, full LAN access) ───────┐    │
 │  │                                                                  │    │
 │  │  ┌──────────────┐  ┌────────────────┐  ┌──────────────────────┐ │    │
-│  │  │ sonarr.lan   │  │ pihole.lan     │  │ homeassistant.lan    │ │    │
+│  │  │ sonarr.lan   │  │ uptime.lan     │  │ homeassistant.lan    │ │    │
 │  │  └──────────────┘  └────────────────┘  └──────────────────────┘ │    │
 │  │  Phone → Tailscale → LAN (192.168.1.0/24) → Service               │    │
 │  │  (No public exposure; only authorised tailnet devices reach LAN)│    │

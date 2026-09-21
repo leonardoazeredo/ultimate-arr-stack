@@ -43,7 +43,6 @@ check_domains() {
         "bazarr.lan"
         "sabnzbd.lan"
         "traefik.lan"
-        "pihole.lan"
         "uptime.lan"
         "duc.lan"
         "beszel.lan"

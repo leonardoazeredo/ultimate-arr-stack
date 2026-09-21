@@ -65,15 +65,21 @@
           key: "{{HOMEPAGE_VAR_SABNZBD_API_KEY}}"
 
 - Infrastructure:
-    - Pi-hole:
-        icon: pihole.png
-        href: http://pihole.lan
-        description: DNS / ad-blocking
-        widget:
-          type: pihole
-          url: http://pihole:80
-          version: 6
-          key: "{{HOMEPAGE_VAR_PIHOLE_API_TOKEN}}"
+    # Pi-hole was retired from this dashboard on 2026-09-21 (Phase 8.7 of the DNS
+    # migration). It was stopped, so both halves of the old entry were dead: the
+    # `pihole.lan` link went through a Traefik route whose upstream no longer
+    # existed, and the widget polled `http://pihole:80` and errored.
+    #
+    # DNS now lives on the router, and there is no widget for it: AdGuard Home's
+    # agent API is gated by GL.iNet's own auth middleware on this firmware (see
+    # docs/LOCAL-DNS.md), so a widget would show a permanent failure rather than
+    # a statistic. The link works from the maintenance VLAN, which is where the
+    # router's admin UI has always been reachable — AdGuard's port is refused
+    # from every client VLAN by design.
+    - AdGuard Home:
+        icon: adguard-home.png
+        href: http://192.168.8.1:3000
+        description: DNS / ad-blocking (router; maintenance VLAN only)
 
 - Monitoring:
     - Uptime Kuma:

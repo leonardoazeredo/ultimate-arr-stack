@@ -236,17 +236,24 @@ http:
       middlewares: [admin-auth@docker, security-headers]
       service: api@internal
 
-    pihole-lan:
-      rule: "Host(`pihole.lan`)"
-      entryPoints: [web]
-      middlewares: [https-redirect]
-      service: pihole-lan
-    pihole-lan-secure:
-      rule: "Host(`pihole.lan`)"
-      entryPoints: [websecure]
-      tls: {}
-      middlewares: [admin-auth@docker, security-headers]
-      service: pihole-lan
+    # pihole-lan and pihole-lan-secure are retired (Phase 8.4 of the DNS
+    # migration). Pi-hole was stopped on 2026-09-21 and Phase 9 removes it, so
+    # the upstream behind this route no longer exists — `pihole.lan` answered
+    # with a basic-auth prompt and then failed, which is worse than not
+    # answering at all because it looks like a credential problem.
+    #
+    # The name itself is retired with the service in 9.4, from the single file
+    # both DNS stores are generated from
+    # (`pihole/dnsmasq.d/02-local-dns.conf.example`).
+    #
+    # Not repointed at AdGuard Home, which is the obvious alternative and does
+    # not work: AdGuard runs on the router and its admin port is refused from
+    # every client VLAN, because `zone_vlan10_input` allows DHCP and DNS only.
+    # Traefik runs on the NAS, on VLAN10, so it cannot reach it either. Proxying
+    # it would mean opening router:3000 to VLAN10 — a segmentation decision, not
+    # a route change. Until someone makes it deliberately, AdGuard's UI is at
+    # `http://192.168.8.1:3000` from the maintenance VLAN, which is where the
+    # router's own admin UI has always been.
 
     # === Utilities ===
     uptime-lan:
@@ -379,35 +386,24 @@ http:
           - url: "http://172.20.0.3:8080"
 
     # === Infrastructure ===
-    # pihole-lan fronts the Pi-hole container. Phase 8.4 of the DNS migration
-    # asked for this upstream to be repointed at AdGuard Home on the router
-    # (192.168.110.1:3000) so the route survives Phase 9 retiring Pi-hole.
-    # Measured 2026-09-21, that cannot work, and the reason is a deliberate
-    # firewall policy rather than an oversight:
+    # The pihole-lan service is gone with its routers (see above). Phase 8.4
+    # asked for this upstream to be repointed at AdGuard Home on the router so
+    # the route would survive Phase 9 — measured 2026-09-21, that cannot work:
     #
     #   * zone_vlan10_input allows a client VLAN to reach the router on DHCP
     #     (67-68) and DNS (53) only, then falls through to
-    #     zone_vlan10_src_REJECT. AdGuard's admin port is refused from VLAN10
-    #     (curl -> connection refused, from the NAS and from the router's own
-    #     VLAN10 address on the wire);
-    #   * the maintenance VLAN CAN reach it -- 192.168.8.1:3000 answers 302 from
-    #     pi1's eth0 -- which is the same trusted path the migration plan's
-    #     rollback ladder already assumes;
-    #   * neither the tailnet nor the NAS's macvlan shim provides a way round
-    #     this: the shim and Traefik's macvlan are both on VLAN10
-    #     (192.168.110.251 and .250), and the NAS cannot reach the router's
-    #     Tailscale address at all.
+    #     zone_vlan10_src_REJECT. AdGuard's admin port is refused from VLAN10;
+    #   * the maintenance VLAN CAN reach it — 192.168.8.1:3000 answers 302 from
+    #     pi1's eth0 — which is the path the migration plan's rollback ladder
+    #     already assumes;
+    #   * neither the tailnet nor the NAS's macvlan shim offers a way round: the
+    #     shim and Traefik's macvlan are both on VLAN10 (192.168.110.251 and
+    #     .250), and the NAS cannot reach the router's Tailscale address at all.
     #
-    # Opening router:3000 to VLAN10 would breach the segmentation that
-    # tests/network-segmentation.bats exists to assert, for one admin UI that is
-    # already reachable on the maintenance VLAN. So this route is left pointing
-    # at Pi-hole, which still runs, and is retired with it in Phase 9.4 rather
-    # than repointed now into a 502. See the phase 8 note in
-    # docs/superpowers/plans/2026-09-19-dns-adguard-router-migration.md.
-    pihole-lan:
-      loadBalancer:
-        servers:
-          - url: "http://172.20.0.5:80"
+    # Opening router:3000 to VLAN10 would breach the segmentation
+    # tests/network-segmentation.bats exists to assert, for one admin UI already
+    # reachable on the maintenance VLAN. So the route is retired rather than
+    # repointed, and the name goes with the service in 9.4.
 
     # === Utilities ===
     uptime-lan:

@@ -34,7 +34,7 @@ brew install mkcert          # macOS; see mkcert's README for other platforms
 mkcert -install               # installs the CA into this machine's trust store
 mkcert -cert-file lan-admin.crt -key-file lan-admin.key \
   sonarr.lan radarr.lan prowlarr.lan bazarr.lan sabnzbd.lan \
-  traefik.lan pihole.lan uptime.lan duc.lan beszel.lan jellyfin.lan seerr.lan \
+  traefik.lan uptime.lan duc.lan beszel.lan jellyfin.lan seerr.lan \
   jellyseerr.lan jellyseer.lan homepage.lan usenet.lan stremio.lan
 ```
 
