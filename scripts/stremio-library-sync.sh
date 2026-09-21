@@ -160,8 +160,7 @@ echo "========================================"
 # an operator does with a dry run is decide whether applying is safe, and a dry
 # run that reports "12 new items" while the outbox is 588 deep answers the
 # wrong question.
-MEDIA_ROOT_VALUE="$(env_value "$ENV_FILE" MEDIA_ROOT || true)"
-NZB_DIR="${USENET_NZB_DIR:-${MEDIA_ROOT_VALUE:-$NAS_STACK_DIR/data}/usenet/blackhole/nzb}"
+NZB_DIR="$(outbox_dir)"
 OUTBOX_NOW="$(outbox_depth "$NZB_DIR")"
 if outbox_over_high_water "$NZB_DIR"; then
   echo "Outbox: $OUTBOX_NOW NZBs waiting (mark ${QUEUE_HIGH_WATER}); skipping this pass"

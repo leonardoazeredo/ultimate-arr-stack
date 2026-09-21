@@ -464,6 +464,25 @@ STUB
     [[ "$output" == *"skipping this pass"* ]]
 }
 
+@test "stremio-library-sync: a deep outbox stands the dry run down too" {
+    # The comment above the check claims both modes and only the apply mode was
+    # asserted, so wrapping the call site in `if $APPLY` would have left every
+    # assertion in this file green. A dry run is the mode an operator uses to
+    # decide whether applying is safe, and one that reports work it must not do
+    # answers the wrong question.
+    stub_python
+    printf 'STREMIO_AUTH_KEY=k\nSEERR_API_KEY=k\nMEDIA_ROOT=%s/media\n' "$WORK" > "$ENV"
+    mkdir -p "$WORK/media/usenet/blackhole/nzb"
+    local i
+    for ((i = 0; i < 50; i++)); do
+        : > "$WORK/media/usenet/blackhole/nzb/Rel-$i-GRP.nzb"
+    done
+
+    run "$RUN"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"skipping this pass"* ]]
+}
+
 @test "stremio-library-sync: a shallow outbox does not stand the pass down" {
     # The boundary's other side, in the call site rather than in the guard. A
     # check that stands down unconditionally would pass the test above.

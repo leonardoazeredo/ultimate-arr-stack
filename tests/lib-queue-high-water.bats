@@ -81,11 +81,28 @@ seed_outbox() {
     # `find` exit 1, which pipefail propagated and `set -e` turned into a dead
     # producer timer -- a guard that stops the pass it exists to pace. The
     # documented contract is "never fails", so this pins it.
+    #
+    # Two properties, and only one of them is about the number. The count has
+    # to read as zero, and the caller has to survive. The note on stderr is
+    # what keeps the second from being indistinguishable from an empty queue,
+    # so it is asserted too -- and the two streams are read apart, because the
+    # warning and the depth would otherwise land in the same string.
+    #
+    # `chmod 000` does not block root. Run as root the directory stays
+    # readable, the rescue branch is never taken, and the note assertion below
+    # fails rather than passing vacuously -- which is why the suite is not run
+    # as root, and why the mutation corpus entry for this test exists.
     mkdir -p "$OUTBOX"
     chmod 000 "$OUTBOX"
-    run bash -c 'set -euo pipefail; . "$1"; X="$(outbox_depth "$2")"; printf "depth=%s" "$X"' \
-        _ "$LIB" "$OUTBOX"
+    run bash -c '
+        set -euo pipefail
+        . "$1"
+        X="$(outbox_depth "$2" 2>"$3")"
+        printf "depth=%s\n" "$X"
+        printf "note=%s\n" "$(cat "$3")"
+    ' _ "$LIB" "$OUTBOX" "$BATS_TEST_TMPDIR/depth.err"
     chmod 755 "$OUTBOX"
     [ "$status" -eq 0 ]
-    [ "$output" = "depth=0" ]
+    [[ "$output" == *"depth=0"* ]]
+    [[ "$output" == *"cannot read"* ]]
 }

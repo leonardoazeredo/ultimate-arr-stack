@@ -217,3 +217,38 @@ setup() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"skipping this pass"* ]]
 }
+
+@test "backlog-search: a shallow outbox does not stand the pass down" {
+    # The boundary's other side, in the call site rather than in the guard. A
+    # check that stands down unconditionally would pass the test above, and the
+    # library's own tests would stay green through it.
+    printf 'MEDIA_ROOT=%s/media\n' "$WORK" >> "$ENV"
+    mkdir -p "$WORK/media/usenet/blackhole/nzb"
+    : > "$WORK/media/usenet/blackhole/nzb/Rel-0-GRP.nzb"
+
+    run "$RUN" --apply
+    [[ "$output" != *"skipping this pass"* ]]
+}
+
+@test "backlog-search: a deep outbox does not hide a missing API key" {
+    # The gate exits 0, because it is a pause and not a failure. Sitting in
+    # front of the key checks, that turned "neither SONARR_API_KEY nor
+    # RADARR_API_KEY is set, which is a configuration error" into "skipping
+    # this pass" -- and the keys could stay wrong for as long as the outbox
+    # stayed deep. A configuration fault has to be reported on a pass that has
+    # nothing else to do.
+    #
+    # Both keys are deliberately absent, so the fixture's own .env is replaced
+    # rather than appended to.
+    printf 'MEDIA_ROOT=%s/media\n' "$WORK" > "$ENV"
+    mkdir -p "$WORK/media/usenet/blackhole/nzb"
+    local i
+    for ((i = 0; i < 50; i++)); do
+        : > "$WORK/media/usenet/blackhole/nzb/Rel-$i-GRP.nzb"
+    done
+
+    run "$RUN" --apply
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Could not get API keys"* ]]
+    [[ "$output" != *"skipping this pass"* ]]
+}

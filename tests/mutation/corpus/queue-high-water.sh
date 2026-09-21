@@ -21,14 +21,22 @@ mutation queue-high-water-counts-non-nzbs \
   --file scripts/lib/queue_high_water.sh \
   --bats tests/lib-queue-high-water.bats \
   --test "queue-high-water: only .nzb files count" \
-  --why "dropping the -name filter counts a partially written file, an operator's note and a stray directory as queue depth. The guard then trips early and stops a stack whose queue is actually below the mark -- a protection that fails closed, on a timer that runs every ten minutes, with the only evidence being a log line saying the outbox is deep when it is not" \
+  --why "dropping the -name filter counts a partially written file and an operator's note as queue depth -- the two additions this makes are Rel-9-GRP.nzb.partial and notes.txt. It cannot also count the stray a-directory.nzb: -type f survives the edit and excludes it. The guard then trips early and stops a stack whose queue is actually below the mark -- a protection that fails closed, on a timer that runs every ten minutes, with the only evidence being a log line saying the outbox is deep when it is not" \
   --apply 'sed -i.bak "s@ -name .\*\.nzb.@@" "$F" && rm -f "$F.bak"'
 
 # --- the pipeline failure reaches the caller -------------------------------
+#
+# `outbox_depth` clears that pipeline itself now -- `if ! count="$(find ...)"`
+# with the pipeline's stderr dropped -- so there is no ` || true` left to
+# remove. The rescue branch is the whole protection, and re-raising its status
+# is what puts the failure back on the caller: a producer that assigns the
+# depth straight into a command substitution under `set -euo pipefail` dies on
+# a directory it cannot read, which is the guard against an overloaded host
+# taking the timer down instead.
 
 mutation queue-high-water-pipeline-failure-propagates \
   --file scripts/lib/queue_high_water.sh \
   --bats tests/lib-queue-high-water.bats \
   --test "queue-high-water: an unreadable outbox reads as zero and does not abort the caller" \
-  --why "both producers run under 'set -euo pipefail' and assign this straight into a command substitution. An existing-but-unreadable outbox makes 'find' exit 1, pipefail carries it up the pipeline and 'set -e' ends the producer pass -- so the guard against an overloaded host takes the timer down instead, and the log's last line is a depth count rather than an error anyone can act on. The documented contract is 'never fails', and this is the entry that says so mechanically" \
-  --apply 'sed -i.bak "s@ || true@@g" "$F" && rm -f "$F.bak"'
+  --why "both producers run under 'set -euo pipefail' and assign the depth straight into a command substitution. An existing-but-unreadable outbox makes 'find' exit 1, and a rescue branch that returns that status instead of zero carries it out of the function and into the caller -- so the guard against an overloaded host takes the producer timer down instead, and the log's last line is a depth count rather than an error anyone can act on. The documented contract is 'never fails', and this is the entry that says so mechanically" \
+  --apply 'sed -i.bak "s@^    return\$@    return 1@" "$F" && rm -f "$F.bak"'
