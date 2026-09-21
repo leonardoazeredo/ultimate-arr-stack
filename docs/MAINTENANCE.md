@@ -408,46 +408,135 @@ stream delivers 80% or more of the three-stream rate, set `FETCH_WORKERS` to 1 �
 the array is two rotational spindles, and the concurrency is buying queue depth
 rather than throughput. Record the two rates here when it is done.
 
-### Storage steps that are not in this repo
+### What this pool can and cannot absorb
 
-These are host configuration on the NAS, applied by hand and persisted by
-UGOS-side mechanism, in the same category as the macvlan shim and the UGOS
-firewall rules. Run them with the ingest held down and the box quiet.
+Measured 2026-09-21. Read this before changing anything below, because two of
+these steps were tried and did not work, and the numbers say why.
 
-**btrfs metadata is at 91.5% of its allocated chunk.** `/volume1` reported
-Metadata,DUP 4.58 GiB used of 5.00 GiB, against a `max_commit_ms` of 38,952 —
-the healthy reference in `btrfs(5)` is 2 ms.
+Four configurations, each tested by hand-running one bounded pass (three
+releases) against a quiet box:
+
+| Configuration | Peak `io full avg10` | Worst commit | Blocked tasks |
+| --- | --- | --- | --- |
+| Idle baseline | ~1% | 300-650 ms | none |
+| Pass bounded to 3 releases | >55%, **box unreachable ~1 min** | 87,290 ms | `wait_current_trans`, `balance_dirty_pages` |
+| + `btrfs balance -musage=50` | no-op: relocated 1 of 3376 chunks, and that was the **System** group | — | — |
+| + `chattr +C` on staging | 59.8% | 63,623 ms | the same two |
+| + dirty ceilings cut to 256/64 MiB | **40.8%** | **3,584 ms** | `balance_dirty_pages` only |
+
+Every one of them shaves the peak and none removes the stall, because the
+ceiling is structural:
+
+- **7.1% of all wall-clock is spent inside `btrfs_commit_transaction`**
+  (`total_commit_ms` 1,867,422 of roughly 26,160 s uptime). The per-commit
+  average is 300-650 ms on an entirely idle box, against a `btrfs(5)` healthy
+  reference of 2 ms.
+- Every **metadata** block costs **four physical writes**: btrfs metadata is
+  DUP and the pool beneath is md1 RAID1.
+- Every block is checksummed with **`crc32c-generic`**. The kernel log says so
+  at mount and `/proc/crypto` lists no accelerated implementation: the arm64
+  crypto directory holds only `chacha-neon.ko` and `poly1305-neon.ko`, so
+  `crc32c-arm64` is not merely unloaded, it does not exist.
+- Two rotational disks at roughly 20 ms per random write, with data chunks
+  **97.3% full** (3.20 of 3.29 TiB), so a large write forces fresh chunk
+  allocation.
+
+Ruled out by measurement, so nobody re-tests them: MD is `clean` 2/2 with 0
+failed; both drives pass SMART; `btrfs device stats` are all zero; the kernel
+log has no btrfs errors, no hung-task traces, no I/O errors and no OOM
+(`hung_task_timeout_secs` is 120 and the worst commit was 87 s, so it came
+within 33 seconds of tripping); and `memory full avg10` stayed at 1.7-6%, so
+this is not the reclaim loop `docs/NAS-LOAD-INCIDENT-2026-09-18.md` describes.
+
+### The metadata balance does not help here
+
+`btrfs balance start -musage=50 /volume1` finished with *"Done, had to relocate
+1 out of 3376 chunks"* and moved the **System** group, leaving metadata at
+91.7% with 424 MiB free. That is expected rather than unlucky: btrfs fills
+metadata chunks before allocating new ones, so a high percentage is normal and
+`-musage=50` has nothing to match. Do not run it expecting free space.
+
+### Applied on this NAS
+
+**Dirty ceilings: 256 MiB hard, 64 MiB background, persisted.** This was the
+single biggest measured improvement, peak 40.8% and a 3.6 s commit against >55%
+and 87 s. Two things about it are easy to get wrong and both were hit while
+applying it:
+
+1. **The filename matters.** `sysctl --system` reads `/etc/sysctl.d/*.conf` and
+   then **`/etc/sysctl.conf` last**, so nothing in `sysctl.d` can override that
+   file. The settings live in `/etc/sysctl.d/zz-arr-stack-dirty.conf`, and the
+   conflicting line in `/etc/sysctl.conf` was changed as well, with a backup
+   beside it as `/etc/sysctl.conf.arr-stack-backup-*`.
+2. **Never add a `dirty_*_ratio` line to that file.** The kernel couples each
+   byte knob to its matching ratio knob: writing one clears the other, so a
+   `dirty_background_ratio` line, even set to 0, zeroes
+   `dirty_background_bytes`. That was measured, not assumed.
 
 ```bash
-btrfs filesystem usage -h /volume1          # before
-btrfs balance start -musage=50 /volume1     # the balance itself is I/O heavy
-btrfs filesystem usage -h /volume1          # after: expect Used below 60%
-cat /sys/fs/btrfs/*/commit_stats            # compare last_commit_ms before/after
+cat /proc/sys/vm/dirty_bytes /proc/sys/vm/dirty_background_bytes
+# want 268435456 and 67108864, with dirty_ratio and dirty_background_ratio at 0
 ```
 
-**The two mirror legs disagree about request size.** `sda` has
-`max_sectors_kb=512` and `sdb` has `2048`, on identical
+**Staging is nodatacow.** `chattr +C /volume1/data/usenet/blackhole/staging`.
+It does not fix the stall, but it removes COW churn from the payload and
+extraction writes, and staging holds only in-flight downloads where losing
+checksums costs nothing. The flag is inherited by the directories `fetch`
+creates; pre-existing ones keep COW, which is fine.
+
+**`sda` still has `max_sectors_kb=512` against `sdb`'s 2048**, on identical
 `WDC WD201KFGX-68` firmware. RAID1 inherits the minimum, and `sda` issued 8.8%
-more write requests for byte-identical totals. Raise the smaller one, then
-confirm both legs report the same value and that their request counts converge:
+more write requests for byte-identical totals. Not applied: it needs a udev rule
+to persist, and it was not shown to matter next to the costs above.
 
 ```bash
 for d in sda sdb; do echo "$d $(cat /sys/block/$d/queue/max_sectors_kb)"; done
-echo 2048 > /sys/block/sda/queue/max_sectors_kb     # needs root
 ```
 
-**Lower the dirty-page ceiling.** The box has 7.52 GiB of RAM (MemTotal
-7,884,640 kB, which is 8.07 GB; `free -m` reports 7,699 MiB), and
-`vm.dirty_ratio=20` permits 1.61 GB of dirty pages (20% of that 8.07 GB, since
-the ratio is a fraction of bytes and the 7.52 GiB is the same memory expressed
-in GiB). Three concurrent downloads plus an extract plus a RAR unpack can cross
-that in seconds. This reduces peak throughput on a rotational array, so measure
-before adopting it:
+### Aborting a pass: kill the cgroup, not the process
+
+`pkill -f usenet_blackhole.py` **leaves the `curl` grandchildren running.** They
+are not reaped, they keep writing into staging, and on 2026-09-21 that held the
+box at 40-47% I/O stall after the pass looked stopped. It recovered only once
+the curls were killed too. `systemctl --user stop usenet-blackhole.service`
+does not have this problem, because it signals the whole cgroup. If you must
+abort by hand:
 
 ```bash
-sysctl vm.dirty_bytes vm.dirty_background_bytes          # read first
-sysctl -w vm.dirty_bytes=268435456                       # 256 MiB, needs root
-sysctl -w vm.dirty_background_bytes=67108864             # 64 MiB
+pkill -f "[u]senet_blackhole.py"; pkill -f "[c]url -sS"
+```
+
+The bracket in `[u]senet` matters: without it the pattern matches the shell
+running the `pkill`, and the command kills itself.
+
+### Two things to ask UGOS for
+
+Both are kernel-level, both were verified missing on 2026-09-21, and neither
+can be fixed from userspace.
+
+**1. The btrfs metadata-throttling fix, CVE-2026-23157.** btrfs refuses to
+write back dirty btree pages below an internal 32 MiB threshold, while the
+memory subsystem throttles any task whose cgroup dirty limit it has exceeded;
+if that limit is below 32 MiB the two deadlock and every writer sleeps in
+`balance_dirty_pages`. Fixed upstream in `4e159150a9a5` and backported to
+5.15.y and 6.1.y. **Verified absent here**: `/proc/kallsyms` still carries both
+`btree_write_cache_pages` and the old `btree_writepages` wrapper, and
+`btrfs_btree_balance_dirty` still exists. The running kernel is 6.1.84, built
+2026-08-17, six months after the CVE published.
+
+The strict trigger needs a cgroup whose dirty limit is under 32 MiB, and the
+heavy writers here run with `memory.max = max`, so this is probably not the
+cause of the stalls above. It is still a live vulnerability.
+
+**2. ARMv8 CRC32 acceleration.** `crc32c-generic` means every metadata and data
+block is checksummed in software, on an ARM64 CPU that has CRC32 instructions
+the kernel was not built to use.
+
+To confirm either before making the request:
+
+```bash
+grep -c btree_write_cache_pages /proc/kallsyms     # >0 means unfixed
+ls /lib/modules/$(uname -r)/kernel/arch/arm64/crypto/
 ```
 
 ---
