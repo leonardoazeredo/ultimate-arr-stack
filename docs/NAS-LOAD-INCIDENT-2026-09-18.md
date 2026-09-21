@@ -230,3 +230,58 @@ The rest is capacity, and no guard in this repo removes it:
   hours and by `indexer-guard` on an indexer ban. Under I/O starvation that is
   the loop in §3, and damping it means weakening healthchecks, which hides real
   failures.
+
+## 8. The recurrence of 2026-09-20
+
+The three guards in [§6](#6-what-was-done-about-it) shipped, and the host went
+into I/O starvation again. This section records what the second failure
+corrected, because §6 argues from numbers that turned out not to bound the
+thing they were meant to bound.
+
+**What the guards got right, and kept.** The duc start-up guard never fired a
+false scan: `docker logs duc` shows `Host I/O is stalled; skipping the start-up
+scan` on every restart, so the 2.9 Tb re-walk is genuinely gone. The pressure
+gate's own log shows it discriminating correctly — it skipped at 58.05% and
+27.33% and admitted a pass at a valid sub-20 reading. The gate works. It
+watches the wrong window.
+
+**What they did not bound.** `--max-inflight 6` counts jobs TorBox has *not*
+finished (`scripts/lib/usenet_blackhole.py:882`). The local I/O comes from jobs
+it *has* finished. At 21:22:32 the state file held 24 jobs, **21 of them
+complete**, so the guard read **3** at the exact moment 21 releases — two of
+them 30–38 GB — were owed a local download. The fetch set took all 21
+(`usenet_blackhole.py:1423`) with no reference to the ceiling anywhere on that
+path, and the string `in-flight cap reached` appears **zero times in 1,281 log
+lines across 72 passes**. A guard whose reading falls as the load rises cannot
+bound the load.
+
+Consequences measured: one admitted pass ran 53m12s; a second took load from
+8.47 to 50.18 and io full avg10 to 81.91% in twelve minutes; one release cost
+86.22 GB logical and 170.6 GB of platter writes to deliver a few GB, because
+the payload is written, extracted, and then RAR-unpacked before delivery.
+
+**The stall outlives its process.** After the ingest was killed at 21:25:06,
+io full avg10 was still 74.41% at load 39.02 a minute later. A stalled box does
+not recover when the producer stops; it recovers when the writeback drains and
+then only by reboot — four boots in two hours, one of them a hand-run
+`sudo reboot`.
+
+**The queue is a ratchet.** 488 NZBs at the 09-18 reboot, 572 at 21:17, 588 at
+21:56. Producers offer roughly 72 an hour against a drain ceiling near 24, and
+when the gate skips a pass the drain goes to zero while they keep running.
+
+**Two things this investigation corrected in its own first pass.** An active
+Time Machine backup was proposed as a co-driver; boot-wide, `smbd.service`
+wrote 887 MB, **0.70%** of pool writes, and the shares that supported the claim
+were selection on a peak. The gate's 20% threshold was proposed as sitting
+inside the idle noise band; the measured idle median is **~1.0%** and the gate
+is above it. Neither corrected claim appears in what follows.
+
+**What is still open and was not settled.** The pool was never
+bandwidth-saturated: whole-boot averages are 19.47 MB/s of writes and 9.85
+MB/s of reads against drives that do 253 MB/s sequential. The failure is
+latency and queue depth, not throughput. Random 4 KiB reads cost 16.9 ms at
+p50, about 56 IOPS at queue depth 1, and btrfs metadata sits at 91.5%. The
+largest single writer over that boot was **decypharr at 67.07% of pool writes**
+(84.77 GB) — the torrent path, which no guard in §6 touches, and which has had
+no investigation of its own.

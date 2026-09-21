@@ -327,6 +327,109 @@ answers `429` and Sonarr disables that indexer for the rest of the run.
 
 ---
 
+## Holding the usenet ingest down
+
+`usenet-blackhole.timer` is a user timer, and `arr-stack-user-timers.service`
+re-arms every enabled timer in `timers.target.wants` about 29 seconds after a
+boot. A `systemctl --user stop` therefore lasts only until the next reboot, and
+a reboot is not a way to hold this path down.
+
+To hold it down across boots, disable it rather than stopping it, and put it
+back explicitly:
+
+```bash
+# Hold down (survives a reboot, because `is-enabled` stays disabled)
+systemctl --user disable --now usenet-blackhole.timer
+
+# Confirm: this must print `disabled`, not `enabled`
+systemctl --user is-enabled usenet-blackhole.timer
+
+# Release
+systemctl --user enable --now usenet-blackhole.timer
+```
+
+Do **not** `mask` the timer as a hold. `scripts/rearm-user-timers.sh` exits 1
+whenever any `*.timer` in the unit directory is inactive, so a masked timer
+turns a deliberate hold into a failed system unit on every boot.
+
+**Do not start the pass, re-arm the timer, or reboot the NAS while the outbox
+is deep.** As of 2026-09-20 the queue stands at 588 NZBs with 21 releases
+already complete at TorBox and owed a local download, including four staged
+`payload.zip` files of 33.19, 27.59, 12.10 and 9.04 GB. The first pass after an
+unplanned boot fetches a full round of those onto a pool whose metadata is
+already at 91.5%.
+
+**Do not delete the staging directory to reclaim the 113 GB it holds.** Every
+one of those directories is a live key in `logs/usenet-blackhole-state.json`,
+`sweep_staging` keeps them on purpose, and `fetch` wipes and re-downloads its
+own staging path anyway. Deleting them frees space and buys nothing.
+
+### Measuring whether one fetch stream beats three
+
+`FETCH_WORKERS` is 3, and no one has measured whether three concurrent fetches
+finish more releases per hour than one on this pool. The only observation is a
+single pass that cannot separate the concurrency from a 21-release pile-up, a
+flapping gate, a Time Machine client and Docker churn.
+
+With the ingest held down and the box quiet, patch `FETCH_WORKERS` to 1 on a
+branch, sync, and hand-run one pass with this sampler alongside. It reads
+`/proc` only and needs no root:
+
+```bash
+while :; do
+  printf '%s ' "$(date +%s)"
+  awk '/^full/{print $2, $3}' /proc/pressure/io
+  for d in sda sdb; do printf '%s ' "$(cut -d' ' -f1-8 /sys/block/$d/stat)"; done
+  echo
+  sleep 1
+done
+```
+
+Read off two numbers: releases completed per minute, and the delta in fields 3
+and 7 of `/sys/block/*/stat` (sectors read and written) per release. If one
+stream delivers 80% or more of the three-stream rate, set `FETCH_WORKERS` to 1 —
+the array is two rotational spindles, and the concurrency is buying queue depth
+rather than throughput. Record the two rates here when it is done.
+
+### Storage steps that are not in this repo
+
+These are host configuration on the NAS, applied by hand and persisted by
+UGOS-side mechanism, in the same category as the macvlan shim and the UGOS
+firewall rules. Run them with the ingest held down and the box quiet.
+
+**btrfs metadata is at 91.5% of its allocated chunk.** `/volume1` reported
+Metadata,DUP 4.58 GiB used of 5.00 GiB, against a `max_commit_ms` of 38,952 —
+the healthy reference in `btrfs(5)` is 2 ms.
+
+```bash
+btrfs filesystem usage -h /volume1          # before
+btrfs balance start -musage=50 /volume1     # the balance itself is I/O heavy
+btrfs filesystem usage -h /volume1          # after: expect Used below 60%
+cat /sys/fs/btrfs/*/commit_stats            # compare last_commit_ms before/after
+```
+
+**The two mirror legs disagree about request size.** `sda` has
+`max_sectors_kb=512` and `sdb` has `2048`, on identical
+`WDC WD201KFGX-68` firmware. RAID1 inherits the minimum, and `sda` issued 8.8%
+more write requests for byte-identical totals. Raise the smaller one, then
+confirm both legs report the same value and that their request counts converge:
+
+```bash
+for d in sda sdb; do echo "$d $(cat /sys/block/$d/queue/max_sectors_kb)"; done
+echo 2048 > /sys/block/sda/queue/max_sectors_kb     # needs root
+```
+
+**Lower the dirty-page ceiling.** The box has 7.88 GB of RAM, and
+`vm.dirty_ratio=20` permits 1.58 GB of dirty pages. Three concurrent downloads
+plus an extract plus a RAR unpack can cross that in seconds. This reduces peak
+throughput on a rotational array, so measure before adopting it:
+
+```bash
+sysctl vm.dirty_bytes vm.dirty_background_bytes
+```
+
+---
+
 ## Usenet Blackhole (systemd timer, every 2 minutes)
 
 Both arrs use their native `UsenetBlackhole` download client for usenet, not
