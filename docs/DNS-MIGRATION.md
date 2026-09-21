@@ -5,12 +5,12 @@ not in that path.** Written as the audited record of the 2026-09-21 migration:
 what was attempted, what actually happened, where the plan was wrong, and what is
 still open. If you are picking this up cold, read [§1](#1-status-at-a-glance),
 [§6](#6-live-only-state-that-is-not-in-this-repo) and
-[§8](#8-open-items) first. The two corrections worth reading even if you read
+[§7](#7-open-items) first. The two corrections worth reading even if you read
 nothing else are [§4.1](#41-the-redirect-only-ever-covered-stale-leases) and
 [§4.4](#44-fw3-does-not-re-run-etcfirewalluser-at-all).
 
 Last updated: **2026-09-21**. Sections 3, 4, 5 and 6 are historical and stay
-true; **§1 and §8 decay.** Where §1 would otherwise carry a bare number it names
+true; **§1 and §7 decay.** Where §1 would otherwise carry a bare number it names
 the command to re-check it instead.
 
 ---
@@ -26,7 +26,7 @@ the command to re-check it instead.
 | Where DNS is served | AdGuard Home on the router, `:53` after the redirect, listening on `:3053`; the router's dnsmasq sits underneath on `:53`. |
 | Watchdog | `/usr/sbin/arrdns-watchdog.sh` from cron every minute. Re-check: `ssh <router> /usr/sbin/arrdns-watchdog.sh --status` |
 | Tests | Green in CI. Locally, 28 failures are the known macOS baseline (BSD sed, no `timeout`, no PyYAML); CI on Linux is the gate. |
-| Open | [§8](#8-open-items): the soak (9.2/9.3) has to pass on the calendar, and the two config volumes are still on the NAS. |
+| Open | [§7](#7-open-items): the soak (9.2/9.3) has to pass on the calendar, and the two config volumes are still on the NAS. |
 
 The measurement the whole migration rests on, taken from a VLAN20 client polling
 every two seconds across a real NAS reboot on 2026-09-21:
@@ -316,7 +316,7 @@ byte-identical to what is deployed; the rest exists only on the device.
   fought.
 - `/var/log/arrdns-watchdog.log` — every transition, including the boot-time
   fallback. **`/var/log` is tmpfs, so this does not survive a reboot**; moving it
-  to `/etc` is an open item (§8).
+  to `/etc` is an open item (§7).
 - The four `dhcp_option 6` entries and the shortened lease times, and
   `/root/dns-pools-backup-20260921-122846.txt` — the rollback record.
 - `/etc/AdGuardHome/config.yaml` — the encrypted upstreams, the `.lan` rewrites
