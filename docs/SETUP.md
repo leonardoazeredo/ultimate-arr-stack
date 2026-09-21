@@ -436,15 +436,12 @@ Update `.env` with your provider's required variables.
 
 ### 2.5 Create Passwords
 
-**Pi-hole Password:**
+**Those who deploy this tree as it runs here do not need one for DNS.** Pi-hole
+and dnscrypt-proxy were removed from the stack on 2026-09-21; the house's DNS is
+AdGuard Home on the router, with its own admin credential there. See
+[LOCAL-DNS.md](LOCAL-DNS.md) and [DNS-MIGRATION.md](DNS-MIGRATION.md).
 
-> **Static IP required:** Pi-hole binds its DNS listener to `NAS_IP` at boot. Your NAS **must** have a static IP that matches `NAS_IP` in `.env`. If the IP comes from DHCP, Docker may start before it's assigned and Pi-hole will fail. Check with `ip addr show eth0` — if you see `dynamic`, configure a static IP first. See [Troubleshooting](TROUBLESHOOTING.md#pi-hole-doesnt-start-after-reboot) if Pi-hole fails after reboot.
-
-Invent a password. Or, to generate a random one:
-```bash
-openssl rand -base64 24
-```
-Edit `.env`: `PIHOLE_UI_PASS=your_password`
+**Traefik Dashboard Auth (first password to set):**
 
 **For + remote access: Traefik Dashboard Auth**
 

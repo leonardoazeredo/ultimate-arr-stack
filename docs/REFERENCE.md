@@ -18,7 +18,7 @@
 >    the house to dnsmasq; resolution is still working and only ad blocking is
 >    lost, so this is not an outage.
 > 3. `mode=adguard` with `probe=down` means the watchdog has not yet fired —
->    three consecutive failures are required. `tail /var/log/arrdns-watchdog.log`
+>    three consecutive failures are required. `tail /etc/arrdns-watchdog.log`
 >    shows every transition.
 > 4. If a single client is broken and the router is fine, that client is the
 >    problem; point it at `192.168.8.1` by hand to confirm.

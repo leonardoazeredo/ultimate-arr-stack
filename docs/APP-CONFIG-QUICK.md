@@ -102,12 +102,11 @@ Settings → Providers → add a provider (e.g., OpenSubtitles).
 
 > The script already configured Sonarr/Radarr connections and subtitle sync.
 
-### 6. Pi-hole — Verify upstream DNS
+### 6. DNS — nothing to configure here
 
-The script already pointed Pi-hole at the in-stack `dnscrypt-proxy` resolver. To check or change it:
-1. Open `http://NAS_IP:8081/admin`
-2. Login with the password from `PIHOLE_UI_PASS` in your `.env` (password only, no username)
-3. Settings → DNS → confirm the upstream server, or pick different ones (e.g., `1.1.1.1`, `8.8.8.8`)
+DNS is not part of this stack. Pi-hole and dnscrypt-proxy were removed on
+2026-09-21 and AdGuard Home on the router answers for the house. There is no
+Pi-hole login and no `PIHOLE_UI_PASS`. See [LOCAL-DNS.md](LOCAL-DNS.md).
 
 ---
 

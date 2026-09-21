@@ -365,17 +365,15 @@ Automatically downloads subtitles for your media.
 
    > **Why:** Jellyfin's web player has no manual subtitle delay control. If subs are out of sync, the only fix is re-timing the subtitle file itself — which is exactly what this does.
 
-## 4.9 Pi-hole (DNS)
+## 4.9 DNS
 
-> **Prerequisite: Static IP required.** Pi-hole binds to `NAS_IP` at boot. If the IP comes from DHCP, Docker starts before it's assigned and Pi-hole fails every reboot. Check: `ip addr show eth0` — if you see `dynamic`, it's DHCP and needs fixing. See [Troubleshooting: Pi-hole doesn't start after reboot](TROUBLESHOOTING.md#pi-hole-doesnt-start-after-reboot).
+**There is no DNS service in this stack any more.** Pi-hole and its
+dnscrypt-proxy sidecar were removed on 2026-09-21; AdGuard Home on the router
+answers for the house, and the warning that used to sit here about the NAS going
+down taking DNS with it is the reason. Nothing in `.env` configures it.
 
-1. **Access:** `http://NAS_IP:8081/admin`
-2. **Login:** Use password from `PIHOLE_UI_PASS` (password only, no username)
-3. **Upstream DNS:** Settings → DNS → pick upstream servers (1.1.1.1, 8.8.8.8, etc.)
-
-**Optional:** Set your router's DHCP DNS to your NAS IP for network-wide ad-blocking.
-
-> **Warning:** If your NAS goes down, every device on your network will lose internet (DNS stops resolving). To recover: temporarily change your device's DNS to `1.1.1.1` (or enable a VPN) so you can access your router and revert the DHCP DNS setting until Pi-hole is back up.
+- The arrangement, and what to do when a name does not resolve: [LOCAL-DNS.md](LOCAL-DNS.md)
+- How it got there, and what it cost: [DNS-MIGRATION.md](DNS-MIGRATION.md)
 
 ---
 
