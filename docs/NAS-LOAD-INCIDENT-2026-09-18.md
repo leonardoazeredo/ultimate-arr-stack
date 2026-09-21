@@ -260,12 +260,15 @@ watches the wrong window.
 finished (`scripts/lib/usenet_blackhole.py:882`). The local I/O comes from jobs
 it *has* finished. At 21:22:32 the state file held 24 jobs, **21 of them
 complete**, so the guard read **3** at the exact moment 21 releases — two of
-them 30–38 GB — were owed a local download. The fetch set took all 21
-(`to_fetch = owed[:FETCH_WORKERS]` in `run()` in
-`scripts/lib/usenet_blackhole.py`) with no reference to the ceiling anywhere on
-that path, and the string `in-flight cap reached` appears **zero times in 1,281
-log lines across 72 passes**. A guard whose reading falls as the load rises
-cannot bound the load.
+them 30–38 GB — were owed a local download. The fetch set took all 21, with no
+reference to the ceiling anywhere on that path, and the string `in-flight cap
+reached` appears **zero times in 1,281 log lines across 72 passes**. A guard
+whose reading falls as the load rises cannot bound the load.
+
+There was no slice to cite for that: `to_fetch` was every finished release. The
+line this paragraph used to quote, `to_fetch = owed[:FETCH_WORKERS]` in `run()`,
+is the one this branch added to bound exactly this, and it did not exist on
+2026-09-20.
 
 Consequences measured: one admitted pass ran 53m12s; a second took load from
 8.47 to 50.18 and io full avg10 to 81.91% in twelve minutes; one release cost
@@ -280,7 +283,11 @@ then only by reboot — four boots in two hours, one of them a hand-run
 
 **The queue is a ratchet.** 488 NZBs at the 09-18 reboot, 572 at 21:17, 588 at
 21:56. Producers offer roughly 72 an hour against a drain ceiling near 24, and
-when the gate skips a pass the drain goes to zero while they keep running.
+when the gate skips a pass the drain goes to zero while they keep running. The
+guard added for this, `scripts/lib/queue_high_water.sh`, stands both producers
+down at 50 NZBs rather than leaving the ratchet to the gate alone, and the fetch
+slice rotates least-recently-attempted first so the drain cannot freeze behind a
+release whose fetch keeps failing.
 
 **Two things this investigation corrected in its own first pass.** An active
 Time Machine backup was proposed as a co-driver; boot-wide, `smbd.service`

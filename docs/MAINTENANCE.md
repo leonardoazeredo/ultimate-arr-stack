@@ -352,12 +352,29 @@ Do **not** `mask` the timer as a hold. `scripts/rearm-user-timers.sh` exits 1
 whenever any `*.timer` in the unit directory is inactive, so a masked timer
 turns a deliberate hold into a failed system unit on every boot.
 
-**Do not start the pass, re-arm the timer, or reboot the NAS while the outbox
-is deep.** As of 2026-09-20 the queue stands at 588 NZBs with 21 releases
-already complete at TorBox and owed a local download, including four staged
-`payload.zip` files of 33.19, 27.59, 12.10 and 9.04 GB. The first pass after an
-unplanned boot fetches a full round of those onto a pool whose metadata is
-already at 91.5%.
+**Do not arm the timer while the outbox is deep. Drain it by hand instead.**
+Those are two different instructions, and an earlier version of this paragraph
+collapsed them into one: it said not to start a pass at all, which leaves no way
+to empty the queue, because the queue only drains by running passes.
+
+- **Do not arm the timer.** `systemctl --user enable --now usenet-blackhole.timer`
+  starts a pass every 2 minutes with nobody watching, which is how the box was
+  wedged on 2026-09-20.
+- **Do run passes by hand, one at a time, and read each one.** `./scripts/usenet-blackhole.sh --apply`
+  is bounded to a single round of `FETCH_WORKERS` (3) releases: `run()` sorts the
+  finished releases least-recently-attempted first and takes the front three, so
+  one hand-run can no longer pull a whole 21-release backlog onto the pool.
+  Repeat until the outbox is below the mark.
+- **The producers stand down on their own.** `scripts/stremio-library-sync.sh`
+  and `scripts/backlog-search.sh` both source `scripts/lib/queue_high_water.sh`
+  and exit 0 without queueing anything once the outbox holds 50 NZBs or more
+  (`QUEUE_HIGH_WATER`, counted by `outbox_depth`). Nothing has to be stopped by
+  hand, and the queue does not refill while the drain is being walked down.
+
+As of 2026-09-20 the queue stood at 588 NZBs with 21 releases already complete
+at TorBox and owed a local download, including four staged `payload.zip` files
+of 33.19, 27.59, 12.10 and 9.04 GB, against a pool whose metadata was already at
+91.5%. That is the state a sequence of hand-run passes has to walk out of.
 
 **Do not delete the staging directory to reclaim the 113 GB it holds.** Every
 one of those directories is a live key in `logs/usenet-blackhole-state.json`,
@@ -420,10 +437,12 @@ echo 2048 > /sys/block/sda/queue/max_sectors_kb     # needs root
 ```
 
 **Lower the dirty-page ceiling.** The box has 7.52 GiB of RAM (MemTotal
-7,884,640 kB; `free -m` reports 7,699 MiB), and `vm.dirty_ratio=20` permits
-1.58 GB of dirty pages. Three concurrent downloads plus an extract plus a RAR
-unpack can cross that in seconds. This reduces peak throughput on a rotational
-array, so measure before adopting it:
+7,884,640 kB, which is 8.07 GB; `free -m` reports 7,699 MiB), and
+`vm.dirty_ratio=20` permits 1.61 GB of dirty pages (20% of that 8.07 GB, since
+the ratio is a fraction of bytes and the 7.52 GiB is the same memory expressed
+in GiB). Three concurrent downloads plus an extract plus a RAR unpack can cross
+that in seconds. This reduces peak throughput on a rotational array, so measure
+before adopting it:
 
 ```bash
 sysctl vm.dirty_bytes vm.dirty_background_bytes          # read first
