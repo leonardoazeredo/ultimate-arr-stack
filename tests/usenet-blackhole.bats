@@ -296,6 +296,130 @@ STUB
     assert_output --partial "6"
 }
 
+# --- the fetch rate cap ----------------------------------------------------
+
+@test "usenet-blackhole: the banner reports the resting fetch rate cap" {
+    # The cap's absence and its presence at a value look identical in a pass
+    # that had nothing to download, and this is the line the measurement is
+    # read off. The resting value is the module's DEFAULT_FETCH_RATE_LIMIT, not
+    # a number this script picked: it reads "off" because that constant is 0,
+    # and the test below is what proves the banner follows the constant.
+    run "$RUN"
+    assert_success
+    assert_output --partial "Fetch rate cap: off (module default)"
+}
+
+@test "usenet-blackhole: the resting banner follows the module, not a copy" {
+    # No flag is passed when the operator names none, so the resting cap comes
+    # from scripts/lib/usenet_blackhole.py. A banner printing a number of its
+    # own would go stale the moment the measured value lands in the module --
+    # and the stale reading is "off", which is exactly what an operator checks
+    # to decide whether the cap is on.
+    sed -i.bak 's/^DEFAULT_FETCH_RATE_LIMIT = .*/DEFAULT_FETCH_RATE_LIMIT = 2000/' \
+        "$WORK/scripts/lib/usenet_blackhole.py"
+    run "$RUN"
+    assert_success
+    assert_output --partial "Fetch rate cap: 2000 kB/s per fetch (module default)"
+    refute_output --partial "Fetch rate cap: off"
+}
+
+@test "usenet-blackhole: --fetch-rate-limit reaches the banner and python" {
+    # The banner is only half of it: a value that never reaches python would
+    # announce a cap that nothing applies, and the whole point of this flag is
+    # the bytes the pool is asked to absorb.
+    printf 'MEDIA_ROOT=%s/data\nTORBOX_API_KEY=testtorboxkey\n' "$WORK" > "$ENV"
+    stub_python
+    run env "PATH=$WORK/bin:$PATH" "$RUN" --apply --fetch-rate-limit 2000
+    assert_success
+    assert_output --partial "Fetch rate cap: 2000 kB/s per fetch"
+    run grep -A 1 -x -- "--fetch-rate-limit" "$ARGV_FILE"
+    assert_success
+    assert_output --partial "2000"
+}
+
+@test "usenet-blackhole: --fetch-rate-limit=2000 is accepted as one argument" {
+    run "$RUN" --fetch-rate-limit=2000
+    assert_success
+    assert_output --partial "Fetch rate cap: 2000 kB/s per fetch"
+}
+
+@test "usenet-blackhole: an explicit zero is off, and still reaches python" {
+    # 0 is unlimited, and asking for it is not the same as saying nothing:
+    # saying nothing leaves the value to the module's constant, while a named 0
+    # is a cap the operator chose. A pass that dropped the 0 would run with
+    # whatever the module holds instead of what was asked for -- and the banner
+    # has to tell the two apart, because that is how a log says which one was
+    # in effect.
+    printf 'MEDIA_ROOT=%s/data\nTORBOX_API_KEY=testtorboxkey\n' "$WORK" > "$ENV"
+    stub_python
+    run env "PATH=$WORK/bin:$PATH" "$RUN" --apply --fetch-rate-limit 0
+    assert_success
+    assert_output --partial "Fetch rate cap: off"
+    refute_output --partial "Fetch rate cap: off (module default)"
+    run grep -A 1 -x -- "--fetch-rate-limit" "$ARGV_FILE"
+    assert_success
+    # Exact, not `--partial`: this asserts the 0 was passed, which is the
+    # difference between the operator's cap and the module's.
+    assert_line --index 1 "0"
+}
+
+@test "usenet-blackhole: the flag is not passed when the operator did not name it" {
+    # The resting value has to come from the module: a `--fetch-rate-limit 0`
+    # appended on every run would override DEFAULT_FETCH_RATE_LIMIT from the
+    # shell, so the number the measurement lands in would never take effect on
+    # the passes the timer actually runs.
+    printf 'MEDIA_ROOT=%s/data\nTORBOX_API_KEY=testtorboxkey\n' "$WORK" > "$ENV"
+    stub_python
+    run env "PATH=$WORK/bin:$PATH" "$RUN" --apply
+    assert_success
+    run grep -qx -- "--fetch-rate-limit" "$ARGV_FILE"
+    assert_failure
+}
+
+@test "usenet-blackhole: a trailing --fetch-rate-limit is refused, not silently defaulted" {
+    # Falling through to the resting value reads as "the number was accepted"
+    # when nothing was, and the difference is whether the pass that produced a
+    # log line was capped at what the operator typed.
+    run "$RUN" --fetch-rate-limit
+    assert_failure 2
+    assert_output --partial "--fetch-rate-limit needs a number"
+}
+
+@test "usenet-blackhole: a rate that is not a whole number is refused" {
+    # 0 is legal here -- unlimited, the resting state -- so this is not the
+    # --max-inflight rule. What is refused is everything that is not a
+    # non-negative whole number: a negative, a fraction, prose, and the empty
+    # string, which is what a shell hands over from an unset variable.
+    for value in -1 1.5 soon; do
+        run "$RUN" --fetch-rate-limit "$value"
+        assert_failure 2
+        assert_output --partial "ERROR: --fetch-rate-limit must be a whole number, got '$value'"
+    done
+    run "$RUN" --fetch-rate-limit ""
+    assert_failure 2
+    assert_output --partial "ERROR: --fetch-rate-limit must be a whole number, got ''"
+    run "$RUN" --fetch-rate-limit=
+    assert_failure 2
+    assert_output --partial "ERROR: --fetch-rate-limit must be a whole number, got ''"
+}
+
+@test "usenet-blackhole: a leading-zero fetch rate is read as decimal" {
+    # The same trap --max-inflight has: "08" passes the digits-only check, bash
+    # then reads it as an invalid octal in the banner's `-eq` -- erroring and
+    # printing the operator's spelling -- while python reads the same string as
+    # 8. Both halves have to see one decimal number.
+    printf 'MEDIA_ROOT=%s/data\nTORBOX_API_KEY=testtorboxkey\n' "$WORK" > "$ENV"
+    stub_python
+    run env "PATH=$WORK/bin:$PATH" "$RUN" --apply --fetch-rate-limit 08
+    assert_success
+    refute_output --partial "value too great for base"
+    assert_output --partial "Fetch rate cap: 8 kB/s per fetch"
+    refute_output --partial "Fetch rate cap: 08"
+    run grep -A 1 -x -- "--fetch-rate-limit" "$ARGV_FILE"
+    assert_success
+    assert_line --index 1 "8"
+}
+
 @test "usenet-blackhole: an unknown argument is refused" {
     run "$RUN" --applyy
     assert_failure

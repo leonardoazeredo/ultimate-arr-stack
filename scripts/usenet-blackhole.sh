@@ -17,6 +17,7 @@ set -euo pipefail
 #   ./scripts/usenet-blackhole.sh --apply --report-failures
 #   ./scripts/usenet-blackhole.sh --apply --report-dry-run
 #   ./scripts/usenet-blackhole.sh --apply --max-inflight 6
+#   ./scripts/usenet-blackhole.sh --apply --fetch-rate-limit 2000
 #
 # --report-failures tells the owning arr when a release reaches a terminal
 # failure, via POST /api/v3/history/failed/{id}: the arr marks the grab failed,
@@ -40,6 +41,17 @@ set -euo pipefail
 # below the ten rather than at a measured optimum -- the fetch-rate comparison at
 # 6 against 10 has not been run. Reaching the ceiling costs no TorBox call: the
 # check runs before the upload.
+#
+# --fetch-rate-limit KBPS caps each download in kilobytes per second, PER FETCH:
+# FETCH_WORKERS downloads run at once, so the pool still takes up to three times
+# the value. It is the knob the pool's write pressure answers to -- measured
+# 2026-09-21, two curls at ~17 MB/s drove `io full avg10` above 55% and a btrfs
+# commit to 87 seconds on a two-disk RAID1, while the bound on the pass, the
+# nocow staging directory and the lowered dirty-page ceilings only shaved the
+# peak. 0 is off. The resting value is DEFAULT_FETCH_RATE_LIMIT in
+# scripts/lib/usenet_blackhole.py, and this script passes the flag only when the
+# operator names one, so the banner reports the module's number when they do
+# not.
 #
 # Scheduled by usenet-blackhole.timer, every 2 minutes. Running it by hand is
 # how you see what it would do first.
@@ -167,6 +179,21 @@ TIMEOUT_HOURS="$DEFAULT_TIMEOUT_HOURS"
 STALL_HOURS="$DEFAULT_STALL_HOURS"
 MAX_INFLIGHT="$DEFAULT_MAX_INFLIGHT"
 
+# The rate cap as the operator gave it, with no wrapper default on purpose.
+#
+# The resting value is DEFAULT_FETCH_RATE_LIMIT in
+# scripts/lib/usenet_blackhole.py, and the flag is passed to python only when
+# this is set -- sending a 0 from here on every pass would override the module's
+# constant from the shell, so the number the measurement lands in would never
+# take effect on the passes the timer runs. That is the same shape
+# --report-failures has, and the opposite of --max-inflight, whose
+# always-passed 0 means its real resting value has to live in the unit.
+#
+# SET is tracked separately because "the operator passed an empty string" is a
+# value that has to be refused, and an unset default would look identical to it.
+FETCH_RATE_LIMIT=""
+FETCH_RATE_LIMIT_SET=false
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --apply) APPLY=true ;;
@@ -205,6 +232,19 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --max-inflight=*) MAX_INFLIGHT="${1#*=}" ;;
+    --fetch-rate-limit)
+      if [[ $# -lt 2 ]]; then
+        echo "ERROR: --fetch-rate-limit needs a number" >&2
+        exit 2
+      fi
+      FETCH_RATE_LIMIT="$2"
+      FETCH_RATE_LIMIT_SET=true
+      shift
+      ;;
+    --fetch-rate-limit=*)
+      FETCH_RATE_LIMIT="${1#*=}"
+      FETCH_RATE_LIMIT_SET=true
+      ;;
     --help|-h)
       # The header block at the top of this file, printed verbatim. A fixed
       # range rather than `sed -n '2,/^$/p'`, which BSD sed rejects -- and it
@@ -214,9 +254,10 @@ while [[ $# -gt 0 ]]; do
       #
       # The range moves whenever a line is added to the header. It was 3,27
       # until the --report-failures paragraph above went in, 3,40 until
-      # --stall-hours did, and 3,46 until --max-inflight did; that test is what
-      # notices, so run it after editing the top of this file.
-      sed -n '3,55p' "$0" | sed 's/^# \{0,1\}//'
+      # --stall-hours did, 3,46 until --max-inflight did, and 3,55 until
+      # --fetch-rate-limit did; that test is what notices, so run it after
+      # editing the top of this file.
+      sed -n '3,67p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
@@ -271,6 +312,31 @@ esac
 # because it sits in an `if` condition out of the timer's log.
 MAX_INFLIGHT=$((10#$MAX_INFLIGHT))
 
+# Whole number, and not negative -- but 0 is legal, which is where this parts
+# company with --max-inflight. There, a negative ceiling silently stops every
+# pass from submitting while the log says the cap was reached; here, 0 is
+# curl's `--limit-rate` left off, the resting state, so refusing it would refuse
+# the default. What is refused is anything that is not a non-negative whole
+# number, and it is refused at the argument rather than by curl: measured
+# against curl 8.7.1, `--limit-rate abc` exits 2 with "option --limit-rate: is
+# badly used here", which would take the download down on a timer nobody is
+# watching. The digits-only pattern is the script's existing idiom, and it puts
+# the empty string, the negative and the fraction on the raw value, before any
+# arithmetic can reinterpret them.
+if $FETCH_RATE_LIMIT_SET; then
+  case "$FETCH_RATE_LIMIT" in
+    ''|*[!0-9]*)
+      echo "ERROR: --fetch-rate-limit must be a whole number, got '$FETCH_RATE_LIMIT'" >&2
+      exit 2
+      ;;
+  esac
+  # Base ten here too, for the reason the --max-inflight line above spells out:
+  # bash reads "08" as an invalid octal in the banner's comparisons while python
+  # reads the same string as 8, which would leave the banner and the pass
+  # disagreeing about the cap.
+  FETCH_RATE_LIMIT=$((10#$FETCH_RATE_LIMIT))
+fi
+
 log() { echo "[usenet-blackhole] $1"; }
 
 # One line per pass the pressure gate refuses to start: when, at what reading,
@@ -307,6 +373,41 @@ if [[ "$MAX_INFLIGHT" -eq 0 ]]; then
   echo "In-flight cap: off"
 else
   echo "In-flight cap: $MAX_INFLIGHT"
+fi
+# The resting cap, for the line below: what python applies when the operator
+# names no --fetch-rate-limit. Read out of the module instead of copied here,
+# because the flag is passed through only when it is given -- the module is the
+# single source of truth, and a copy of the number in this file would go stale
+# the moment the measured value lands there, reporting "off" for a pass that is
+# capped. The banner is the only place that number is visible at all, so a
+# stale copy is a lie rather than a missing detail.
+#
+# The digits check is the same idiom the gate below uses: a value this script
+# cannot read is reported as "unknown" rather than "off", because guessing is
+# what makes a banner worth ignoring.
+RESTING_FETCH_RATE_LIMIT="$(sed -n \
+  's/^DEFAULT_FETCH_RATE_LIMIT[[:space:]]*=[[:space:]]*//p' \
+  "$SCRIPT_DIR/lib/usenet_blackhole.py" 2>/dev/null | head -1)"
+case "$RESTING_FETCH_RATE_LIMIT" in
+  ''|*[!0-9]*) RESTING_FETCH_RATE_LIMIT="unknown" ;;
+esac
+# Printed in both modes, "off" included, and it says which of the two it is: the
+# value the operator named, or the module's resting one. The cap's absence and
+# its presence at a value look identical in a pass that had nothing to download,
+# and this is the line the measurement is read off -- per fetch, so a pass with
+# three of them still moves up to three times the number here.
+if ! $FETCH_RATE_LIMIT_SET; then
+  if [[ "$RESTING_FETCH_RATE_LIMIT" == "unknown" ]]; then
+    echo "Fetch rate cap: unknown (module default unreadable)"
+  elif [[ "$RESTING_FETCH_RATE_LIMIT" -eq 0 ]]; then
+    echo "Fetch rate cap: off (module default)"
+  else
+    echo "Fetch rate cap: ${RESTING_FETCH_RATE_LIMIT} kB/s per fetch (module default)"
+  fi
+elif [[ "$FETCH_RATE_LIMIT" -eq 0 ]]; then
+  echo "Fetch rate cap: off"
+else
+  echo "Fetch rate cap: ${FETCH_RATE_LIMIT} kB/s per fetch"
 fi
 # Said out loud in both modes, because "reporting is on" and "reporting is off"
 # are otherwise indistinguishable from a log that had nothing to report -- and
@@ -354,6 +455,9 @@ if $APPLY; then PY_ARGS+=(--apply); fi
 if $VERBOSE; then PY_ARGS+=(--verbose); fi
 if $REPORT_FAILURES; then PY_ARGS+=(--report-failures); fi
 if $REPORT_DRY_RUN; then PY_ARGS+=(--report-dry-run); fi
+# Only when the operator named one, so the resting value stays the module's
+# constant rather than a 0 this script would otherwise send on every pass.
+if $FETCH_RATE_LIMIT_SET; then PY_ARGS+=(--fetch-rate-limit "$FETCH_RATE_LIMIT"); fi
 
 # The keys go through the environment, not argv -- the same fix
 # scripts/queue-cleanup.sh carries, for the same reason: `--api-key "$KEY"`

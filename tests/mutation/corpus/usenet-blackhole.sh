@@ -32,7 +32,7 @@ mutation usenet-blackhole-help-prints-its-own-source \
   --bats tests/usenet-blackhole.bats \
   --test "^usenet-blackhole: --help stops at the comment block" \
   --why "the fixed-range sed that prints the header has to stop ON the last comment line; one line further and --help emits the SCRIPT_DIR assignment below it, shell source dressed as documentation. This is a hardcoded range, so it goes stale every time a line is added to the header -- which is exactly what happened when the --report-failures paragraph went in, and the test is what noticed" \
-  --apply 'perl -pi -e "s/\Qsed -n '"'"'3,55p'"'"'\E/sed -n '"'"'3,58p'"'"'/" "$F"'
+  --apply 'perl -pi -e "s/\Qsed -n '"'"'3,67p'"'"'\E/sed -n '"'"'3,70p'"'"'/" "$F"'
 
 # --- staging inside the arr's watch folder ---------------------------------
 
@@ -83,7 +83,7 @@ mutation usenet-blackhole-fetch-output-interleaved \
   --bats tests/python-suite.bats \
   --test "the extracted modules pass their pytest suite" \
   --why "each fetch collects its own lines and the caller prints them whole. Handing the shared stream to three threads instead puts one release's progress inside another's, which is how a log stops being readable at exactly the moment -- several concurrent failures -- when someone needs it" \
-  --apply 'sed -i.bak "s@out=lines.append)@out=print)@" "$F" && rm -f "$F.bak"'
+  --apply 'sed -i.bak "s@out=lines.append,@out=print,@" "$F" && rm -f "$F.bak"'
 
 # --- reading TorBox's failure states ----------------------------------------
 #
