@@ -160,6 +160,12 @@ Two consequences worth keeping:
   than the NAS. That is a deliberate trade: the router is already the gateway,
   so a house whose router is down has no internet with or without DNS. The
   watchdog above is what keeps it from being *two* points.
+- **The NAS Pi-hole and dnscrypt-proxy are stopped** as of 2026-09-21 (Phase 9.1
+  of the migration): `docker stop`, not removed, volumes kept. Nothing points at
+  them and nothing is listening on the NAS's `:53`. `docker start pihole
+  dnscrypt-proxy` brings them back if a rollback is ever needed; they are removed
+  only after a week with no traffic to them (9.2/9.3) and that lands as its own
+  PR (9.4).
 - **The `pi2-dns` stack (Pi-hole + dnscrypt-proxy on the Pi 3) is a standby, not a
   peer** — it serves no DHCP client. It was **stopped and retired on 2026-09-10**:
   containers stopped (not removed), and pi2's checkout returned to `main` so no

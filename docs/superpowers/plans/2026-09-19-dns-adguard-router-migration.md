@@ -651,7 +651,11 @@ any pool. Recorded as a gap rather than dressed up.
 
 ### Phase 9 — Sunset the NAS resolver
 
-- [ ] **9.1 Stop** `pihole` and `dnscrypt-proxy` (`docker stop`, not `down`, not removal). Keep `pihole-etc-pihole` and `dnscrypt-config` volumes.
+- [x] **9.1 Stop** `pihole` and `dnscrypt-proxy` (`docker stop`, not `down`, not removal). Keep `pihole-etc-pihole` and `dnscrypt-config` volumes. — **Done 2026-09-21.** Both `exited`; both volumes present. No client had queried Pi-hole since 15:00 that day, before it was stopped, so the soak in 9.2/9.3 starts from a resolver that was already idle rather than one that had to be drained.
+
+  **One consumer had to be found first, and it was the kind that hides.** `uptime-kuma` was the last thing still resolving through the NAS: it was created on 2026-08-15 carrying `dns: [172.20.0.5]`, and the branch that repointed that entry to the router reached `main` only after the container was last recreated — so the *file* said the router while the *running container* still said Pi-hole. `docker compose ... up -d --force-recreate uptime-kuma` fixed it; it came back healthy and serving its UI on `192.168.110.1`. This is precisely the drift `CLAUDE.md`'s "a NAS left checked out on a feature branch is indistinguishable from a deployed one" warns about, one layer down: a synced file and a running container are different things, and only recreating makes them agree. Worth checking for by inspecting `HostConfig.Dns` on every running container, not by grepping the compose files.
+
+  After the stop: a real VLAN20 client still resolves and still blocks, the NAS's own resolver is the router and works, nothing listens on the NAS's `:53` any more, and every stack container is healthy.
 - [ ] **9.2 Confirm nothing regressed** across a full week, including the NAS's own reboot cycle.
 - [ ] **9.3 Confirm no client still queries them**, from the Pi-hole query count over seven days. Do not use a conntrack check for this: DNS conntrack entries expire in seconds, so "no remaining flows" passes immediately after the last query regardless of whether clients still query occasionally.
 - [ ] **9.4 Only then** remove the two services from the compose file, back up the volumes first per the repo's backup convention, and land it through a PR.
