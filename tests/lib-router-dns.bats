@@ -898,3 +898,47 @@ EOF
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }
+
+# --------------------------------------------------------------------------
+# The same check against ip6tables
+# --------------------------------------------------------------------------
+#
+# fw3 runs /etc/firewall.user once per address family, so the identical rules
+# must be in ip6tables as well as iptables — measured 2026-09-21, after the plan
+# had assumed IPv6 was out of scope. `ip6tables -t nat -S` has the same shape, so
+# the same rule judges it; these pin that, because a capture from the wrong table
+# or a family that quietly stopped being redirected is otherwise invisible.
+
+@test "router-dns: an IPv6 nat capture is judged by the same rule" {
+    all_bridges
+    local -a rules=()
+    local i
+    for i in br-lan.1 br-lan.10 br-lan.20 br-lan.30 br-guest; do
+        # Same shape as the IPv4 fixtures: `-D`/`-A` lines and the same tokens.
+        rules+=("$(direct_dns "$i" tcp)" "$(direct_dns "$i" udp)")
+    done
+    nat_capture nat6.txt "${rules[@]}"
+
+    # RED if the parser assumed an IPv4-only capture — it must not care which
+    # family produced the listing, since the rule it looks for is identical.
+    run router_dns_client_path_check 3053 "$FIX/ifaces.txt" "$FIX/nat6.txt"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"5 bridge(s) checked, 0 not on 3053"* ]]
+}
+
+@test "router-dns: a bridge missing from the IPv6 table fails like any other" {
+    all_bridges
+    local -a rules=()
+    local i
+    for i in br-lan.1 br-lan.10 br-lan.30 br-guest; do
+        rules+=("$(direct_dns "$i" tcp)" "$(direct_dns "$i" udp)")
+    done
+    nat_capture nat6.txt "${rules[@]}"
+
+    # The failure this guards against is not hypothetical symmetry: if ip6tables
+    # lost the rules, only the IPv6 half of every client's resolution would stop
+    # being filtered, and an IPv4-only check would report a healthy router.
+    run router_dns_client_path_check 3053 "$FIX/ifaces.txt" "$FIX/nat6.txt"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"FAIL br-lan.20"* ]]
+}

@@ -157,15 +157,25 @@ router_capture() {
 # (d) the client path -- the connection between the pieces (a), (b) and (c) judge
 # ---------------------------------------------------------------------------
 
-@test "router-dns: every client bridge's :53 is redirected to the port AdGuard Home listens on" {
+@test "router-dns: every client bridge's :53 is redirected to the port AdGuard Home listens on, over IPv4 and IPv6" {
     require_router
 
     local ifaces="$BATS_TEST_TMPDIR/ip-4-addr.txt"
-    local nat="$BATS_TEST_TMPDIR/nat.txt"
+    local nat4="$BATS_TEST_TMPDIR/nat4.txt"
+    local nat6="$BATS_TEST_TMPDIR/nat6.txt"
     local adg_cfg="$BATS_TEST_TMPDIR/adguard-home-config.yaml"
 
     router_capture "$ifaces" "ip -4 -o addr show"
-    router_capture "$nat" "iptables -t nat -S"
+    router_capture "$nat4" "iptables -t nat -S"
+    # Both families, because both are real. The plan assumed IPv6 was out of
+    # scope; measured 2026-09-21, the router's ip6tables carries the same ten
+    # per-bridge rules, following the same port file, and pi1 querying the ULA
+    # fde0:4646:77b8::1 gets 0.0.0.0 for a blocklisted name. The mechanism that
+    # mirrors them is not identified — running the include directly does not
+    # create them — so the observable is what gets asserted. Nothing else in this
+    # repo reads ip6tables, and an unasserted half of a working mechanism is how
+    # it stops working.
+    router_capture "$nat6" "ip6tables -t nat -S"
 
     # Read from AdGuard's own config rather than writing 3053 here. The invariant
     # is that the redirects name the port AdGuard Home is listening on; a
@@ -181,17 +191,27 @@ router_capture() {
     [[ -n "$adg_port" ]] \
         || skip "AdGuard Home's config.yaml does not state a DNS port, so there is no port to require the redirects to name"
 
-    run router_dns_client_path_check "$adg_port" "$ifaces" "$nat"
-    if [[ "$status" -ne 0 ]]; then
+    local pair family path failures=0
+    for pair in "IPv4:$nat4" "IPv6:$nat6"; do
+        family="${pair%%:*}"
+        path="${pair#*:}"
+
+        run router_dns_client_path_check "$adg_port" "$ifaces" "$path"
+        echo "--- ${family} ---"
         echo "$output"
-        echo "--- the port AdGuard Home listens on: ${adg_port} ---"
-        echo "--- PREROUTING rules on :53 ---"
-        grep -E '^-A PREROUTING.*--dport 53' "$nat" || echo "  (none)"
-        echo "--- chains that reach a REDIRECT to ${adg_port} ---"
-        router_dns_chain_redirects "$adg_port" <"$nat" | sed 's/^/  /' || true
-        false
-    fi
-    echo "$output"
+        if [[ "$status" -ne 0 ]]; then
+            echo "--- ${family} PREROUTING rules on :53 ---"
+            grep -E '^-A PREROUTING.*--dport 53' "$path" || echo "  (none)"
+            echo "--- ${family} chains that reach a REDIRECT to ${adg_port} ---"
+            router_dns_chain_redirects "$adg_port" <"$path" | sed 's/^/  /' || true
+            failures=$((failures + 1))
+        fi
+    done
+
+    # Both families are asserted before either failure is raised, so one run
+    # reports what IPv4 and IPv6 each look like rather than stopping at the
+    # first. A single red family is still a red test.
+    [[ "$failures" -eq 0 ]]
 }
 
 # NOT tested, and why:

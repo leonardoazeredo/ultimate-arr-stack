@@ -24,10 +24,35 @@
 #   * Which process holds :53. What a client can reach is the socket; whether
 #     dnsmasq or AdGuard Home answers behind the redirect is Phase 6's business
 #     and is asserted in tests/dns-resilience.bats, not from configuration.
-#   * IPv6. dnsmasq binds :53 on a long list of link-local addresses that change
-#     with every interface event; the migration is IPv4 (`ra` and `dhcpv6` are
-#     disabled on vlan10/20/30) and an IPv6 bind list would be a moving target
-#     that fails for reasons no one is migrating.
+#   * IPv6 *binds*. dnsmasq binds :53 on a long list of link-local addresses that
+#     change with every interface event, and an IPv6 bind list would be a moving
+#     target that fails for reasons no one is migrating. router_dns_binds_check
+#     stays IPv4-only for that reason.
+#
+#     The IPv6 *redirect*, however, is real and is now asserted. The migration
+#     plan assumed IPv6 was out of scope ("the migration is IPv4; `ra` and
+#     `dhcpv6` are disabled on vlan10/20/30"), and for clients on those VLANs
+#     that is true. It is not true of the router: `lan` and `guest` hand out
+#     `fde0:4646:77b8::1`, and the router's ip6tables nat PREROUTING carries the
+#     same ten per-bridge rules, in the same order, following the same port file.
+#
+#     Three things are measured (2026-09-21) and worth stating precisely, because
+#     the mechanism is NOT identified and a guess was already wrong once:
+#
+#       * setting /etc/arrdns-port to 53 with `dns_enabled='1'` moves *both*
+#         families to 53 on an `fw3 reload` — so the IPv6 rules follow the port
+#         file, not `dns_enabled`;
+#       * running `/etc/firewall.user` directly does NOT create them, even though
+#         fw3 runs it exactly once per reload and `iptables` is the same
+#         IPv4-only binary inside fw3's shell as outside it. So something else in
+#         the reload mirrors them across families. That was not chased further;
+#         what matters here is the observable, which the test below pins;
+#       * a real client confirms it end to end — pi1 querying the router's ULA
+#         `fde0:4646:77b8::1` gets `0.0.0.0` for a blocklisted name.
+#
+#     So an IPv6 client was never bypassing AdGuard, and the guard covers both
+#     families now. An unasserted half of a working mechanism is exactly how it
+#     stops working without anyone noticing.
 #
 # RETURN CODES, used the same way by every check_* function:
 #

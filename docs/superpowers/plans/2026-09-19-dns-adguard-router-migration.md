@@ -512,7 +512,42 @@ assumed — querying Pi-hole's FTL database for anything since the 12:34 cutover
 returned no LAN device at all, every client's last query predating it. It is not
 literally idle: `gluetun` still resolves through it on `main`, which is 8.1's whole
 subject, and with 8.1 live Pi-hole's client list went to **zero of any kind**. That
-is the state 9.1 needs. Rollback trigger: any acceptance failure → `dns_enabled='0'` plus firewall reload, seconds of degraded blocking at worst, no loss of resolution.
+is the state 9.1 needs.
+
+### Amendment: IPv6 is in the query path, and this plan said it would not be
+
+The Evidence at the top of this plan says "IPv6 is unaffected: `ra` and `dhcpv6`
+are `disabled` on all three VLAN pools, so there is no IPv6 resolver handout to
+migrate." For clients **on those VLANs** that is true and stays true. It is not
+the whole picture, and the part it misses was found on 2026-09-21 rather than
+reasoned about here.
+
+`lan` and `guest` hand out `fde0:4646:77b8::1` — the router, so no NAS dependency
+and nothing to migrate. But the router's **ip6tables** nat PREROUTING turns out to
+carry the same ten per-bridge rules as its iptables table, in the same order,
+pointing at the same port AdGuard listens on, and pi1 querying the router's ULA
+gets `0.0.0.0` for a blocklisted name. So an IPv6 client is served, and filtered,
+by the same mechanism as everything else. Nothing in the plan or the repo ever
+asserted that, and the IPv6 half of a working mechanism is exactly the half that
+stops working unnoticed.
+
+Three things are measured; the mechanism is not identified, and a wrong guess was
+already made and corrected while writing this:
+
+- setting `/etc/arrdns-port` to 53 with `dns_enabled='1'` moves **both** families
+  to 53 on an `fw3 reload`, so the IPv6 rules follow the port file and therefore
+  move with the watchdog;
+- running `/etc/firewall.user` directly does **not** create them, even though fw3
+  runs it exactly once per reload and `iptables` is the same IPv4-only binary
+  inside fw3's shell as outside it. Something else in the reload mirrors them
+  across families. The first draft of this note guessed "fw3 runs the include once
+  per address family"; measuring it disproved that, and the note now records the
+  observation instead;
+- a real client confirms it end to end.
+
+`tests/router-dns.bats` now asserts both families, and two synthetic tests in
+`tests/lib-router-dns.bats` pin that the same rule judges an `ip6tables` capture.
+The observable is what is guarded, since the observable is what is known. Rollback trigger: any acceptance failure → `dns_enabled='0'` plus firewall reload, seconds of degraded blocking at worst, no loss of resolution.
 
 ---
 
