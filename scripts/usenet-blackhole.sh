@@ -61,6 +61,8 @@ ENV_FILE="$NAS_STACK_DIR/.env"
 
 # shellcheck source=scripts/lib/env-file.sh
 . "${SCRIPT_DIR}/lib/env-file.sh"
+# shellcheck source=scripts/lib/queue_high_water.sh
+. "${SCRIPT_DIR}/lib/queue_high_water.sh"
 
 # Both live under MEDIA_ROOT, because a blackhole is a filesystem handshake:
 # the arr writes the .nzb and then looks for the result, and it does both from
@@ -78,9 +80,8 @@ ENV_FILE="$NAS_STACK_DIR/.env"
 # that filters them in `FilterPaths` needs a trailing separator that
 # `GetRelativePath` has already trimmed -- so a staging directory in there is
 # reported as a completed download and its half-written files get imported.
-MEDIA_ROOT_VALUE=$(env_value "$ENV_FILE" MEDIA_ROOT || true)
-MEDIA_ROOT_VALUE="${MEDIA_ROOT_VALUE:-$NAS_STACK_DIR/data}"
-NZB_DIR="${USENET_NZB_DIR:-$MEDIA_ROOT_VALUE/usenet/blackhole/nzb}"
+MEDIA_ROOT_VALUE="$(media_root)"
+NZB_DIR="$(outbox_dir)"
 WATCH_DIR="${USENET_WATCH_DIR:-$MEDIA_ROOT_VALUE/usenet/blackhole/complete}"
 STAGING_DIR="${USENET_STAGING_DIR:-$MEDIA_ROOT_VALUE/usenet/blackhole/staging}"
 STATE_PATH="$NAS_STACK_DIR/logs/usenet-blackhole-state.json"

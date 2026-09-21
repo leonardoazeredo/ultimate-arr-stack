@@ -57,12 +57,26 @@ mutation usenet-blackhole-fetches-one-at-a-time \
   --why "FETCH_WORKERS = 1 restores the serial fetch this was written to remove, and it is the mutation that matters most here: the concurrency test sizes its barrier at three and is hardcoded rather than reading the constant, because a fixture that read it would shrink to one job and one barrier slot and pass against a serial implementation" \
   --apply 'sed -i.bak "s@^FETCH_WORKERS = 3\$@FETCH_WORKERS = 1@" "$F" && rm -f "$F.bak"'
 
-mutation usenet-blackhole-fetch-pool-unbounded \
+# --- the pool runs one release at a time -----------------------------------
+#
+# A serial pool restores the latency the parallel fetch was written to remove:
+# a pass that finds a round of finished releases pulls them one after another,
+# so the last waits out every earlier download and unpack. Measured 2026-09-20
+# a single release is up to 38 GB, so that wait is not academic.
+#
+# This replaces usenet-blackhole-fetch-pool-unbounded, which mutated
+# max_workers=min(...) to max_workers=None. Capping to_fetch at FETCH_WORKERS
+# made that mutation behaviourally equivalent -- the pool can never see more
+# than FETCH_WORKERS tasks -- so the entry could no longer be killed. The
+# unbounded-pass hazard it guarded is now covered by
+# usenet-blackhole-fetch-set-unbounded, which removes the slice itself.
+
+mutation usenet-blackhole-fetch-pool-serialised \
   --file scripts/lib/usenet_blackhole.py \
   --bats tests/python-suite.bats \
   --test "the extracted modules pass their pytest suite" \
-  --why "an uncapped pool starts an unrar per completed release at once. The unpack is CPU-bound and this runs on a NAS that is also transcoding, with the arr's importer reading the same disk, so the bound is what keeps a large batch from stalling everything else on the box" \
-  --apply 'sed -i.bak "s@max_workers=min(FETCH_WORKERS, len(to_fetch))@max_workers=None@" "$F" && rm -f "$F.bak"'
+  --why "max_workers=1 serialises the fetch pool. Each release waits out every earlier download and unpack, which on this NAS is tens of GB per release at rotational-disk latency; the parallel pool exists precisely to overlap that waiting. Removes the pool bound's only observable consequence" \
+  --apply 'sed -i.bak "s@max_workers=FETCH_WORKERS@max_workers=1@" "$F" && rm -f "$F.bak"'
 
 mutation usenet-blackhole-fetch-output-interleaved \
   --file scripts/lib/usenet_blackhole.py \
@@ -530,3 +544,47 @@ mutation status-drop-the-skip-notice \
   --test "the extracted modules pass their pytest suite" \
   --why "the shell half records the skip and the renderer half has to show it; a page that reads the file and prints nothing is the same page as before the fix -- twelve jobs painted \`stalled\` with a fresh \`Generated\` timestamp and no reason anywhere. The JSON keeps the record either way, so only a renderer test notices" \
   --apply 'sed -i.bak "s@^    if not isinstance(skipped, dict):\$@    if True:@" "$F" && rm -f "$F.bak"'
+
+# --- the fetch set has no ceiling ------------------------------------------
+#
+# The ceiling that shipped with PR #101 counts jobs TorBox has NOT finished.
+# The local I/O that wedged the host comes from the jobs it HAS finished, and
+# that population had no bound at all on 2026-09-20: 21 releases owed local
+# I/O while --max-inflight read 3.
+
+mutation usenet-blackhole-fetch-set-unbounded \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "restores the line that let a single admitted pass pull 21 releases, two of them 30-38 GB, three at a time for 53m12s. Measured that day: load went 8.47 -> 50.18 and io full avg10 to 81.91%, and the value the operator's ceiling compared against was 3 because it counts jobs still AT TorBox. The pass cost 86.22 GB logical and 170.6 GB of platter writes to deliver a few GB of media. This entry also carries the unbounded-pool hazard the retired usenet-blackhole-fetch-pool-unbounded used to cover: with the slice gone, to_fetch is again every finished release, so the pass is unbounded -- an unbounded pass, still a 3-wide pool, because max_workers=FETCH_WORKERS survives this edit (measured with the slice removed, 9 finished jobs: peak 3 concurrent fetches)" \
+  --apply 'sed -i.bak "s@to_fetch = owed\[:FETCH_WORKERS\]@to_fetch = owed@" "$F" && rm -f "$F.bak"'
+
+# --- a failing release pinned to the head of the queue ----------------------
+#
+# The slice bounds a pass, but taking it from the head as it arrives makes the
+# head fixed: `state["jobs"]` is insertion-ordered and a job stays in it until
+# its fetch succeeds. poll() returns a `complete` job at the DONE branch, long
+# before any stall or timeout logic, so a release whose fetch keeps failing
+# transiently is never bounded by anything -- it just occupies the budget again
+# on the next pass.
+
+mutation usenet-blackhole-fetch-slice-pinned-to-the-head \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "removes the rotation, restoring a fixed head. A release whose fetch fails transiently is never bounded by poll -- it is already past the DONE branch -- so with FETCH_WORKERS such releases in front, the whole per-pass budget is consumed and every release behind them is never attempted. That is worse than slow: the outbox guard stands both producers down while the queue is deep, so the drain freezes and the queue stays deep. Measured 2026-09-20: passes fetched 2, 2, 1, 1, 0 and then zero for every pass after" \
+  --apply 'sed -i.bak "/^    owed\.sort(key=lambda item:/d" "$F" && rm -f "$F.bak"'
+
+# --- the attempt mark never reaches disk ------------------------------------
+#
+# Marking before the fetch only means anything if the mark is durable before the
+# fetch. Left to the save_state at the end of `run()`, a fetch that never returns
+# -- SIGKILL, or the OOM killer -- takes the mark with it, and the release sorts
+# back to the head of every later pass.
+
+mutation usenet-blackhole-attempt-mark-not-written-before-the-fetch \
+  --file scripts/lib/usenet_blackhole.py \
+  --bats tests/python-suite.bats \
+  --test "the extracted modules pass their pytest suite" \
+  --why "removes the save_state that writes the attempt mark before the first fetch, leaving only the one at the end of the pass. A fetch killed by SIGKILL or the OOM killer never returns, so that one is unreachable and the mark is lost with the process: the release keeps an empty last_fetch_attempt, sorts to the head of every subsequent pass, and kills it again the same way. The rotation was added to stop exactly that freeze, and this is the case where it was still live -- a 7.5 GiB box carrying 30 containers and unpacking 38 GB releases" \
+  --apply 'sed -i.bak "s@^        save_state(state_path, state)\$@        pass@" "$F" && rm -f "$F.bak"'

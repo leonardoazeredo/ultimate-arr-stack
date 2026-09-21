@@ -312,6 +312,7 @@ old "14 tests" claim went stale.
 - `scripts/detect-credential-drift.sh`
 - `scripts/detect-vpn-zombies.sh`
 - `scripts/indexer-guard.sh`
+- `scripts/lib/queue_high_water.sh`
 - `scripts/post-merge`
 - `scripts/pre-commit`
 - `scripts/rearm-user-timers.sh`

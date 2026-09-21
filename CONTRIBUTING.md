@@ -361,6 +361,7 @@ scripts/
     ├── check-image-versions.sh # Check for stale Docker image tags
     ├── configure-helpers.sh    # HTTP/JSON helpers for configure-apps.sh
     ├── env-file.sh             # Read a single value out of a .env file
+    ├── queue_high_water.sh     # Refuse a request producer while the NZB outbox is deep
     ├── backlog_search.py       # The backlog sweeper's logic, as an importable module
     ├── fix_radarr_paths.py     # The Radarr fixer's logic, as an importable module
     ├── fix_sonarr_folders.py   # The Sonarr fixer's logic, as an importable module

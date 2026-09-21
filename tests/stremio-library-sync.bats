@@ -437,3 +437,60 @@ STUB
     run grep -E '\b(curl|wget)\b' "$REPO_ROOT/scripts/stremio-library-sync.sh"
     assert_failure
 }
+
+# --- the outbox high-water gate --------------------------------------------
+
+@test "stremio-library-sync: a deep outbox stands the pass down" {
+    # The sync adds requests; the blackhole drains them. Nothing connected the
+    # two until 2026-09-20, when the outbox reached 588 while the pressure gate
+    # was refusing passes -- the producers kept writing while the drain was
+    # stopped, and every NZB in the queue becomes a multi-GB local download the
+    # moment the gate opens.
+    #
+    # The key checks come first in the script and the queue check after them, so
+    # this fixture has to set both keys or it would exit on the key error and
+    # pass against a guard that was never reached.
+    stub_python
+    printf 'STREMIO_AUTH_KEY=k\nSEERR_API_KEY=k\nMEDIA_ROOT=%s/media\n' "$WORK" > "$ENV"
+    mkdir -p "$WORK/media/usenet/blackhole/nzb"
+    local i
+    for ((i = 0; i < 50; i++)); do
+        : > "$WORK/media/usenet/blackhole/nzb/Rel-$i-GRP.nzb"
+    done
+
+    run "$RUN" --apply
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Outbox: 50 NZBs waiting"* ]]
+    [[ "$output" == *"skipping this pass"* ]]
+}
+
+@test "stremio-library-sync: a deep outbox stands the dry run down too" {
+    # The comment above the check claims both modes and only the apply mode was
+    # asserted, so wrapping the call site in `if $APPLY` would have left every
+    # assertion in this file green. A dry run is the mode an operator uses to
+    # decide whether applying is safe, and one that reports work it must not do
+    # answers the wrong question.
+    stub_python
+    printf 'STREMIO_AUTH_KEY=k\nSEERR_API_KEY=k\nMEDIA_ROOT=%s/media\n' "$WORK" > "$ENV"
+    mkdir -p "$WORK/media/usenet/blackhole/nzb"
+    local i
+    for ((i = 0; i < 50; i++)); do
+        : > "$WORK/media/usenet/blackhole/nzb/Rel-$i-GRP.nzb"
+    done
+
+    run "$RUN"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"skipping this pass"* ]]
+}
+
+@test "stremio-library-sync: a shallow outbox does not stand the pass down" {
+    # The boundary's other side, in the call site rather than in the guard. A
+    # check that stands down unconditionally would pass the test above.
+    stub_python
+    printf 'STREMIO_AUTH_KEY=k\nSEERR_API_KEY=k\nMEDIA_ROOT=%s/media\n' "$WORK" > "$ENV"
+    mkdir -p "$WORK/media/usenet/blackhole/nzb"
+    : > "$WORK/media/usenet/blackhole/nzb/Rel-0-GRP.nzb"
+
+    run "$RUN" --apply
+    [[ "$output" != *"skipping this pass"* ]]
+}
