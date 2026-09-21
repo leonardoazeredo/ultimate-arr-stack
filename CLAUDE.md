@@ -129,16 +129,18 @@ Three things here are expensive to rediscover, and all three cost real time:
   from dnsmasq while clients are being sent elsewhere. Two conclusions in this
   migration were wrong until they were re-measured from a real client.
 
-**The NAS Pi-hole and dnscrypt-proxy are stopped as of 2026-09-21** (Phase 9.1:
-`docker stop`, not removed, volumes kept — `arr-stack_pihole-etc-pihole` and
-`arr-stack_dnscrypt-config`). Nothing points at them and nothing is listening on
-the NAS's `:53` any more. Both were given `docker update --restart=no`, because
-plain `docker stop` is not durable — Docker restarts a manually stopped
-`restart: always` container when the daemon restarts, so a NAS reboot would have
-brought them back. To roll back to them, `docker start pihole
-dnscrypt-proxy` and repoint a DHCP pool — the containers are stopped, not
-retired, until a week of no traffic passes (9.2/9.3) and 9.4 removes them
-through its own PR. Full record: [docs/LOCAL-DNS.md](docs/LOCAL-DNS.md) and
+**The NAS Pi-hole and dnscrypt-proxy are removed as of 2026-09-21.** They were
+stopped first (Phase 9.1), held stopped across a reboot — plain `docker stop` is
+not durable, because Docker restarts a manually stopped `restart: always`
+container when the daemon restarts, so both got `docker update --restart=no` —
+and then deleted from `docker-compose.arr-stack.yml` (9.4, PR #113), so no
+`docker compose up` can bring them back. Nothing points at them and nothing is
+listening on the NAS's `:53`. The two volumes are still there
+(`arr-stack_pihole-etc-pihole`, `arr-stack_dnscrypt-config`) and were backed up to
+`/volume1/docker/arr-stack-backups/` before removal; rolling back means restoring
+a volume and re-adding the service blocks, which are in history. Full record:
+[docs/DNS-MIGRATION.md](docs/DNS-MIGRATION.md), [docs/LOCAL-DNS.md](docs/LOCAL-DNS.md),
+and the plan itself at
 [docs/superpowers/plans/2026-09-19-dns-adguard-router-migration.md](docs/superpowers/plans/2026-09-19-dns-adguard-router-migration.md).
 
 ## Project Structure

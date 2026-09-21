@@ -106,7 +106,6 @@ arr-core network (172.20.0.0/24)
 │ 172.20.0.9   │ Bazarr       │ Subtitles                      │ Core             │
 │ 172.20.0.10  │ Sonarr       │ TV manager (bridge, not VPN)   │ Core             │
 │ 172.20.0.11  │ Radarr       │ Movie manager (bridge, not VPN)│ Core             │
-│ 172.20.0.5   │ Pi-hole      │ legacy DNS (see LOCAL-DNS.md)  │ Core             │
 │ 172.20.0.7   │ Decypharr    │ TorBox debrid client (bridge, not VPN) │ Core     │
 │ 172.20.0.2   │ Traefik      │ Reverse proxy                  │ + local DNS      │
 │ 172.20.0.12  │ Cloudflared  │ Tunnel to Cloudflare           │ + remote access (Cloudflared) │

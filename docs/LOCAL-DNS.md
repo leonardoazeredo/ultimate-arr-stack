@@ -163,23 +163,22 @@ Two consequences worth keeping:
   every pool advertised `192.168.110.246`, so a NAS that was down, stalled or
   being rebooted took the internet with it, and `scripts/boot-compose-up.service`
   was load-bearing for that reason. Resolution is now answered entirely on the
-  router. The NAS Pi-hole is still running and still correct, so that any pool
-  can be reverted to it in one script run — see the rollback ladder in
-  `docs/superpowers/plans/2026-09-19-dns-adguard-router-migration.md` — but no
-  client needs it, and Phase 9 retires it.
+  router, and the NAS resolver is gone rather than idle. The full record is
+  [DNS-MIGRATION.md](DNS-MIGRATION.md).
 - **There is one remaining single point of failure, and it is the router** rather
   than the NAS. That is a deliberate trade: the router is already the gateway,
   so a house whose router is down has no internet with or without DNS. The
   watchdog above is what keeps it from being *two* points.
-- **The NAS Pi-hole and dnscrypt-proxy are stopped** as of 2026-09-21 (Phase 9.1
-  of the migration): `docker stop`, not removed, volumes kept. Nothing points at
-  them and nothing is listening on the NAS's `:53`. Both were given
-  `docker update --restart=no`, because `docker stop` alone is not durable:
-  Docker restarts a manually stopped `restart: always` container when the daemon
-  restarts. `docker start pihole dnscrypt-proxy` brings them back if a rollback
-  is ever needed; they are removed
-  only after a week with no traffic to them (9.2/9.3) and that lands as its own
-  PR (9.4).
+- **The NAS Pi-hole and dnscrypt-proxy are removed** as of 2026-09-21. They were
+  stopped first (9.1), held stopped across a reboot — plain `docker stop` is not
+  durable against `restart: always`, so both got `docker update --restart=no` —
+  and then deleted from `docker-compose.arr-stack.yml` in 9.4, so no `docker
+  compose up` can bring them back. **The volumes are still there**
+  (`arr-stack_pihole-etc-pihole`, `arr-stack_dnscrypt-config`) and were backed up
+  to `/volume1/docker/arr-stack-backups/` before removal. Rolling back means
+  restoring a volume and re-adding the service blocks, which are in history:
+  `git show 7327de1^:docker-compose.arr-stack.yml`. The containers are gone.
+
 - **The `pi2-dns` stack (Pi-hole + dnscrypt-proxy on the Pi 3) is a standby, not a
   peer** — it serves no DHCP client. It was **stopped and retired on 2026-09-10**:
   containers stopped (not removed), and pi2's checkout returned to `main` so no
@@ -198,9 +197,10 @@ Two consequences worth keeping:
 **Upstream is encrypted, now on the router rather than on the NAS.** AdGuard Home
 forwards over DoH — `https://dns.quad9.net/dns-query` and
 `https://cloudflare-dns.com/dns-query`, with plain Quad9 addresses for
-`bootstrap_dns` because bootstrapping cannot itself be encrypted. The NAS Pi-hole
-and dnscrypt-proxy still hold the old encrypted path to `172.20.0.6#5053` for as
-long as they run: `docker exec pihole pihole-FTL --config dns.upstreams`.
+`bootstrap_dns` because bootstrapping cannot itself be encrypted. The NAS
+dnscrypt-proxy used to sit in that path at `172.20.0.6#5053`; it was removed with
+the rest of the NAS resolver on 2026-09-21, and its config is in the
+`arr-stack_dnscrypt-config` volume and the backup of it.
 
 ### AdGuard Home on the router (serving since 2026-09-21)
 
@@ -255,7 +255,7 @@ provides on the NAS.
 | List | Why it is here |
 | --- | --- |
 | AdGuard DNS filter (`adguardteam.github.io/AdGuardSDNSFilter`) | Shipped enabled with the package; the general-purpose baseline |
-| StevenBlack hosts (`raw.githubusercontent.com/StevenBlack/hosts/master/hosts`) | **The same list the NAS Pi-hole uses**, so a blocked name keeps being blocked after the flip. Parity between the two resolvers is a Gate 3 requirement, and two different lists would make "did the migration change what is blocked?" unanswerable |
+| StevenBlack hosts (`raw.githubusercontent.com/StevenBlack/hosts/master/hosts`) | **The list the NAS Pi-hole used**, so a blocked name stayed blocked through the migration. Parity between the two resolvers was a Gate 3 requirement, and two different lists would have made "did the migration change what is blocked?" unanswerable |
 | AdAway Default Blocklist | Present but disabled — shipped that way, left alone |
 
 A name the NAS blocks with Pi-hole's NULL mode answers `0.0.0.0` there and does
