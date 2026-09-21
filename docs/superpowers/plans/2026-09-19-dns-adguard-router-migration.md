@@ -658,8 +658,24 @@ any pool. Recorded as a gap rather than dressed up.
   After the stop: a real VLAN20 client still resolves and still blocks, the NAS's own resolver is the router and works, nothing listens on the NAS's `:53` any more, and every stack container is healthy.
 
   **`docker stop` was not enough, and the plan did not say so.** Both services carry `restart: always`, and Docker restarts a manually stopped `always` container **when the daemon restarts** — so a NAS reboot would have brought both back, quietly undoing this step. `docker update --restart=no pihole dnscrypt-proxy` holds them stopped: `no` has no daemon-restart exception, so the state is durable by construction rather than by luck. This is exactly the case 9.2's "including the NAS's own reboot cycle" exists to catch, and it would have been caught a week late, as a surprise rather than a finding. Verified: both `policy=no`, `exited`, everything else healthy, and the soak window clean so far — the watchdog has not moved the house since, there are ten rules on each family, and no container has logged a DNS failure.
-- [ ] **9.2 Confirm nothing regressed** across a full week, including the NAS's own reboot cycle.
-- [ ] **9.3 Confirm no client still queries them**, from the Pi-hole query count over seven days. Do not use a conntrack check for this: DNS conntrack entries expire in seconds, so "no remaining flows" passes immediately after the last query regardless of whether clients still query occasionally.
+- [ ] **9.2 Confirm nothing regressed** across a full week, including the NAS's own reboot cycle. — In progress: the week has to pass. One part of it was answerable early and is answered — **what a NAS reboot does to the stopped services**, checked 2026-09-21 without rebooting. They would have come back: both carry `restart: always`, and Docker restarts a manually stopped `always` container when the daemon restarts. `docker update --restart=no` fixed that, and the remaining question was whether anything else starts the stack at boot. Nothing does — no systemd unit mentions `docker compose`, there is no `@reboot` entry, and `rc.local` says nothing about Docker, so the stack comes up purely through restart policies and a container at `policy=no, exited` stays that way. Confirmed against the live NAS, and consistent with other long-stopped services on this box (`qrescan`, `configarr`) which are in the same state.
+- [ ] **9.3 Confirm no client still queries them**, from the Pi-hole query count over seven days. Do not use a conntrack check for this: DNS conntrack entries expire in seconds, so "no remaining flows" passes immediately after the last query regardless of whether clients still query occasionally. — **The stated method cannot be used, and the reason is this plan's own ordering.** 9.1 stops the container, and a stopped Pi-hole cannot count anything, so "the query count over seven days" is unmeasurable from the moment 9.1 runs. The intent is still answerable, three ways, all taken 2026-09-21 from the database in the stopped container's volume:
+
+  ```
+  total queries ever                      1,124,819
+  last query per client:
+    127.0.0.1   the container itself       15:23:07
+    172.20.0.13 uptime-kuma               14:51:09
+    172.20.0.3  gluetun     313,731 q     14:44:14
+    192.168.120.231 / .208 / .150 / .114 / .228
+                real LAN clients           all between 10:50 and 11:15
+  queries after 15:00                        51   (all docker-internal)
+  queries after the stop                      0
+  ```
+
+  Every real LAN client's last query predates the cutover by hours; the only late askers were gluetun and uptime-kuma over the Docker network, both since repointed to the router (8.1, and the recreate that phase needed). And zero queries arrived after the stop. The database lives in `arr-stack_pihole-etc-pihole`, which 9.4 backs up before removing the service, so this remains checkable later.
+
+  A note on what this signal is worth: it is weaker than it looks, because the router redirects anything addressed to the NAS anyway. A client left pointing at `192.168.110.246` is served by AdGuard and never reaches Pi-hole, so a zero count is guaranteed by the redirect rather than earned by the migration. The strong evidence that no client *needs* the NAS resolver is that it has been off since 2026-09-21 and nothing noticed.
 - [ ] **9.4 Only then** remove the two services from the compose file, back up the volumes first per the repo's backup convention, and land it through a PR.
 - [ ] **9.5 Record the retirement** in `docs/` with the measurements that justified it, in the style of the exit-node project log.
 
