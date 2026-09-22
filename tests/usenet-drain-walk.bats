@@ -123,6 +123,19 @@ EOS
     chmod +x "$WORK/scripts/usenet-blackhole.sh"
 }
 
+# A pass the pressure gate refuses: it prints the gate's own line, touches
+# nothing, and exits 0 -- exactly what scripts/usenet-blackhole.sh does when it
+# stands a pass down. The walk detects this by grepping the pass's captured
+# output, which is why the line has to be the real one.
+write_refused_pass() {
+    cat > "$WORK/scripts/usenet-blackhole.sh" <<'EOS'
+#!/bin/bash
+echo "refused pass $$ invoked: $*" >> "$STUB_PASS_CALLS"
+echo "[pressure-gate] host I/O is stalled (io full avg10=88.00%, limit 20%); skipping this pass"
+EOS
+    chmod +x "$WORK/scripts/usenet-blackhole.sh"
+}
+
 @test "usenet-drain-walk: dry run is the default and reaches no pass" {
     seed_outbox 3
     write_stuck_pass
@@ -235,6 +248,21 @@ EOS
     refute_output --partial "made no progress"
     # Three passes, each having cleared one NZB.
     [ "$(wc -l < "$PASS_CALLS" | tr -d ' ')" -eq 3 ]
+}
+
+@test "usenet-drain-walk: a pass the pressure gate refused is not a barren pass" {
+    seed_outbox 12
+    write_refused_pass
+    # --max-barren 1 is the assertion. A refused pass never ran, so it is not
+    # evidence about the drain, and counting it as barren stopped the walk after
+    # one attempt with "1 passes in a row made no progress" -- the wrong
+    # sentence about the right observation, because the host was busy and the
+    # queue was not stuck. Both attempts must happen for this to pass.
+    run "$RUN" --apply --poll 1 --pass-stall 60 --max-passes 2 --max-barren 1 \
+        --skip-cooldown 1 --cooldown 1
+    [ "$(wc -l < "$PASS_CALLS" | tr -d ' ')" -eq 2 ]
+    refute_output --partial "made no progress"
+    assert_output --partial "the pressure gate refused"
 }
 
 @test "usenet-drain-walk: clearing the mark ends the walk" {

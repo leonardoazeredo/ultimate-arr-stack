@@ -639,6 +639,13 @@ acquire_lock
 
 PASS_NUMBER=0
 BARREN=0
+# Passes the pressure gate refused, counted separately from BARREN. A refused
+# pass never started -- scripts/usenet-blackhole.sh exits at its gate before it
+# reaches python -- so it is evidence about the host, not about the drain.
+# Measured 2026-09-22: 4 of 12 passes in one run were refusals and every one of
+# them was counted as "no progress", against a run in which no admitted pass
+# failed to move anything.
+REFUSED=0
 STOP_REASON=""
 WALK_START="$(date +%s)"
 
@@ -670,12 +677,20 @@ while :; do
   run_pass
   after="$(metrics)"
 
-  if advanced "$before" "$after"; then
-    BARREN=0
-    log "progress: ${before} -> ${after}"
+  if [[ "$PASS_SKIPPED" == "true" ]]; then
+    REFUSED=$((REFUSED + 1))
+    log "the pressure gate refused pass ${PASS_NUMBER} (${REFUSED} in a row); the host read as too busy to start it"
   else
-    BARREN=$((BARREN + 1))
-    log "no progress this pass (${BARREN}/${MAX_BARREN}): ${before} -> ${after}"
+    # An admitted pass is what clears the refusal streak: the gate let this one
+    # through, so the host was not too busy to start work.
+    REFUSED=0
+    if advanced "$before" "$after"; then
+      BARREN=0
+      log "progress: ${before} -> ${after}"
+    else
+      BARREN=$((BARREN + 1))
+      log "no progress this pass (${BARREN}/${MAX_BARREN}): ${before} -> ${after}"
+    fi
   fi
 
   if [[ "$INTERRUPTED" == "true" ]]; then
@@ -689,7 +704,8 @@ while :; do
   fi
 
   if [[ "$PASS_SKIPPED" == "true" ]]; then
-    log "the pressure gate refused that pass; waiting ${SKIP_COOLDOWN_SECONDS}s before the next"
+    # The refusal itself is logged above, once. This says only what happens next.
+    log "waiting ${SKIP_COOLDOWN_SECONDS}s before the next attempt"
     sleep_or_break "$SKIP_COOLDOWN_SECONDS" "$$"
   elif [[ "$BARREN" -lt "$MAX_BARREN" ]]; then
     sleep_or_break "$COOLDOWN_SECONDS" "$$"
