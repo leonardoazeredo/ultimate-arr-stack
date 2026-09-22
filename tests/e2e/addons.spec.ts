@@ -140,12 +140,13 @@ test.describe('stremio-jellyfin', () => {
       .slice(0, 5);
     expect(candidates.length, 'the series catalog returned nothing with an IMDb id').toBeGreaterThan(0);
 
-    let resolved: { name: string; url: string } | undefined;
+    let resolved: { name: string; url: string; cacheMaxAge: number } | undefined;
     for (const series of candidates) {
       const streamRes = await request.get(addon(`/stream/series/${series.id}:1:1.json`), { timeout: 30_000 });
-      const streams = (await streamRes.json()).streams ?? [];
+      const resBody = await streamRes.json();
+      const streams = resBody.streams ?? [];
       if (streams.length > 0) {
-        resolved = { name: series.name, url: streams[0].url };
+        resolved = { name: series.name, url: streams[0].url, cacheMaxAge: resBody.cacheMaxAge };
         break;
       }
     }
@@ -154,6 +155,10 @@ test.describe('stremio-jellyfin', () => {
     // episodes.
     expect(resolved, `no stream resolved for S1E1 on any of ${candidates.length} catalog series`).toBeTruthy();
     expect(resolved!.url).toContain('/videos/');
+    // This is the answer that changes when the drain delivers an episode, so it
+    // has to carry a lifetime too -- otherwise a newly downloaded (or newly
+    // fixed) episode stays invisible for as long as the client's default lasts.
+    expect(resolved!.cacheMaxAge, `${resolved!.name} resolved without a cache lifetime`).toBeGreaterThan(0);
   });
 
   test('an episode the library does not hold resolves to no stream', async ({ request }) => {
@@ -181,6 +186,12 @@ test.describe('stremio-jellyfin', () => {
     // one fails here rather than passing on `undefined ?? []`.
     const body = await streamRes.json();
     expect(body.streams, `${series.id} answered a request for season 99 without a streams array`).toEqual([]);
+    // And it declares how long a client may keep it. The addon sent no
+    // cacheMaxAge, so Stremio applied its own default -- and a wrong answer
+    // cached under it outlived the fix that corrected it: this handler stopped
+    // serving episodes the library does not hold at 14:00 on 2026-09-22, and the
+    // same client was still playing the old fallback at 23:00.
+    expect(body.cacheMaxAge, `${series.id} answered without a cache lifetime`).toBeGreaterThan(0);
   });
 });
 
