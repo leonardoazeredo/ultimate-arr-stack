@@ -52,30 +52,45 @@ builder.defineStreamHandler(async ({type, id}) => {
 
         const seriesItem = (await jellyfin.getItemByImdbId(seriesId))[0]
         if ((seriesItem === undefined))
-            return Promise.resolve([])
+            return Promise.resolve({streams: []})
 
-        // Season 0 is Jellyfin's "Specials", and a season the library does not
-        // have yet simply is not in this list. The lookup used to find the
-        // season whose IndexNumber matches, which returns undefined for both of
-        // those, and every request for them then failed as "no streams" --
-        // which is what a viewer sees as an episode that refuses to play.
-        // Measured 2026-09-11 on a library whose only season for one series is
-        // `Specials (IndexNumber=0)`: asking for 1:1 returned nothing, and this
-        // fallback is what makes Stremio's usual first request work.
+        // Exact match, or no stream.
         //
-        // Only when there is no match AND no seasons at all is the item
-        // genuinely unresolvable, so that case still returns an empty list.
+        // Both lookups used to end in a fallback -- `?? seasons[0]` and
+        // `?? episodes[0]` -- added on 2026-09-11 so that an unnumbered
+        // Specials season would still resolve. The cost was paid by every
+        // series the library holds only in part: Stremio asks for each episode
+        // of the series Cinemeta lists, and a request for an episode that is
+        // not here was answered from the first season and the first episode
+        // instead of being refused. Measured 2026-09-22 on a library holding
+        // only Dragon Ball Super S1 and S2: the addon returned a Jellyfin
+        // stream for S03E19 and S05E55, which do not exist, and the streams it
+        // served were S01E01 and S01E01 -- a wrong episode plays, and nothing
+        // in the UI says the request was never satisfied.
+        //
+        // Checked before removing them: this library has 165 seasons and not
+        // one has a null IndexNumber, and it holds no Specials season at all,
+        // so the fallback protected nothing here. A season or episode the
+        // library does not have now returns no stream, which is what the
+        // viewer should see.
+        //
+        // Those refusals are `{streams: []}`, the shape the resource declares.
+        // They used to be a bare `[]`, which is not what a stream handler
+        // returns; every refusal path in this file now answers in the same
+        // shape as the paths that find something.
         const seasons = (await jellyfin.getSeasonByParentItemIdAndSeasonNumber(seriesItem.Id, season)).Items
         if (!seasons || seasons.length === 0)
-            return Promise.resolve([])
-        const seasonItem = seasons.find(it => it.IndexNumber === season) ?? seasons[0]
+            return Promise.resolve({streams: []})
+        const seasonItem = seasons.find(it => it.IndexNumber === season)
+        if (seasonItem === undefined)
+            return Promise.resolve({streams: []})
 
         const episodes = (await jellyfin.getEpisodeByItemIdAndSeasonId(seriesItem.Id, seasonItem.Id)).Items
         if (!episodes || episodes.length === 0)
-            return Promise.resolve([])
-        // Specials carry no IndexNumber in this library, so falling back to the
-        // first entry is the only way an episode request can resolve there.
-        const episodeItem = episodes.find(it => it.IndexNumber === episode) ?? episodes[0]
+            return Promise.resolve({streams: []})
+        const episodeItem = episodes.find(it => it.IndexNumber === episode)
+        if (episodeItem === undefined)
+            return Promise.resolve({streams: []})
 
         const actualEpisodeItem = await jellyfin.getItemById(episodeItem.Id).then(it => it.data)
 
@@ -85,7 +100,7 @@ builder.defineStreamHandler(async ({type, id}) => {
         items = await jellyfin.getItemByImdbId(id)
 
     if (items === undefined || items.length === 0)
-        return Promise.resolve([])
+        return Promise.resolve({streams: []})
 
     const item = items[0]
     const itemId = stringToUuid(item.Id)
