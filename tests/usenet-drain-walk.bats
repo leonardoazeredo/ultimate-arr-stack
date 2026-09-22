@@ -332,6 +332,30 @@ EOS
     refute_output --partial "pressure gate refused 4 passes in a row"
 }
 
+@test "usenet-drain-walk: the refusal count is cumulative, not the current streak" {
+    seed_outbox 12
+    # Refused, admitted, refused again: the streak at the end is 1 and the run's
+    # total is 2. Aliasing REFUSED_TOTAL to REFUSED would print 1 here and pass
+    # every other test in this file, because each of them builds a single streak.
+    cat > "$WORK/scripts/usenet-blackhole.sh" <<'EOS'
+#!/bin/bash
+echo "pass $$ invoked: $*" >> "$STUB_PASS_CALLS"
+case "$(wc -l < "$STUB_PASS_CALLS" | tr -d ' ')" in
+    2)
+        rm -f "$(ls -1 "$STUB_NZB"/*.nzb 2>/dev/null | head -n 1)" 2>/dev/null || true
+        echo "  submitted 0, fetched 1, outstanding 4 (1 owed local I/O, 3 still at TorBox)"
+        ;;
+    *)
+        echo "[pressure-gate] host I/O is stalled (io full avg10=88.00%, limit 20%); skipping this pass"
+        ;;
+esac
+EOS
+    chmod +x "$WORK/scripts/usenet-blackhole.sh"
+    run "$RUN" --apply --poll 1 --pass-stall 60 --max-passes 3 --max-barren 4 \
+        --max-skipped 3 --skip-cooldown 1 --cooldown 1
+    assert_output --partial "2 refused by the pressure gate"
+}
+
 @test "usenet-drain-walk: --max-skipped must be a positive whole number" {
     run "$RUN" --max-skipped 0
     assert_failure 2

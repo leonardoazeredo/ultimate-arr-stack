@@ -24,3 +24,12 @@ mutation usenet-drain-walk-kill-leaves-the-fetch \
   --test "usenet-drain-walk: killing a stuck pass takes the work under it too" \
   --why "signalling the shell in front of the pass instead of its process group leaves python3 and its curl writing into staging with nothing watching them, while the walk starts the next pass on the same pool -- two drains, one of them invisible to the state file, which is the shape of the 2026-09-20 incident with the pressure gate's accounting bypassed entirely. The walk would still report the pass as stopped" \
   --apply 'sed -i.bak "s@kill -TERM -\"\$pid\"@kill -TERM \"\$pid\"@" "$F" && rm -f "$F.bak"'
+
+# --- a refusal counted against the drain again ------------------------------
+
+mutation usenet-drain-walk-refusal-counted-as-barren \
+  --file scripts/usenet-drain-walk.sh \
+  --bats tests/usenet-drain-walk.bats \
+  --test "usenet-drain-walk: a pass the pressure gate refused is not a barren pass" \
+  --why "the increment lands on BARREN instead of REFUSED, which is the defect this branch removed: a pass the gate refused never started, so it says nothing about whether the drain is moving. With --max-barren 1 the walk then stops after a single attempt, and on the real 2026-09-22 run it printed '4 passes in a row made no progress' for four passes that never ran -- the sentence an operator reads first, and the one that sends them to look at the queue instead of the host" \
+  --apply 'sed -i.bak "s@REFUSED=\$((REFUSED + 1))@BARREN=\$((BARREN + 1))@" "$F" && rm -f "$F.bak"'
