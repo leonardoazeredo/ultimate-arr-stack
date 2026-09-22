@@ -481,9 +481,15 @@ run_pass() {
     sed 's/^/    /' "$PASS_SLICE" >> "$LOG_FILE"
   fi
 
-  PASS_SKIPPED=false
-  if grep -q '\[pressure-gate\]' "$PASS_SLICE" 2>/dev/null; then
-    PASS_SKIPPED=true
+  # The gate prints four messages and refuses on one of them: the other three
+  # say "this pass runs unprotected" and then run the pass normally. Matching
+  # the prefix alone therefore classified a pass that ran as one that never
+  # started, which is the error this branch exists to remove -- it disabled the
+  # barren stop on any host whose PSI reading could not be read. Matched on the
+  # refusal's own phrase because it is the only one of the four that skips.
+  PASS_REFUSED=false
+  if grep -q '\[pressure-gate\].*skipping this pass' "$PASS_SLICE" 2>/dev/null; then
+    PASS_REFUSED=true
   fi
 
   local summary
@@ -491,7 +497,7 @@ run_pass() {
 
   if [[ "$PASS_KILLED" == "true" ]]; then
     log "pass ${PASS_NUMBER}: killed by the watchdog"
-  elif [[ "$PASS_SKIPPED" == "true" ]]; then
+  elif [[ "$PASS_REFUSED" == "true" ]]; then
     log "pass ${PASS_NUMBER}: refused by the I/O pressure gate"
   elif [[ "$PASS_EXIT" -ne 0 ]]; then
     log "pass ${PASS_NUMBER}: exited ${PASS_EXIT}"
@@ -677,7 +683,7 @@ while :; do
   run_pass
   after="$(metrics)"
 
-  if [[ "$PASS_SKIPPED" == "true" ]]; then
+  if [[ "$PASS_REFUSED" == "true" ]]; then
     REFUSED=$((REFUSED + 1))
     log "the pressure gate refused pass ${PASS_NUMBER} (${REFUSED} in a row); the host read as too busy to start it"
   else
@@ -703,7 +709,7 @@ while :; do
     break
   fi
 
-  if [[ "$PASS_SKIPPED" == "true" ]]; then
+  if [[ "$PASS_REFUSED" == "true" ]]; then
     # The refusal itself is logged above, once. This says only what happens next.
     log "waiting ${SKIP_COOLDOWN_SECONDS}s before the next attempt"
     sleep_or_break "$SKIP_COOLDOWN_SECONDS" "$$"

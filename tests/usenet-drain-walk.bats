@@ -265,6 +265,42 @@ EOS
     assert_output --partial "the pressure gate refused"
 }
 
+@test "usenet-drain-walk: only the real gate's refusal counts as one" {
+    # Drives the REAL scripts/usenet-blackhole.sh, because the walk decides this
+    # by matching a phrase that script prints -- a phrase a stub hardcodes and
+    # therefore cannot keep honest. Two of the gate's four messages mean the pass
+    # RAN (it could not read its reading and went unprotected) and must count as
+    # evidence about the drain; one means it was refused and must not.
+    seed_outbox 12
+    cp "$REPO_ROOT/scripts/usenet-blackhole.sh" "$WORK/scripts/usenet-blackhole.sh"
+    chmod +x "$WORK/scripts/usenet-blackhole.sh"
+
+    # The pass's second half, reached on the unprotected path. A no-op, because
+    # the real thing would call TorBox with the placeholder key in this fixture's
+    # .env. The walk reads its own metrics through python3 too, so this also
+    # degrades those to `?`, which `advanced` already tolerates.
+    mkdir -p "$WORK/pyshim"
+    printf '#!/bin/bash\nexit 0\n' > "$WORK/pyshim/python3"
+    chmod +x "$WORK/pyshim/python3"
+
+    # 1. A stalled host: the gate's fourth message, exit 0, no pass runs. This
+    #    must be a refusal, so a barren bound of 1 cannot stop the walk.
+    printf 'some avg10=90.00 total=0\nfull avg10=90.00 total=0\n' > "$WORK/psi-stalled"
+    run env "PATH=$WORK/pyshim:$PATH" PSI_IO_PATH="$WORK/psi-stalled" PSI_IO_LIMIT=20 \
+        "$RUN" --apply --poll 1 --pass-stall 60 --max-passes 2 --max-barren 1 \
+        --skip-cooldown 1 --cooldown 1
+    assert_output --partial "refused by the I/O pressure gate"
+    refute_output --partial "made no progress"
+
+    # 2. A gate that cannot read its own input says so and the pass RUNS. That
+    #    pass is evidence about the drain, so it has to count as barren.
+    run env "PATH=$WORK/pyshim:$PATH" PSI_IO_PATH="$WORK/does-not-exist" PSI_IO_LIMIT=20 \
+        "$RUN" --apply --poll 1 --pass-stall 60 --max-passes 2 --max-barren 1 \
+        --skip-cooldown 1 --cooldown 1
+    refute_output --partial "refused by the I/O pressure gate"
+    assert_output --partial "made no progress"
+}
+
 @test "usenet-drain-walk: clearing the mark ends the walk" {
     seed_outbox 3
     write_productive_pass
