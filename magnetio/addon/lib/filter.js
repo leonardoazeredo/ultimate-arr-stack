@@ -24,18 +24,26 @@ const SIZE_LIMITS = {
 export function applyFilters(streams, config) {
   let result = streams;
 
-  // 1. Quality whitelist (null/unknown quality always passes through)
+  // 1. Quality whitelist. `extractQuality` never returns null -- an unreadable
+  // title comes back as `Quality.UNKNOWN` -- so the "null/unknown always passes
+  // through" this comment used to claim described the opposite of what the code
+  // did. The strict behaviour is the wanted one: a title carrying no resolution
+  // is not evidence of a good release, and every tokenless record measured for
+  // tt19231492:2:3 was an XviD or HDTV rip. `unknown` has to be named in the
+  // whitelist to be allowed, and is therefore a deliberate choice rather than
+  // something that slips past.
   if (config.qualities?.length) {
-    result = result.filter(s => {
-      const q = extractQuality(s);
-      return !q || config.qualities.includes(q);
-    });
+    result = result.filter(s => config.qualities.includes(extractQuality(s)));
   }
 
-  // 2. Language whitelist
+  // 2. Language whitelist. A multi-audio release is not a language: it carries
+  // several tracks, so a whitelist of concrete languages has nothing to compare
+  // it against and used to discard it. Excluding these is what emptied the list
+  // for titles whose good releases are tagged MULTI, DUAL or GERMAN.DL --
+  // measured on this stack: `records=10 filtered=0` for one episode.
   if (config.languages?.length) {
     result = result.filter(s =>
-      (s.languages ?? []).some(l => config.languages.includes(l))
+      (s.languages ?? []).some(l => l === 'multi' || config.languages.includes(l))
     );
   }
 
