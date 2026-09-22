@@ -475,12 +475,21 @@ After the existing `pass budget`/`cleared the mark` closing notes, before the `i
 ```bash
 if [[ "$STOP_REASON" == *"pressure gate refused"* ]]; then
   echo ""
-  echo "No pass ran at all: the I/O pressure gate refused every one, which means the"
-  echo "pool read as stalled each time it was asked. That is the host protecting"
-  echo "itself, not a stuck drain -- check /proc/pressure/io (full avg10) and run"
-  echo "this again when it is quieter."
+  echo "The last ${MAX_SKIPPED} attempts were refused before a pass could start, so"
+  echo "nothing has been fetched since that streak began. The gate refuses while the"
+  echo "pool reads as stalled, which is the host protecting itself rather than a stuck"
+  echo "drain -- check /proc/pressure/io (full avg10) and run this again when it is"
+  echo "quieter."
 fi
 ```
+
+**Correction after review (2026-09-22).** This block originally read "No pass ran at
+all: the I/O pressure gate refused every one". The stop condition is `MAX_SKIPPED`
+*consecutive* refusals and an admitted pass resets the streak rather than the run's
+history, so one productive pass followed by a streak reaches this stop with a non-empty
+run -- and the operator is told nothing ran. The note now says only what the streak
+proves. The test for that state is in Task 3's diff; the sentence's job is to be true
+in both states, and it is the first line an operator reads.
 
 - [ ] **Step 11: Document the flag in the header**
 
