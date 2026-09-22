@@ -78,7 +78,16 @@ Measured on the NAS on 2026-09-22, during and after a 140-minute run of the tool
 - Test: `tests/usenet-drain-walk.bats`
 
 **Interfaces:**
-- Consumes: `$PASS_SKIPPED`, set by `run_pass()` at the end of every pass — `true` when the pass's captured output contains `[pressure-gate]`.
+- Consumes: the pass's captured output, not a variable: `run_pass()` decides whether the pass was refused.
+- **Correction after review (2026-09-22).** This line originally said a refused pass was one whose
+  output contains `[pressure-gate]`. That prefix is printed on **four** paths in
+  `scripts/usenet-blackhole.sh` and only one refuses — `:415`, `:417` and `:419` each say
+  `this pass runs unprotected` and then run the pass, `:423` says `skipping this pass` and is the
+  only one that exits before Python. Matching the prefix counted a pass that ran as one that never
+  started, which disabled the barren stop on any host whose PSI reading could not be read — the same
+  class of error this task exists to remove. The detection matches the refusal's own phrase
+  (`skipping this pass`), the variable is named `PASS_REFUSED`, and a test drives the real pass
+  script through both gate states so a rewording cannot pass unnoticed.
 - Produces: shell variable `REFUSED`, an integer initialised to `0` and incremented once per refused pass, reset to `0` by any pass the gate admitted. Task 3 reads it for the stop condition; Task 4 does not.
 - Produces: a log line for a refused pass, exactly `the pressure gate refused pass <N> (<M> in a row); the host read as too busy to start it`.
 
