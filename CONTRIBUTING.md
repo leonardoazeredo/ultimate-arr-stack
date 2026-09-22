@@ -349,6 +349,7 @@ scripts/
 ├── sync-nas.sh                   # Move the NAS deploy copy onto the local branch
 ├── usenet-blackhole.sh           # Move NZBs between the arrs and TorBox's API
 ├── usenet-blackhole-status.sh    # Render the blackhole's state file as HTML or JSON
+├── usenet-drain-walk.sh          # Walk the usenet outbox down one pass at a time, under a watchdog
 ├── post-merge                    # Hook: push main, then sync the NAS to it
 ├── pre-commit                    # Main hook (symlinked from .git/hooks/)
 └── lib/
