@@ -175,8 +175,12 @@ test.describe('stremio-jellyfin', () => {
 
     const streamRes = await request.get(addon(`/stream/series/${series.id}:99:1.json`), { timeout: 30_000 });
     expect(streamRes.ok()).toBeTruthy();
-    const streams = (await streamRes.json()).streams ?? [];
-    expect(streams.length, `${series.id} answered a request for season 99 with a stream`).toBe(0);
+    // The shape matters as much as the emptiness. Every refusal path in this
+    // handler used to answer with a bare `[]`, which is not what a stream
+    // resource returns; this asserts the declared shape, so a return to the old
+    // one fails here rather than passing on `undefined ?? []`.
+    const body = await streamRes.json();
+    expect(body.streams, `${series.id} answered a request for season 99 without a streams array`).toEqual([]);
   });
 });
 

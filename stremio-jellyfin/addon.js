@@ -52,7 +52,7 @@ builder.defineStreamHandler(async ({type, id}) => {
 
         const seriesItem = (await jellyfin.getItemByImdbId(seriesId))[0]
         if ((seriesItem === undefined))
-            return Promise.resolve([])
+            return Promise.resolve({streams: []})
 
         // Exact match, or no stream.
         //
@@ -73,19 +73,24 @@ builder.defineStreamHandler(async ({type, id}) => {
         // so the fallback protected nothing here. A season or episode the
         // library does not have now returns no stream, which is what the
         // viewer should see.
+        //
+        // Those refusals are `{streams: []}`, the shape the resource declares.
+        // They used to be a bare `[]`, which is not what a stream handler
+        // returns; every refusal path in this file now answers in the same
+        // shape as the paths that find something.
         const seasons = (await jellyfin.getSeasonByParentItemIdAndSeasonNumber(seriesItem.Id, season)).Items
         if (!seasons || seasons.length === 0)
-            return Promise.resolve([])
+            return Promise.resolve({streams: []})
         const seasonItem = seasons.find(it => it.IndexNumber === season)
         if (seasonItem === undefined)
-            return Promise.resolve([])
+            return Promise.resolve({streams: []})
 
         const episodes = (await jellyfin.getEpisodeByItemIdAndSeasonId(seriesItem.Id, seasonItem.Id)).Items
         if (!episodes || episodes.length === 0)
-            return Promise.resolve([])
+            return Promise.resolve({streams: []})
         const episodeItem = episodes.find(it => it.IndexNumber === episode)
         if (episodeItem === undefined)
-            return Promise.resolve([])
+            return Promise.resolve({streams: []})
 
         const actualEpisodeItem = await jellyfin.getItemById(episodeItem.Id).then(it => it.data)
 
@@ -95,7 +100,7 @@ builder.defineStreamHandler(async ({type, id}) => {
         items = await jellyfin.getItemByImdbId(id)
 
     if (items === undefined || items.length === 0)
-        return Promise.resolve([])
+        return Promise.resolve({streams: []})
 
     const item = items[0]
     const itemId = stringToUuid(item.Id)
