@@ -381,6 +381,47 @@ one of those directories is a live key in `logs/usenet-blackhole-state.json`,
 `sweep_staging` keeps them on purpose, and `fetch` wipes and re-downloads its
 own staging path anyway. Deleting them frees space and buys nothing.
 
+### Walking the queue down with a watchdog
+
+`scripts/usenet-drain-walk.sh` runs those hand-made passes in a loop and stops
+when they stop working. It is the procedure above with the reading done by a
+rule instead of by eye:
+
+- one pass at a time, in the foreground, at the unit's own settings
+  (`--report-failures --max-inflight 6`);
+- a progress fingerprint -- outbox depth, watch folder contents, staging bytes,
+  state file size and mtime -- sampled every 30s, and the pass's whole process
+  group killed when none of it has moved for ten minutes;
+- after each pass, whether the drain got anywhere at all. Four passes in a row
+  that did not end the walk.
+
+```bash
+./scripts/usenet-drain-walk.sh          # dry run: the plan and the queue
+./scripts/usenet-drain-walk.sh --apply  # walk until the mark clears
+```
+
+It exits 0 when the outbox ends below the mark and 3 when it does not, so "the
+queue cleared" and "the drain is stuck" are not the same observable result.
+
+Killing a pass moves the walk on rather than repeating it. The fetch set is the
+least-recently-attempted first and `run()` marks `last_fetch_attempt` before it
+fetches, so the releases a killed pass was working on go to the back and the
+next pass attempts different ones -- across a SIGKILL, not just a SIGTERM.
+
+It refuses to run while `usenet-blackhole.timer` is active, and it never arms,
+stops or disables that timer: the hold above is the operator's decision, and a
+tool that quietly lifted it would be the surprise. **The walk is not a reason to
+arm the timer.** It runs in the foreground, stops on its own bounds, and prints
+the reason it stopped.
+
+Nothing here replaces the reading. A walk that ends on "no progress" wants
+`logs/usenet-drain-walk.log` read before the next one: a release whose fetch
+keeps failing transiently keeps being rotated to, and the arr-side answer is a
+pass with `--report-failures` so the arr blocklists it.
+
+Measured 2026-09-22, the day it was written: the outbox stood at 607 NZBs, 22
+jobs owed the state file, and nothing had been drained since 2026-09-20 21:25.
+
 ### Measuring whether one fetch stream beats three
 
 `FETCH_WORKERS` is 3, and no one has measured whether three concurrent fetches

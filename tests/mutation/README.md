@@ -330,6 +330,7 @@ old "14 tests" claim went stale.
 - `scripts/rearm-user-timers.sh`
 - `scripts/sync-nas.sh`
 - `scripts/usenet-blackhole-status.sh`
+- `scripts/usenet-drain-walk.sh`
 - `terraform/apply.sh`
 <!-- /NO-SWEEP-ORACLE -->
 
