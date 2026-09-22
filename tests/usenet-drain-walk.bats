@@ -293,6 +293,11 @@ EOS
     # And it did not spend the pass budget to say so: six were allowed and the
     # refusal bound stopped it at two.
     refute_output --partial "pass budget reached"
+    # Exactly one wait, for the first refusal. The second takes REFUSED to the
+    # bound, so the loop top stops the walk before another pass could run and
+    # the skip-cooldown would be five minutes of silence at the end of the one
+    # run an operator is watching -- read as a hang.
+    [ "$(printf '%s\n' "$output" | grep -c 'before the next attempt')" -eq 1 ]
 }
 
 @test "usenet-drain-walk: the refusal note does not call a run that fetched something empty" {
@@ -314,6 +319,10 @@ EOS
     chmod +x "$WORK/scripts/usenet-blackhole.sh"
     run "$RUN" --apply --poll 1 --pass-stall 60 --max-passes 6 --max-barren 4 \
         --max-skipped 2 --skip-cooldown 1 --cooldown 1
+    # Its own premise, not just the note: one admitted pass and then two
+    # refusals. Without this the test stays green if the first pass is ever
+    # classified as refused, which is the state it exists to build.
+    [ "$(wc -l < "$PASS_CALLS" | tr -d ' ')" -eq 3 ]
     assert_output --partial "the I/O pressure gate refused 2 passes in a row"
     refute_output --partial "No pass ran at all"
     assert_output --partial "refused before a pass could start"
@@ -553,9 +562,10 @@ EOS
 
 @test "usenet-drain-walk: the help range ends on the last non-blank header line" {
     # Derived from the file rather than written down. The range moves whenever
-    # the header grows, and a hardcoded 3,86 would need editing in the same
+    # the header grows, and a hardcoded range would need editing in the same
     # commit as every line of documentation above it -- which is exactly the
-    # edit that was missed.
+    # edit that was missed. No number is named here on purpose: the last one
+    # written down became the shipped value and read as current.
     local last header_line
     last="$(awk 'NR >= 3 && /^# ./ { n = NR } /^SCRIPT_DIR=/ { print n; exit }' \
                 "$REPO_ROOT/scripts/usenet-drain-walk.sh")"

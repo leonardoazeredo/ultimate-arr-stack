@@ -88,6 +88,10 @@ Measured on the NAS on 2026-09-22, during and after a 140-minute run of the tool
   class of error this task exists to remove. The detection matches the refusal's own phrase
   (`skipping this pass`), the variable is named `PASS_REFUSED`, and a test drives the real pass
   script through both gate states so a rewording cannot pass unnoticed.
+  **The code prescribed below was updated to match the shipped code.** Steps 3-5 and Task 4's
+  Step 4 previously showed `PASS_SKIPPED` and described the detection as a prefix grep; they now
+  show `PASS_REFUSED` and the `skipping this pass` match, so following this plan reproduces the
+  reviewed branch rather than the defect it removes.
 - Produces: shell variable `REFUSED`, an integer initialised to `0` and incremented once per refused pass, reset to `0` by any pass the gate admitted. Task 3 reads it for the stop condition; Task 4 does not.
 - Produces: a log line for a refused pass, exactly `the pressure gate refused pass <N> (<M> in a row); the host read as too busy to start it`.
 
@@ -161,6 +165,17 @@ STOP_REASON=""
 
 - [ ] **Step 4: Split the post-pass branch**
 
+The flag the split reads is set in `run_pass()`, and it names the refusal rather than the
+gate's message prefix — three of the gate's four messages mean the pass ran. What shipped,
+replacing the prefix match:
+
+```bash
+  PASS_REFUSED=false
+  if grep -q '\[pressure-gate\].*skipping this pass' "$PASS_SLICE" 2>/dev/null; then
+    PASS_REFUSED=true
+  fi
+```
+
 In the same file, this block (at ~line 673):
 
 ```bash
@@ -176,7 +191,7 @@ In the same file, this block (at ~line 673):
 becomes:
 
 ```bash
-  if [[ "$PASS_SKIPPED" == "true" ]]; then
+  if [[ "$PASS_REFUSED" == "true" ]]; then
     REFUSED=$((REFUSED + 1))
     log "the pressure gate refused pass ${PASS_NUMBER} (${REFUSED} in a row); the host read as too busy to start it"
   else
@@ -198,7 +213,7 @@ becomes:
 The refusal is now logged above, so this block (at ~line 691):
 
 ```bash
-  if [[ "$PASS_SKIPPED" == "true" ]]; then
+  if [[ "$PASS_REFUSED" == "true" ]]; then
     log "the pressure gate refused that pass; waiting ${SKIP_COOLDOWN_SECONDS}s before the next"
     sleep_or_break "$SKIP_COOLDOWN_SECONDS" "$$"
   elif [[ "$BARREN" -lt "$MAX_BARREN" ]]; then
@@ -207,7 +222,7 @@ The refusal is now logged above, so this block (at ~line 691):
 becomes:
 
 ```bash
-  if [[ "$PASS_SKIPPED" == "true" ]]; then
+  if [[ "$PASS_REFUSED" == "true" ]]; then
     # The refusal itself is logged above, once. This says only what happens next.
     log "waiting ${SKIP_COOLDOWN_SECONDS}s before the next attempt"
     sleep_or_break "$SKIP_COOLDOWN_SECONDS" "$$"
@@ -222,7 +237,7 @@ Expected: PASS.
 - [ ] **Step 7: Run the whole file**
 
 Run: `TMPDIR="$PWD/.tmp-bats" tests/bats-core/bin/bats tests/usenet-drain-walk.bats`
-Expected: 17 tests, all `ok`. If `usenet-drain-walk: progress resets the barren streak and the budget ends the walk` fails, the split has changed which branch a *productive* pass takes — check that `PASS_SKIPPED` is `false` for it (it is set at the end of `run_pass`).
+Expected: 25 tests, all `ok` — the file's final total after this wave. (This step said 17 when it was written; the wave added tests above it.) If `usenet-drain-walk: progress resets the barren streak and the budget ends the walk` fails, the split has changed which branch a *productive* pass takes — check that `PASS_REFUSED` is `false` for it (it is set at the end of `run_pass`).
 
 - [ ] **Step 8: Commit**
 
@@ -532,7 +547,7 @@ Update the range in the `--help` case to match, e.g. `sed -n '3,86p' "$0" | sed 
 - [ ] **Step 13: Run the tests to verify they pass**
 
 Run: `TMPDIR="$PWD/.tmp-bats" tests/bats-core/bin/bats tests/usenet-drain-walk.bats`
-Expected: 21 tests, all `ok` (16 to begin with, one from Task 1, two from Task 2, two here). The derived-range test from Task 2 is what proves Step 12 landed.
+Expected: 25 tests, all `ok` — the file's final total after this wave. (This step said 21 when it was written; the wave added tests above it.) The derived-range test from Task 2 is what proves Step 12 landed.
 
 - [ ] **Step 14: Document it for the operator**
 
@@ -639,7 +654,7 @@ REFUSED_TOTAL=0
 In the refusal branch of the post-pass block, add a line:
 
 ```bash
-  if [[ "$PASS_SKIPPED" == "true" ]]; then
+  if [[ "$PASS_REFUSED" == "true" ]]; then
     REFUSED=$((REFUSED + 1))
     REFUSED_TOTAL=$((REFUSED_TOTAL + 1))
     log "the pressure gate refused pass ${PASS_NUMBER} (${REFUSED} in a row); the host read as too busy to start it"
@@ -667,7 +682,7 @@ Expected: PASS.
 - [ ] **Step 7: Run the whole file**
 
 Run: `TMPDIR="$PWD/.tmp-bats" tests/bats-core/bin/bats tests/usenet-drain-walk.bats`
-Expected: 22 tests, all `ok`.
+Expected: 25 tests, all `ok` — the file's final total after this wave. (This step said 22 when it was written.)
 
 - [ ] **Step 8: Commit**
 
@@ -712,7 +727,7 @@ Do **not** put backticks or `$` in the `--why` text: this file is sourced by the
 - [ ] **Step 2: Run the harness for this corpus**
 
 Run: `TMPDIR="$PWD/.tmp-bats" /opt/homebrew/bin/bash ./tests/mutation/run-mutations.sh tests/mutation/corpus/usenet-drain-walk.sh`
-Expected: `KILLED usenet-drain-walk-refusal-counted-as-barren (1 test(s))`, and the tail reads `killed 3 / 3   survived 0   errored 0   skipped 0` with no `hit the oracle budget` note. On Linux use `bash` rather than `/opt/homebrew/bin/bash`; the harness needs bash 4+ for `BASHPID`.
+Expected: `KILLED usenet-drain-walk-refusal-counted-as-barren (1 test(s))`, and the tail reads `killed 7 / 7   survived 0   errored 0   skipped 0` with no `hit the oracle budget` note. (This step said `killed 3 / 3` when it was written; the final review wave registered the four guards this task left without an entry, so the corpus is seven.) On Linux use `bash` rather than `/opt/homebrew/bin/bash`; the harness needs bash 4+ for `BASHPID`.
 
 - [ ] **Step 3: If it reports SURVIVED or a budget hit**
 
@@ -783,7 +798,9 @@ ssh arr-stack-nas 'rm -f /volume1/docker/arr-stack/logs/usenet-blackhole-skipped
 ssh arr-stack-nas 'cd /volume1/docker/arr-stack && ./scripts/usenet-drain-walk.sh'
 ```
 
-Expected: `Mode: DRY RUN`, the new banner text `stop after 4 fruitless or 6 refused`, the four resolved paths, `Outbox now: <n> NZBs`, and it exits 0 without running a pass. No `--apply`, so nothing is fetched.
+Expected: `Mode: DRY RUN (use --apply to walk)`, the five resolved paths (`NZB folder`, `watch folder`, `staging`, `state`, `log`), `Mark: outbox below <n> NZBs`, `Outbox now: <n> NZBs`, and the `Would run, repeatedly` block; it exits 0 without running a pass. No `--apply`, so nothing is fetched.
+
+**The bounds are not in a dry run.** This step used to expect `stop after 4 fruitless or 6 refused` in the banner. The banner prints that line only under `--apply` (`Mode: APPLYING (up to 12 pass(es), 4h, stop after 4 fruitless or 6 refused)`); the dry-run branch prints `Mode: DRY RUN (use --apply to walk)` and nothing about the bounds. The refusal bound is visible in a dry run only in the `--help` header, which lists `--max-skipped`.
 
 - [ ] **Step 6: Open the PR and wait for CI**
 

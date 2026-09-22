@@ -26,7 +26,9 @@ set -euo pipefail
 #   * kills that pass's whole process group when the fingerprint has not
 #     changed for --pass-stall seconds, so a hung fetch cannot hold the walk;
 #   * after each pass, asks whether the drain moved anywhere at all.
-#     --max-barren passes in a row that did not ends the walk.
+#     --max-barren passes in a row that did not ends the walk, and so does
+#     --max-skipped passes the I/O pressure gate refused in a row; a refused
+#     pass never started, so it is evidence about the host, not the drain.
 #
 # WHY KILLING A PASS MOVES THE WALK ON
 #
@@ -218,7 +220,7 @@ while [[ $# -gt 0 ]]; do
       # because the test that "notices" only named strings from the middle of
       # the block. tests/usenet-drain-walk.bats now derives the last header line
       # from this file and asserts it appears in the output.
-      sed -n '3,86p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '3,88p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
@@ -746,8 +748,13 @@ while :; do
 
   if [[ "$PASS_REFUSED" == "true" ]]; then
     # The refusal itself is logged above, once. This says only what happens next.
-    log "waiting ${SKIP_COOLDOWN_SECONDS}s before the next attempt"
-    sleep_or_break "$SKIP_COOLDOWN_SECONDS" "$$"
+    # No wait when the bound is already reached: the loop top stops the walk
+    # before another pass could run, and a 300s sleep that buys nothing is the
+    # one part of a saturated run an operator would read as a hang.
+    if [[ "$REFUSED" -lt "$MAX_SKIPPED" ]]; then
+      log "waiting ${SKIP_COOLDOWN_SECONDS}s before the next attempt"
+      sleep_or_break "$SKIP_COOLDOWN_SECONDS" "$$"
+    fi
   elif [[ "$BARREN" -lt "$MAX_BARREN" ]]; then
     sleep_or_break "$COOLDOWN_SECONDS" "$$"
   fi
