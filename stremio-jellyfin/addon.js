@@ -15,6 +15,22 @@ function stringToUuid(plainStringUuid) {
     )
 }
 
+// How long a Stremio client may reuse a stream answer, in seconds.
+//
+// The addon sent none, so the client applied its own default -- and a cached
+// answer then outlives the thing that changed it. Measured 2026-09-22: this
+// addon stopped serving episodes the library does not hold at 14:00, and the
+// same client was still playing the old fallback at 23:00 because it had the
+// wrong answer cached. The same delay hides an episode the drain has just
+// delivered, which is why the number is sent explicitly rather than assumed.
+//
+// 300 and not 0: every request makes this addon scan the whole Jellyfin library
+// (getItemByImdbId lists every Movie and Series to filter by IMDb id), so
+// answering every navigation from scratch costs the NAS a full scan per episode
+// opened. Five minutes caps how stale an answer can be while still absorbing a
+// burst of re-opens.
+const STREAM_CACHE_MAX_AGE = 300
+
 let builder = new addonBuilder(manifest)
 
 function itemToMeta(item) {
@@ -52,7 +68,7 @@ builder.defineStreamHandler(async ({type, id}) => {
 
         const seriesItem = (await jellyfin.getItemByImdbId(seriesId))[0]
         if ((seriesItem === undefined))
-            return Promise.resolve({streams: []})
+            return Promise.resolve({streams: [], cacheMaxAge: STREAM_CACHE_MAX_AGE})
 
         // Exact match, or no stream.
         //
@@ -80,17 +96,17 @@ builder.defineStreamHandler(async ({type, id}) => {
         // shape as the paths that find something.
         const seasons = (await jellyfin.getSeasonByParentItemIdAndSeasonNumber(seriesItem.Id, season)).Items
         if (!seasons || seasons.length === 0)
-            return Promise.resolve({streams: []})
+            return Promise.resolve({streams: [], cacheMaxAge: STREAM_CACHE_MAX_AGE})
         const seasonItem = seasons.find(it => it.IndexNumber === season)
         if (seasonItem === undefined)
-            return Promise.resolve({streams: []})
+            return Promise.resolve({streams: [], cacheMaxAge: STREAM_CACHE_MAX_AGE})
 
         const episodes = (await jellyfin.getEpisodeByItemIdAndSeasonId(seriesItem.Id, seasonItem.Id)).Items
         if (!episodes || episodes.length === 0)
-            return Promise.resolve({streams: []})
+            return Promise.resolve({streams: [], cacheMaxAge: STREAM_CACHE_MAX_AGE})
         const episodeItem = episodes.find(it => it.IndexNumber === episode)
         if (episodeItem === undefined)
-            return Promise.resolve({streams: []})
+            return Promise.resolve({streams: [], cacheMaxAge: STREAM_CACHE_MAX_AGE})
 
         const actualEpisodeItem = await jellyfin.getItemById(episodeItem.Id).then(it => it.data)
 
@@ -100,7 +116,7 @@ builder.defineStreamHandler(async ({type, id}) => {
         items = await jellyfin.getItemByImdbId(id)
 
     if (items === undefined || items.length === 0)
-        return Promise.resolve({streams: []})
+        return Promise.resolve({streams: [], cacheMaxAge: STREAM_CACHE_MAX_AGE})
 
     const item = items[0]
     const itemId = stringToUuid(item.Id)
@@ -111,11 +127,11 @@ builder.defineStreamHandler(async ({type, id}) => {
             name: 'Jellyfin',
             description: item.MediaSources[0].MediaStreams[0].DisplayTitle
         }
-        return Promise.resolve({streams: [stream]})
+        return Promise.resolve({streams: [stream], cacheMaxAge: STREAM_CACHE_MAX_AGE})
     }
 
     console.log(`Cant find stream for: ${id}`)
-    return Promise.resolve({streams: []})
+    return Promise.resolve({streams: [], cacheMaxAge: STREAM_CACHE_MAX_AGE})
 })
 
 export const addonInterface = builder.getInterface()
