@@ -198,7 +198,13 @@ while [[ $# -gt 0 ]]; do
       # `sed -n '2,/^$/p'`, which BSD sed rejects, and it has to stop ON the
       # last comment line. The range moves whenever the header does, which is
       # what tests/usenet-drain-walk.bats notices.
-      sed -n '3,77p' "$0" | sed 's/^# \{0,1\}//'
+      # The range moves whenever a line is added to the header, and it had
+      # already fallen three lines short of the end: --help was missing the
+      # Prerequisites line and the warning below it, and nothing failed,
+      # because the test that "notices" only named strings from the middle of
+      # the block. tests/usenet-drain-walk.bats now derives the last header line
+      # from this file and asserts it appears in the output.
+      sed -n '3,82p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)

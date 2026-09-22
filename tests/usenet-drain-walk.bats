@@ -434,6 +434,33 @@ EOS
     refute_output --partial "set -euo pipefail"
 }
 
+@test "usenet-drain-walk: --help prints the whole header, not a prefix of it" {
+    run "$RUN" --help
+    assert_success
+    # The LAST lines of the header, not the middle. This is what the older test
+    # above cannot see: every string it names sits in the first half of the
+    # block, so a range three lines short of the end passed for as long as it
+    # existed. It shipped that way.
+    assert_output --partial "Prerequisites: python3"
+    assert_output --partial "Generated with LLM assistance and human-reviewed"
+    refute_output --partial "SCRIPT_DIR="
+}
+
+@test "usenet-drain-walk: the help range ends on the last non-blank header line" {
+    # Derived from the file rather than written down. The range moves whenever
+    # the header grows, and a hardcoded 3,86 would need editing in the same
+    # commit as every line of documentation above it -- which is exactly the
+    # edit that was missed.
+    local last header_line
+    last="$(awk 'NR >= 3 && /^# ./ { n = NR } /^SCRIPT_DIR=/ { print n; exit }' \
+                "$REPO_ROOT/scripts/usenet-drain-walk.sh")"
+    [ -n "$last" ] || fail "could not find the header/script boundary in scripts/usenet-drain-walk.sh"
+    header_line="$(sed -n "${last}p" "$REPO_ROOT/scripts/usenet-drain-walk.sh" | sed 's/^# \{0,1\}//')"
+    [ -n "$header_line" ] || fail "the last header line is empty; the awk pattern is wrong"
+    run "$RUN" --help
+    assert_output --partial "$header_line"
+}
+
 @test "usenet-drain-walk: it is executable" {
     [ -x "$REPO_ROOT/scripts/usenet-drain-walk.sh" ]
 }
