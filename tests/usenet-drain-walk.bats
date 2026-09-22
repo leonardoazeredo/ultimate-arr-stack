@@ -123,6 +123,35 @@ EOS
     chmod +x "$WORK/scripts/usenet-blackhole.sh"
 }
 
+# A pass the pressure gate refuses: it prints the gate's own line, touches
+# nothing, and exits 0 -- exactly what scripts/usenet-blackhole.sh does when it
+# stands a pass down. The walk detects this by grepping the pass's captured
+# output, which is why the line has to be the real one.
+write_refused_pass() {
+    cat > "$WORK/scripts/usenet-blackhole.sh" <<'EOS'
+#!/bin/bash
+echo "refused pass $$ invoked: $*" >> "$STUB_PASS_CALLS"
+echo "[pressure-gate] host I/O is stalled (io full avg10=88.00%, limit 20%); skipping this pass"
+EOS
+    chmod +x "$WORK/scripts/usenet-blackhole.sh"
+}
+
+# Refused on the first invocation, productive afterwards: the shape of a host
+# that was busy and then was not.
+write_refused_then_productive_pass() {
+    cat > "$WORK/scripts/usenet-blackhole.sh" <<'EOS'
+#!/bin/bash
+echo "pass $$ invoked: $*" >> "$STUB_PASS_CALLS"
+if [[ "$(wc -l < "$STUB_PASS_CALLS" | tr -d ' ')" -eq 1 ]]; then
+    echo "[pressure-gate] host I/O is stalled (io full avg10=88.00%, limit 20%); skipping this pass"
+    exit 0
+fi
+rm -f "$(ls -1 "$STUB_NZB"/*.nzb 2>/dev/null | head -n 1)" 2>/dev/null || true
+echo "  submitted 0, fetched 1, outstanding 4 (1 owed local I/O, 3 still at TorBox)"
+EOS
+    chmod +x "$WORK/scripts/usenet-blackhole.sh"
+}
+
 @test "usenet-drain-walk: dry run is the default and reaches no pass" {
     seed_outbox 3
     write_stuck_pass
@@ -235,6 +264,155 @@ EOS
     refute_output --partial "made no progress"
     # Three passes, each having cleared one NZB.
     [ "$(wc -l < "$PASS_CALLS" | tr -d ' ')" -eq 3 ]
+}
+
+@test "usenet-drain-walk: a pass the pressure gate refused is not a barren pass" {
+    seed_outbox 12
+    write_refused_pass
+    # --max-barren 1 is the assertion. A refused pass never ran, so it is not
+    # evidence about the drain, and counting it as barren stopped the walk after
+    # one attempt with "1 passes in a row made no progress" -- the wrong
+    # sentence about the right observation, because the host was busy and the
+    # queue was not stuck. Both attempts must happen for this to pass.
+    run "$RUN" --apply --poll 1 --pass-stall 60 --max-passes 2 --max-barren 1 \
+        --skip-cooldown 1 --cooldown 1
+    [ "$(wc -l < "$PASS_CALLS" | tr -d ' ')" -eq 2 ]
+    refute_output --partial "made no progress"
+    assert_output --partial "the pressure gate refused"
+}
+
+@test "usenet-drain-walk: a host too busy to start a pass stands the walk down on its own reason" {
+    seed_outbox 12
+    write_refused_pass
+    run "$RUN" --apply --poll 1 --pass-stall 60 --max-passes 6 --max-barren 4 \
+        --max-skipped 2 --skip-cooldown 1 --cooldown 1
+    assert_failure 3
+    assert_output --partial "the I/O pressure gate refused 2 passes in a row"
+    assert_output --partial "refused before a pass could start"
+    [ "$(wc -l < "$PASS_CALLS" | tr -d ' ')" -eq 2 ]
+    # And it did not spend the pass budget to say so: six were allowed and the
+    # refusal bound stopped it at two.
+    refute_output --partial "pass budget reached"
+    # Exactly one wait, for the first refusal. The second takes REFUSED to the
+    # bound, so the loop top stops the walk before another pass could run and
+    # the skip-cooldown would be five minutes of silence at the end of the one
+    # run an operator is watching -- read as a hang.
+    [ "$(printf '%s\n' "$output" | grep -c 'before the next attempt')" -eq 1 ]
+}
+
+@test "usenet-drain-walk: the refusal note does not call a run that fetched something empty" {
+    seed_outbox 12
+    # One admitted, productive pass, then refusals up to the bound. The streak is
+    # what stops the walk; the run as a whole fetched a release. The note used to
+    # read "No pass ran at all: the I/O pressure gate refused every one", which is
+    # false here -- and it is the first line an operator reads.
+    cat > "$WORK/scripts/usenet-blackhole.sh" <<'EOS'
+#!/bin/bash
+echo "pass $$ invoked: $*" >> "$STUB_PASS_CALLS"
+if [[ "$(wc -l < "$STUB_PASS_CALLS" | tr -d ' ')" -eq 1 ]]; then
+    rm -f "$(ls -1 "$STUB_NZB"/*.nzb 2>/dev/null | head -n 1)" 2>/dev/null || true
+    echo "  submitted 0, fetched 1, outstanding 4 (1 owed local I/O, 3 still at TorBox)"
+    exit 0
+fi
+echo "[pressure-gate] host I/O is stalled (io full avg10=88.00%, limit 20%); skipping this pass"
+EOS
+    chmod +x "$WORK/scripts/usenet-blackhole.sh"
+    run "$RUN" --apply --poll 1 --pass-stall 60 --max-passes 6 --max-barren 4 \
+        --max-skipped 2 --skip-cooldown 1 --cooldown 1
+    # Its own premise, not just the note: one admitted pass and then two
+    # refusals. Without this the test stays green if the first pass is ever
+    # classified as refused, which is the state it exists to build.
+    [ "$(wc -l < "$PASS_CALLS" | tr -d ' ')" -eq 3 ]
+    assert_output --partial "the I/O pressure gate refused 2 passes in a row"
+    refute_output --partial "No pass ran at all"
+    assert_output --partial "refused before a pass could start"
+}
+
+@test "usenet-drain-walk: the summary counts the passes the gate refused" {
+    seed_outbox 12
+    write_refused_then_productive_pass
+    run "$RUN" --apply --poll 1 --pass-stall 60 --max-passes 2 --max-barren 4 \
+        --max-skipped 4 --skip-cooldown 1 --cooldown 1
+    # Two attempts, one of which never ran. The count is the difference between
+    # reading "12 passes" and knowing that four of them were the host saying no.
+    assert_output --partial "1 refused by the pressure gate"
+    # An admitted pass clears the streak, so a host that recovers is not stood
+    # down for refusals it has already made up for.
+    refute_output --partial "pressure gate refused 4 passes in a row"
+}
+
+@test "usenet-drain-walk: the refusal count is cumulative, not the current streak" {
+    seed_outbox 12
+    # Refused, admitted, refused again: the streak at the end is 1 and the run's
+    # total is 2. Aliasing REFUSED_TOTAL to REFUSED would print 1 here and pass
+    # every other test in this file, because each of them builds a single streak.
+    cat > "$WORK/scripts/usenet-blackhole.sh" <<'EOS'
+#!/bin/bash
+echo "pass $$ invoked: $*" >> "$STUB_PASS_CALLS"
+case "$(wc -l < "$STUB_PASS_CALLS" | tr -d ' ')" in
+    2)
+        rm -f "$(ls -1 "$STUB_NZB"/*.nzb 2>/dev/null | head -n 1)" 2>/dev/null || true
+        echo "  submitted 0, fetched 1, outstanding 4 (1 owed local I/O, 3 still at TorBox)"
+        ;;
+    *)
+        echo "[pressure-gate] host I/O is stalled (io full avg10=88.00%, limit 20%); skipping this pass"
+        ;;
+esac
+EOS
+    chmod +x "$WORK/scripts/usenet-blackhole.sh"
+    run "$RUN" --apply --poll 1 --pass-stall 60 --max-passes 3 --max-barren 4 \
+        --max-skipped 3 --skip-cooldown 1 --cooldown 1
+    assert_output --partial "2 refused by the pressure gate"
+}
+
+@test "usenet-drain-walk: --max-skipped must be a positive whole number" {
+    run "$RUN" --max-skipped 0
+    assert_failure 2
+    assert_output --partial "--max-skipped must be at least 1"
+
+    run "$RUN" --max-skipped banana
+    assert_failure 2
+    assert_output --partial "--max-skipped must be a whole number"
+
+    run "$RUN" --max-skipped
+    assert_failure 2
+    assert_output --partial "--max-skipped needs a value"
+}
+
+@test "usenet-drain-walk: only the real gate's refusal counts as one" {
+    # Drives the REAL scripts/usenet-blackhole.sh, because the walk decides this
+    # by matching a phrase that script prints -- a phrase a stub hardcodes and
+    # therefore cannot keep honest. Two of the gate's four messages mean the pass
+    # RAN (it could not read its reading and went unprotected) and must count as
+    # evidence about the drain; one means it was refused and must not.
+    seed_outbox 12
+    cp "$REPO_ROOT/scripts/usenet-blackhole.sh" "$WORK/scripts/usenet-blackhole.sh"
+    chmod +x "$WORK/scripts/usenet-blackhole.sh"
+
+    # The pass's second half, reached on the unprotected path. A no-op, because
+    # the real thing would call TorBox with the placeholder key in this fixture's
+    # .env. The walk reads its own metrics through python3 too, so this also
+    # degrades those to `?`, which `advanced` already tolerates.
+    mkdir -p "$WORK/pyshim"
+    printf '#!/bin/bash\nexit 0\n' > "$WORK/pyshim/python3"
+    chmod +x "$WORK/pyshim/python3"
+
+    # 1. A stalled host: the gate's fourth message, exit 0, no pass runs. This
+    #    must be a refusal, so a barren bound of 1 cannot stop the walk.
+    printf 'some avg10=90.00 total=0\nfull avg10=90.00 total=0\n' > "$WORK/psi-stalled"
+    run env "PATH=$WORK/pyshim:$PATH" PSI_IO_PATH="$WORK/psi-stalled" PSI_IO_LIMIT=20 \
+        "$RUN" --apply --poll 1 --pass-stall 60 --max-passes 2 --max-barren 1 \
+        --skip-cooldown 1 --cooldown 1
+    assert_output --partial "refused by the I/O pressure gate"
+    refute_output --partial "made no progress"
+
+    # 2. A gate that cannot read its own input says so and the pass RUNS. That
+    #    pass is evidence about the drain, so it has to count as barren.
+    run env "PATH=$WORK/pyshim:$PATH" PSI_IO_PATH="$WORK/does-not-exist" PSI_IO_LIMIT=20 \
+        "$RUN" --apply --poll 1 --pass-stall 60 --max-passes 2 --max-barren 1 \
+        --skip-cooldown 1 --cooldown 1
+    refute_output --partial "refused by the I/O pressure gate"
+    assert_output --partial "made no progress"
 }
 
 @test "usenet-drain-walk: clearing the mark ends the walk" {
@@ -368,6 +546,34 @@ EOS
     # further prints the SCRIPT_DIR assignment below it.
     refute_output --partial "SCRIPT_DIR="
     refute_output --partial "set -euo pipefail"
+}
+
+@test "usenet-drain-walk: --help prints the whole header, not a prefix of it" {
+    run "$RUN" --help
+    assert_success
+    # The LAST lines of the header, not the middle. This is what the older test
+    # above cannot see: every string it names sits in the first half of the
+    # block, so a range three lines short of the end passed for as long as it
+    # existed. It shipped that way.
+    assert_output --partial "Prerequisites: python3"
+    assert_output --partial "Generated with LLM assistance and human-reviewed"
+    refute_output --partial "SCRIPT_DIR="
+}
+
+@test "usenet-drain-walk: the help range ends on the last non-blank header line" {
+    # Derived from the file rather than written down. The range moves whenever
+    # the header grows, and a hardcoded range would need editing in the same
+    # commit as every line of documentation above it -- which is exactly the
+    # edit that was missed. No number is named here on purpose: the last one
+    # written down became the shipped value and read as current.
+    local last header_line
+    last="$(awk 'NR >= 3 && /^# ./ { n = NR } /^SCRIPT_DIR=/ { print n; exit }' \
+                "$REPO_ROOT/scripts/usenet-drain-walk.sh")"
+    [ -n "$last" ] || fail "could not find the header/script boundary in scripts/usenet-drain-walk.sh"
+    header_line="$(sed -n "${last}p" "$REPO_ROOT/scripts/usenet-drain-walk.sh" | sed 's/^# \{0,1\}//')"
+    [ -n "$header_line" ] || fail "the last header line is empty; the awk pattern is wrong"
+    run "$RUN" --help
+    assert_output --partial "$header_line"
 }
 
 @test "usenet-drain-walk: it is executable" {

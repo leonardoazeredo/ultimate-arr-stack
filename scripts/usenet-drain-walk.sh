@@ -26,7 +26,9 @@ set -euo pipefail
 #   * kills that pass's whole process group when the fingerprint has not
 #     changed for --pass-stall seconds, so a hung fetch cannot hold the walk;
 #   * after each pass, asks whether the drain moved anywhere at all.
-#     --max-barren passes in a row that did not ends the walk.
+#     --max-barren passes in a row that did not ends the walk, and so does
+#     --max-skipped passes the I/O pressure gate refused in a row; a refused
+#     pass never started, so it is evidence about the host, not the drain.
 #
 # WHY KILLING A PASS MOVES THE WALK ON
 #
@@ -54,16 +56,20 @@ set -euo pipefail
 #   ./scripts/usenet-drain-walk.sh --apply --max-passes 8 -v
 #   ./scripts/usenet-drain-walk.sh --apply --pass-stall 900 --poll 30
 #   ./scripts/usenet-drain-walk.sh --apply --report-dry-run
+#   ./scripts/usenet-drain-walk.sh --apply --max-skipped 3
 #
 # --apply is required to run a pass, the same rule scripts/usenet-blackhole.sh
 # follows and for the same reason: the mode an operator uses to decide whether
 # applying is safe must not be the mode that applies.
 #
-# It runs in the foreground and stops for one of five reasons, each printed and
+# It runs in the foreground and stops for one of six reasons, each printed and
 # logged when it happens: the outbox dropped below the high-water mark (the
 # point at which the producers start running again), --max-passes was reached,
-# --max-hours elapsed, --max-barren passes in a row made no progress, or someone
-# interrupted it.
+# --max-hours elapsed, --max-barren passes in a row made no progress, the I/O
+# pressure gate refused --max-skipped passes in a row, or someone interrupted
+# it. The refused case is deliberately not folded into the barren one: a pass
+# the gate refused never started, so it says the host was busy, not that the
+# drain is stuck.
 #
 # It exits 0 when the outbox ends below the mark, 3 when it does not, 1 for a
 # precondition it refused and 2 for a bad argument. A walk that gave up on a
@@ -122,6 +128,14 @@ MAX_PASSES=12
 MAX_HOURS=4
 MAX_BARREN=4
 
+# Consecutive passes the I/O pressure gate may refuse before the walk stands
+# down. The gate refuses when /proc/pressure/io's full avg10 sits at or above
+# PSI_IO_LIMIT, which is the host protecting itself and not a fault to retry
+# through -- so this is expressed in skip-cooldowns (5 minutes each): 6 is half
+# an hour of a host that is too busy to start a pass. Measured 2026-09-22: the
+# longest refusal streak in a 12-pass run was 2, twice, with the threshold at 4.
+MAX_SKIPPED=6
+
 # Ten minutes of a completely static fingerprint is the definition of a pass
 # that is not moving. It is well above the longest quiet stretch a healthy fetch
 # has -- a 38 GB payload on this pool writes continuously, and its bytes are in
@@ -177,6 +191,8 @@ while [[ $# -gt 0 ]]; do
     --max-hours=*) MAX_HOURS="${1#*=}" ;;
     --max-barren) require_value "$1" "$#" "${2-}"; MAX_BARREN="$2"; shift ;;
     --max-barren=*) MAX_BARREN="${1#*=}" ;;
+    --max-skipped) require_value "$1" "$#" "${2-}"; MAX_SKIPPED="$2"; shift ;;
+    --max-skipped=*) MAX_SKIPPED="${1#*=}" ;;
     --poll) require_value "$1" "$#" "${2-}"; POLL_SECONDS="$2"; shift ;;
     --poll=*) POLL_SECONDS="${1#*=}" ;;
     --pass-stall) require_value "$1" "$#" "${2-}"; PASS_STALL_SECONDS="$2"; shift ;;
@@ -198,7 +214,13 @@ while [[ $# -gt 0 ]]; do
       # `sed -n '2,/^$/p'`, which BSD sed rejects, and it has to stop ON the
       # last comment line. The range moves whenever the header does, which is
       # what tests/usenet-drain-walk.bats notices.
-      sed -n '3,77p' "$0" | sed 's/^# \{0,1\}//'
+      # The range moves whenever a line is added to the header, and it had
+      # already fallen five lines short of the end: --help was missing the
+      # Prerequisites line and the warning below it, and nothing failed,
+      # because the test that "notices" only named strings from the middle of
+      # the block. tests/usenet-drain-walk.bats now derives the last header line
+      # from this file and asserts it appears in the output.
+      sed -n '3,88p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
@@ -212,7 +234,8 @@ done
 # Whole numbers only, one check for all of them, so a value that reaches
 # arithmetic is a number and not a string that errors halfway through a walk.
 for pair in "max-passes=$MAX_PASSES" "max-hours=$MAX_HOURS" \
-            "max-barren=$MAX_BARREN" "poll=$POLL_SECONDS" \
+            "max-barren=$MAX_BARREN" "max-skipped=$MAX_SKIPPED" \
+            "poll=$POLL_SECONDS" \
             "pass-stall=$PASS_STALL_SECONDS" "cooldown=$COOLDOWN_SECONDS" \
             "skip-cooldown=$SKIP_COOLDOWN_SECONDS" "kill-grace=$KILL_GRACE_SECONDS" \
             "max-inflight=$MAX_INFLIGHT"; do
@@ -229,6 +252,7 @@ done
 MAX_PASSES=$((10#$MAX_PASSES))
 MAX_HOURS=$((10#$MAX_HOURS))
 MAX_BARREN=$((10#$MAX_BARREN))
+MAX_SKIPPED=$((10#$MAX_SKIPPED))
 POLL_SECONDS=$((10#$POLL_SECONDS))
 PASS_STALL_SECONDS=$((10#$PASS_STALL_SECONDS))
 COOLDOWN_SECONDS=$((10#$COOLDOWN_SECONDS))
@@ -249,6 +273,10 @@ if [[ "$MAX_HOURS" -lt 1 ]]; then
 fi
 if [[ "$MAX_BARREN" -lt 1 ]]; then
   echo "ERROR: --max-barren must be at least 1, got '$MAX_BARREN'" >&2
+  exit 2
+fi
+if [[ "$MAX_SKIPPED" -lt 1 ]]; then
+  echo "ERROR: --max-skipped must be at least 1, got '$MAX_SKIPPED'" >&2
   exit 2
 fi
 if [[ "$POLL_SECONDS" -lt 1 ]]; then
@@ -481,9 +509,15 @@ run_pass() {
     sed 's/^/    /' "$PASS_SLICE" >> "$LOG_FILE"
   fi
 
-  PASS_SKIPPED=false
-  if grep -q '\[pressure-gate\]' "$PASS_SLICE" 2>/dev/null; then
-    PASS_SKIPPED=true
+  # The gate prints four messages and refuses on one of them: the other three
+  # say "this pass runs unprotected" and then run the pass normally. Matching
+  # the prefix alone therefore classified a pass that ran as one that never
+  # started, which is the error this branch exists to remove -- it disabled the
+  # barren stop on any host whose PSI reading could not be read. Matched on the
+  # refusal's own phrase because it is the only one of the four that skips.
+  PASS_REFUSED=false
+  if grep -q '\[pressure-gate\].*skipping this pass' "$PASS_SLICE" 2>/dev/null; then
+    PASS_REFUSED=true
   fi
 
   local summary
@@ -491,7 +525,7 @@ run_pass() {
 
   if [[ "$PASS_KILLED" == "true" ]]; then
     log "pass ${PASS_NUMBER}: killed by the watchdog"
-  elif [[ "$PASS_SKIPPED" == "true" ]]; then
+  elif [[ "$PASS_REFUSED" == "true" ]]; then
     log "pass ${PASS_NUMBER}: refused by the I/O pressure gate"
   elif [[ "$PASS_EXIT" -ne 0 ]]; then
     log "pass ${PASS_NUMBER}: exited ${PASS_EXIT}"
@@ -577,7 +611,7 @@ echo ""
 echo "========================================"
 echo "Usenet drain walk — $(date '+%Y-%m-%d %H:%M:%S')"
 if $APPLY; then
-  echo "Mode: APPLYING (up to ${MAX_PASSES} pass(es), ${MAX_HOURS}h, stop after ${MAX_BARREN} fruitless)"
+  echo "Mode: APPLYING (up to ${MAX_PASSES} pass(es), ${MAX_HOURS}h, stop after ${MAX_BARREN} fruitless or ${MAX_SKIPPED} refused)"
 else
   echo "Mode: DRY RUN (use --apply to walk)"
 fi
@@ -639,6 +673,17 @@ acquire_lock
 
 PASS_NUMBER=0
 BARREN=0
+# Passes the pressure gate refused, counted separately from BARREN. A refused
+# pass never started -- scripts/usenet-blackhole.sh exits at its gate before it
+# reaches python -- so it is evidence about the host, not about the drain.
+# Measured 2026-09-22: 4 of 12 passes in one run were refusals and every one of
+# them was counted as "no progress", against a run in which no admitted pass
+# failed to move anything.
+REFUSED=0
+# Every refusal in the run, never reset: REFUSED answers "is the host still too
+# busy", this answers "how much of this run was the host saying no". The summary
+# needs the second one.
+REFUSED_TOTAL=0
 STOP_REASON=""
 WALK_START="$(date +%s)"
 
@@ -665,17 +710,30 @@ while :; do
     STOP_REASON="${MAX_BARREN} passes in a row made no progress"
     break
   fi
+  if [[ "$REFUSED" -ge "$MAX_SKIPPED" ]]; then
+    STOP_REASON="the I/O pressure gate refused ${MAX_SKIPPED} passes in a row (the host was too busy to start one)"
+    break
+  fi
 
   before="$(metrics)"
   run_pass
   after="$(metrics)"
 
-  if advanced "$before" "$after"; then
-    BARREN=0
-    log "progress: ${before} -> ${after}"
+  if [[ "$PASS_REFUSED" == "true" ]]; then
+    REFUSED=$((REFUSED + 1))
+    REFUSED_TOTAL=$((REFUSED_TOTAL + 1))
+    log "the pressure gate refused pass ${PASS_NUMBER} (${REFUSED} in a row); the host read as too busy to start it"
   else
-    BARREN=$((BARREN + 1))
-    log "no progress this pass (${BARREN}/${MAX_BARREN}): ${before} -> ${after}"
+    # An admitted pass is what clears the refusal streak: the gate let this one
+    # through, so the host was not too busy to start work.
+    REFUSED=0
+    if advanced "$before" "$after"; then
+      BARREN=0
+      log "progress: ${before} -> ${after}"
+    else
+      BARREN=$((BARREN + 1))
+      log "no progress this pass (${BARREN}/${MAX_BARREN}): ${before} -> ${after}"
+    fi
   fi
 
   if [[ "$INTERRUPTED" == "true" ]]; then
@@ -688,9 +746,15 @@ while :; do
     break
   fi
 
-  if [[ "$PASS_SKIPPED" == "true" ]]; then
-    log "the pressure gate refused that pass; waiting ${SKIP_COOLDOWN_SECONDS}s before the next"
-    sleep_or_break "$SKIP_COOLDOWN_SECONDS" "$$"
+  if [[ "$PASS_REFUSED" == "true" ]]; then
+    # The refusal itself is logged above, once. This says only what happens next.
+    # No wait when the bound is already reached: the loop top stops the walk
+    # before another pass could run, and a 300s sleep that buys nothing is the
+    # one part of a saturated run an operator would read as a hang.
+    if [[ "$REFUSED" -lt "$MAX_SKIPPED" ]]; then
+      log "waiting ${SKIP_COOLDOWN_SECONDS}s before the next attempt"
+      sleep_or_break "$SKIP_COOLDOWN_SECONDS" "$$"
+    fi
   elif [[ "$BARREN" -lt "$MAX_BARREN" ]]; then
     sleep_or_break "$COOLDOWN_SECONDS" "$$"
   fi
@@ -702,7 +766,7 @@ METRICS_END="$(metrics)"
 echo ""
 echo "========================================"
 log "stopped: ${STOP_REASON}"
-log "passes run: ${PASS_NUMBER} (${BARREN} in a row with no progress at the end)"
+log "passes run: ${PASS_NUMBER} (${REFUSED_TOTAL} refused by the pressure gate, ${BARREN} in a row with no progress at the end)"
 log "outbox:     ${OUTBOX_START} -> ${OUTBOX_END} NZBs (mark ${QUEUE_HIGH_WATER})"
 log "drain:      ${METRICS_START} -> ${METRICS_END} (jobs/complete/stalled/outbox)"
 log "wall clock: $(( ($(date +%s) - WALK_START) / 60 ))m"
@@ -717,6 +781,14 @@ if [[ "$OUTBOX_END" -ge "$QUEUE_HIGH_WATER" ]]; then
   echo ""
   echo "The outbox is still at or above the mark, so backlog-search and"
   echo "stremio-library-sync are still standing down."
+fi
+if [[ "$STOP_REASON" == *"pressure gate refused"* ]]; then
+  echo ""
+  echo "The last ${MAX_SKIPPED} attempts were refused before a pass could start, so"
+  echo "nothing has been fetched since that streak began. The gate refuses while the"
+  echo "pool reads as stalled, which is the host protecting itself rather than a stuck"
+  echo "drain -- check /proc/pressure/io (full avg10) and run this again when it is"
+  echo "quieter."
 fi
 if [[ "$STOP_REASON" == *"no progress"* ]]; then
   echo ""

@@ -394,6 +394,10 @@ rule instead of by eye:
   group killed when none of it has moved for ten minutes;
 - after each pass, whether the drain got anywhere at all. Four passes in a row
   that did not end the walk.
+- a pass the I/O pressure gate refused is **not** counted among those four. It
+  never started, so it is evidence about the host, not the drain. Six refusals
+  in a row (`--max-skipped`) end the walk on their own reason instead, which
+  means a saturated pool reports itself rather than reading as a stuck queue.
 
 ```bash
 ./scripts/usenet-drain-walk.sh          # dry run: the plan and the queue
