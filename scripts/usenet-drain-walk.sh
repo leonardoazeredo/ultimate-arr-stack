@@ -678,6 +678,10 @@ BARREN=0
 # them was counted as "no progress", against a run in which no admitted pass
 # failed to move anything.
 REFUSED=0
+# Every refusal in the run, never reset: REFUSED answers "is the host still too
+# busy", this answers "how much of this run was the host saying no". The summary
+# needs the second one.
+REFUSED_TOTAL=0
 STOP_REASON=""
 WALK_START="$(date +%s)"
 
@@ -715,6 +719,7 @@ while :; do
 
   if [[ "$PASS_REFUSED" == "true" ]]; then
     REFUSED=$((REFUSED + 1))
+    REFUSED_TOTAL=$((REFUSED_TOTAL + 1))
     log "the pressure gate refused pass ${PASS_NUMBER} (${REFUSED} in a row); the host read as too busy to start it"
   else
     # An admitted pass is what clears the refusal streak: the gate let this one
@@ -754,7 +759,7 @@ METRICS_END="$(metrics)"
 echo ""
 echo "========================================"
 log "stopped: ${STOP_REASON}"
-log "passes run: ${PASS_NUMBER} (${BARREN} in a row with no progress at the end)"
+log "passes run: ${PASS_NUMBER} (${REFUSED_TOTAL} refused by the pressure gate, ${BARREN} in a row with no progress at the end)"
 log "outbox:     ${OUTBOX_START} -> ${OUTBOX_END} NZBs (mark ${QUEUE_HIGH_WATER})"
 log "drain:      ${METRICS_START} -> ${METRICS_END} (jobs/complete/stalled/outbox)"
 log "wall clock: $(( ($(date +%s) - WALK_START) / 60 ))m"

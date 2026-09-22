@@ -136,6 +136,22 @@ EOS
     chmod +x "$WORK/scripts/usenet-blackhole.sh"
 }
 
+# Refused on the first invocation, productive afterwards: the shape of a host
+# that was busy and then was not.
+write_refused_then_productive_pass() {
+    cat > "$WORK/scripts/usenet-blackhole.sh" <<'EOS'
+#!/bin/bash
+echo "pass $$ invoked: $*" >> "$STUB_PASS_CALLS"
+if [[ "$(wc -l < "$STUB_PASS_CALLS" | tr -d ' ')" -eq 1 ]]; then
+    echo "[pressure-gate] host I/O is stalled (io full avg10=88.00%, limit 20%); skipping this pass"
+    exit 0
+fi
+rm -f "$(ls -1 "$STUB_NZB"/*.nzb 2>/dev/null | head -n 1)" 2>/dev/null || true
+echo "  submitted 0, fetched 1, outstanding 4 (1 owed local I/O, 3 still at TorBox)"
+EOS
+    chmod +x "$WORK/scripts/usenet-blackhole.sh"
+}
+
 @test "usenet-drain-walk: dry run is the default and reaches no pass" {
     seed_outbox 3
     write_stuck_pass
@@ -301,6 +317,19 @@ EOS
     assert_output --partial "the I/O pressure gate refused 2 passes in a row"
     refute_output --partial "No pass ran at all"
     assert_output --partial "refused before a pass could start"
+}
+
+@test "usenet-drain-walk: the summary counts the passes the gate refused" {
+    seed_outbox 12
+    write_refused_then_productive_pass
+    run "$RUN" --apply --poll 1 --pass-stall 60 --max-passes 2 --max-barren 4 \
+        --max-skipped 4 --skip-cooldown 1 --cooldown 1
+    # Two attempts, one of which never ran. The count is the difference between
+    # reading "12 passes" and knowing that four of them were the host saying no.
+    assert_output --partial "1 refused by the pressure gate"
+    # An admitted pass clears the streak, so a host that recovers is not stood
+    # down for refusals it has already made up for.
+    refute_output --partial "pressure gate refused 4 passes in a row"
 }
 
 @test "usenet-drain-walk: --max-skipped must be a positive whole number" {
