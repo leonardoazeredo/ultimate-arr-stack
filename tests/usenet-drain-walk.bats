@@ -265,6 +265,33 @@ EOS
     assert_output --partial "the pressure gate refused"
 }
 
+@test "usenet-drain-walk: a host too busy to start a pass stands the walk down on its own reason" {
+    seed_outbox 12
+    write_refused_pass
+    run "$RUN" --apply --poll 1 --pass-stall 60 --max-passes 6 --max-barren 4 \
+        --max-skipped 2 --skip-cooldown 1 --cooldown 1
+    assert_failure 3
+    assert_output --partial "the I/O pressure gate refused 2 passes in a row"
+    [ "$(wc -l < "$PASS_CALLS" | tr -d ' ')" -eq 2 ]
+    # And it did not spend the pass budget to say so: six were allowed and the
+    # refusal bound stopped it at two.
+    refute_output --partial "pass budget reached"
+}
+
+@test "usenet-drain-walk: --max-skipped must be a positive whole number" {
+    run "$RUN" --max-skipped 0
+    assert_failure 2
+    assert_output --partial "--max-skipped must be at least 1"
+
+    run "$RUN" --max-skipped banana
+    assert_failure 2
+    assert_output --partial "--max-skipped must be a whole number"
+
+    run "$RUN" --max-skipped
+    assert_failure 2
+    assert_output --partial "--max-skipped needs a value"
+}
+
 @test "usenet-drain-walk: only the real gate's refusal counts as one" {
     # Drives the REAL scripts/usenet-blackhole.sh, because the walk decides this
     # by matching a phrase that script prints -- a phrase a stub hardcodes and

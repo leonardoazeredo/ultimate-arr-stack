@@ -54,16 +54,20 @@ set -euo pipefail
 #   ./scripts/usenet-drain-walk.sh --apply --max-passes 8 -v
 #   ./scripts/usenet-drain-walk.sh --apply --pass-stall 900 --poll 30
 #   ./scripts/usenet-drain-walk.sh --apply --report-dry-run
+#   ./scripts/usenet-drain-walk.sh --apply --max-skipped 3
 #
 # --apply is required to run a pass, the same rule scripts/usenet-blackhole.sh
 # follows and for the same reason: the mode an operator uses to decide whether
 # applying is safe must not be the mode that applies.
 #
-# It runs in the foreground and stops for one of five reasons, each printed and
+# It runs in the foreground and stops for one of six reasons, each printed and
 # logged when it happens: the outbox dropped below the high-water mark (the
 # point at which the producers start running again), --max-passes was reached,
-# --max-hours elapsed, --max-barren passes in a row made no progress, or someone
-# interrupted it.
+# --max-hours elapsed, --max-barren passes in a row made no progress, the I/O
+# pressure gate refused --max-skipped passes in a row, or someone interrupted
+# it. The refused case is deliberately not folded into the barren one: a pass
+# the gate refused never started, so it says the host was busy, not that the
+# drain is stuck.
 #
 # It exits 0 when the outbox ends below the mark, 3 when it does not, 1 for a
 # precondition it refused and 2 for a bad argument. A walk that gave up on a
@@ -122,6 +126,14 @@ MAX_PASSES=12
 MAX_HOURS=4
 MAX_BARREN=4
 
+# Consecutive passes the I/O pressure gate may refuse before the walk stands
+# down. The gate refuses when /proc/pressure/io's full avg10 sits at or above
+# PSI_IO_LIMIT, which is the host protecting itself and not a fault to retry
+# through -- so this is expressed in skip-cooldowns (5 minutes each): 6 is half
+# an hour of a host that is too busy to start a pass. Measured 2026-09-22: the
+# longest refusal streak in a 12-pass run was 2, twice, with the threshold at 4.
+MAX_SKIPPED=6
+
 # Ten minutes of a completely static fingerprint is the definition of a pass
 # that is not moving. It is well above the longest quiet stretch a healthy fetch
 # has -- a 38 GB payload on this pool writes continuously, and its bytes are in
@@ -177,6 +189,8 @@ while [[ $# -gt 0 ]]; do
     --max-hours=*) MAX_HOURS="${1#*=}" ;;
     --max-barren) require_value "$1" "$#" "${2-}"; MAX_BARREN="$2"; shift ;;
     --max-barren=*) MAX_BARREN="${1#*=}" ;;
+    --max-skipped) require_value "$1" "$#" "${2-}"; MAX_SKIPPED="$2"; shift ;;
+    --max-skipped=*) MAX_SKIPPED="${1#*=}" ;;
     --poll) require_value "$1" "$#" "${2-}"; POLL_SECONDS="$2"; shift ;;
     --poll=*) POLL_SECONDS="${1#*=}" ;;
     --pass-stall) require_value "$1" "$#" "${2-}"; PASS_STALL_SECONDS="$2"; shift ;;
@@ -199,12 +213,12 @@ while [[ $# -gt 0 ]]; do
       # last comment line. The range moves whenever the header does, which is
       # what tests/usenet-drain-walk.bats notices.
       # The range moves whenever a line is added to the header, and it had
-      # already fallen three lines short of the end: --help was missing the
+      # already fallen five lines short of the end: --help was missing the
       # Prerequisites line and the warning below it, and nothing failed,
       # because the test that "notices" only named strings from the middle of
       # the block. tests/usenet-drain-walk.bats now derives the last header line
       # from this file and asserts it appears in the output.
-      sed -n '3,82p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '3,86p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
@@ -218,7 +232,8 @@ done
 # Whole numbers only, one check for all of them, so a value that reaches
 # arithmetic is a number and not a string that errors halfway through a walk.
 for pair in "max-passes=$MAX_PASSES" "max-hours=$MAX_HOURS" \
-            "max-barren=$MAX_BARREN" "poll=$POLL_SECONDS" \
+            "max-barren=$MAX_BARREN" "max-skipped=$MAX_SKIPPED" \
+            "poll=$POLL_SECONDS" \
             "pass-stall=$PASS_STALL_SECONDS" "cooldown=$COOLDOWN_SECONDS" \
             "skip-cooldown=$SKIP_COOLDOWN_SECONDS" "kill-grace=$KILL_GRACE_SECONDS" \
             "max-inflight=$MAX_INFLIGHT"; do
@@ -235,6 +250,7 @@ done
 MAX_PASSES=$((10#$MAX_PASSES))
 MAX_HOURS=$((10#$MAX_HOURS))
 MAX_BARREN=$((10#$MAX_BARREN))
+MAX_SKIPPED=$((10#$MAX_SKIPPED))
 POLL_SECONDS=$((10#$POLL_SECONDS))
 PASS_STALL_SECONDS=$((10#$PASS_STALL_SECONDS))
 COOLDOWN_SECONDS=$((10#$COOLDOWN_SECONDS))
@@ -255,6 +271,10 @@ if [[ "$MAX_HOURS" -lt 1 ]]; then
 fi
 if [[ "$MAX_BARREN" -lt 1 ]]; then
   echo "ERROR: --max-barren must be at least 1, got '$MAX_BARREN'" >&2
+  exit 2
+fi
+if [[ "$MAX_SKIPPED" -lt 1 ]]; then
+  echo "ERROR: --max-skipped must be at least 1, got '$MAX_SKIPPED'" >&2
   exit 2
 fi
 if [[ "$POLL_SECONDS" -lt 1 ]]; then
@@ -589,7 +609,7 @@ echo ""
 echo "========================================"
 echo "Usenet drain walk — $(date '+%Y-%m-%d %H:%M:%S')"
 if $APPLY; then
-  echo "Mode: APPLYING (up to ${MAX_PASSES} pass(es), ${MAX_HOURS}h, stop after ${MAX_BARREN} fruitless)"
+  echo "Mode: APPLYING (up to ${MAX_PASSES} pass(es), ${MAX_HOURS}h, stop after ${MAX_BARREN} fruitless or ${MAX_SKIPPED} refused)"
 else
   echo "Mode: DRY RUN (use --apply to walk)"
 fi
@@ -684,6 +704,10 @@ while :; do
     STOP_REASON="${MAX_BARREN} passes in a row made no progress"
     break
   fi
+  if [[ "$REFUSED" -ge "$MAX_SKIPPED" ]]; then
+    STOP_REASON="the I/O pressure gate refused ${MAX_SKIPPED} passes in a row (the host was too busy to start one)"
+    break
+  fi
 
   before="$(metrics)"
   run_pass
@@ -745,6 +769,13 @@ if [[ "$OUTBOX_END" -ge "$QUEUE_HIGH_WATER" ]]; then
   echo ""
   echo "The outbox is still at or above the mark, so backlog-search and"
   echo "stremio-library-sync are still standing down."
+fi
+if [[ "$STOP_REASON" == *"pressure gate refused"* ]]; then
+  echo ""
+  echo "No pass ran at all: the I/O pressure gate refused every one, which means the"
+  echo "pool read as stalled each time it was asked. That is the host protecting"
+  echo "itself, not a stuck drain -- check /proc/pressure/io (full avg10) and run"
+  echo "this again when it is quieter."
 fi
 if [[ "$STOP_REASON" == *"no progress"* ]]; then
   echo ""
