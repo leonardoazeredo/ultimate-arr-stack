@@ -428,14 +428,53 @@ jobs owed the state file, and nothing had been drained since 2026-09-20 21:25.
 
 ### Measuring whether one fetch stream beats three
 
-`FETCH_WORKERS` is 3, and no one has measured whether three concurrent fetches
-finish more releases per hour than one on this pool. The only observation is a
-single pass that cannot separate the concurrency from a 21-release pile-up, a
-flapping gate, a Time Machine client and Docker churn.
+**Measured 2026-09-22. The answer is three, and the write cost turns out not to
+be about concurrency at all.** Until that day this section said nobody had
+measured it, and that the only observation was a single pass which could not
+separate the concurrency from a 21-release pile-up, a flapping gate, a Time
+Machine client and Docker churn. Two arms on a quiet box settled it: the ingest
+held down, `io full avg10` 1.6% before the first arm, the same walk and the same
+pressure gate, only `FETCH_WORKERS` differing.
 
-With the ingest held down and the box quiet, patch `FETCH_WORKERS` to 1 on a
-branch, sync, and hand-run one pass with this sampler alongside. It reads
-`/proc` only and needs no root:
+| | Arm A — width 3 | Arm B — width 1 |
+| --- | --- | --- |
+| releases fetched | 3 | 2 — its third pass the gate refused |
+| payload read | 44.09 GB | 12.30 GB |
+| written, logical, per device | 105.22 GB | 31.45 GB |
+| written per byte read | **2.39×** | **2.56×** |
+| wall clock | 22.8 min | 17.3 min |
+| throughput | **1.93 GB/min** | **0.71 GB/min — 37%** |
+| peak `io full avg10` | 66.83% | **70.71%** |
+| platter written, both devices | 210.4 GB | 62.9 GB |
+
+Width 1 delivered **37%** of width 3's throughput against the 80% this section
+set as the bar, and bought nothing back: it wrote slightly *more* per byte pulled
+and peaked slightly *higher*. `FETCH_WORKERS` stays 3, and the width-one branch
+was discarded rather than merged.
+
+Two things about that table are worth keeping. The arms did not fetch the same
+releases, and the difference cuts against the result rather than for it — arm A
+included a 27.59 GB RAR-packed release that needed 55 volumes unpacked locally,
+arm B included none, and arm A still had the lower churn ratio and the lower
+peak. And arm B's throughput includes five minutes of skip-cooldown after its
+refusal, which is itself a cost of the narrow arm: the gate refused it because
+one release's writeback was still draining, where width 3's next pass was not
+refused at all.
+
+**The more useful finding is in the write column.** Written bytes per byte read
+barely move with the width — 2.39 against 2.56 — so the platter cost is a
+property of the *pipeline*, not of how many fetches overlap: `fetch` writes
+`payload.zip`, extracts it, and for a packed release unpacks the RAR volumes
+inside it before deleting them. That is ~2.4 logical bytes written per byte
+pulled, before RAID1 mirrors it at the platter. No fetch width changes it.
+Streaming the download through the extractor instead, or getting the provider to
+deliver unpacked, is what would take that ratio toward 1 — and halving it halves
+the I/O cost of every delivery, which is the number that matters for draining a
+backlog without wedging the box.
+
+The method, kept for the next time it is asked. With the ingest held down and the
+box quiet, patch `FETCH_WORKERS` on a branch, sync, and run one arm per width
+with this sampler alongside. It reads `/proc` only and needs no root:
 
 ```bash
 while :; do
@@ -447,11 +486,12 @@ while :; do
 done
 ```
 
-Read off two numbers: releases completed per minute, and the delta in fields 3
-and 7 of `/sys/block/*/stat` (sectors read and written) per release. If one
-stream delivers 80% or more of the three-stream rate, set `FETCH_WORKERS` to 1 —
-the array is two rotational spindles, and the concurrency is buying queue depth
-rather than throughput. Record the two rates here when it is done.
+Read off two numbers: bytes pulled per minute, and the delta in fields 3 and 7 of
+`/sys/block/*/stat` per byte pulled. Fields 3 and 7 are sectors read and written,
+512 bytes each, and both devices are counted separately because RAID1 writes each
+of them twice. If one stream delivers 80% or more of the three-stream rate, set
+`FETCH_WORKERS` to 1. It does not: the table above records 37% at a slightly
+higher peak.
 
 ### What this pool can and cannot absorb
 
