@@ -49,11 +49,19 @@ test.describe('stremio-jellyfin', () => {
   //   - with the login fixed, every authenticated call 401'd, so the catalog
   //     came back with zero items -- which no test asserted;
   //   - with that fixed, episodes resolved to nothing, because the season
-  //     lookup asked for IndexNumber === 1 while the library had only Specials.
+  //     lookup asked for IndexNumber === 1 while the library had only Specials,
+  //     which was answered by falling back to the first season and the first
+  //     episode the library did have. That fallback then outlived its reason
+  //     and served a wrong episode for every season of a series the library
+  //     holds only in part.
   //
   // Each of those is a different failure of the same chain, and each is caught
   // by one assertion below. The addon is local build with a published port, so
   // none of this needs Docker access and it runs everywhere the suite runs.
+  //
+  // The season/episode contract the two last tests pin down is exact match or
+  // no stream, in both directions: what the library holds resolves, and what it
+  // does not hold is refused rather than approximated.
 
   const addon = (path: string) => url('stremioJellyfin', path);
 
@@ -121,22 +129,54 @@ test.describe('stremio-jellyfin', () => {
     expect(body.length, 'the stream URL returned no media bytes').toBeGreaterThan(0);
   });
 
-  test('an episode resolves to a stream URL too', async ({ request }) => {
-    // The season lookup is the part that broke: a library whose only season for
-    // a series is `Specials` (IndexNumber 0) resolved to nothing when asked for
-    // season 1. This walks the same path for whichever series the catalog
-    // returns first, so it fails if that regression returns.
+  test('an episode the library holds resolves to a stream URL', async ({ request }) => {
+    // Whichever series the catalog returns first is not guaranteed to hold a
+    // first season, so walk a few of them rather than asserting on one. A
+    // library where none of the first few has a season 1 is a real failure
+    // here, not a reason to skip.
+    const catalog = await (await request.get(addon('/catalog/series/all/skip=0.json'), { timeout: 30_000 })).json();
+    const candidates = (catalog.metas ?? [])
+      .filter((m: { id?: string }) => /^tt\d+$/.test(m.id ?? ''))
+      .slice(0, 5);
+    expect(candidates.length, 'the series catalog returned nothing with an IMDb id').toBeGreaterThan(0);
+
+    let resolved: { name: string; url: string } | undefined;
+    for (const series of candidates) {
+      const streamRes = await request.get(addon(`/stream/series/${series.id}:1:1.json`), { timeout: 30_000 });
+      const streams = (await streamRes.json()).streams ?? [];
+      if (streams.length > 0) {
+        resolved = { name: series.name, url: streams[0].url };
+        break;
+      }
+    }
+    // An empty list for every candidate is exactly the 2026-09-11 bug. It is
+    // asserted rather than skipped because the library does have series with
+    // episodes.
+    expect(resolved, `no stream resolved for S1E1 on any of ${candidates.length} catalog series`).toBeTruthy();
+    expect(resolved!.url).toContain('/videos/');
+  });
+
+  test('an episode the library does not hold resolves to no stream', async ({ request }) => {
+    // The other half of the same contract, and the half that went untested.
+    //
+    // Both lookups used to end in a fallback -- first season, first episode --
+    // so a request for an episode the library does not hold was answered with
+    // an unrelated one. Stremio offers a Jellyfin stream for every episode of
+    // the series Cinemeta lists, so a partly-downloaded series looked complete
+    // and picking any missing episode played the wrong thing. Measured
+    // 2026-09-22 with only Dragon Ball Super S1-S2 held: S03E01, S03E19 and
+    // S05E55 all resolved, to S01E01.
+    //
+    // Season 99 is asked for because no library holds one, which keeps the
+    // assertion independent of what this library happens to contain.
     const catalog = await (await request.get(addon('/catalog/series/all/skip=0.json'), { timeout: 30_000 })).json();
     const series = (catalog.metas ?? []).find((m: { id?: string }) => /^tt\d+$/.test(m.id ?? ''));
     test.skip(!series, 'the series catalog returned nothing with an IMDb id');
 
-    const streamRes = await request.get(addon(`/stream/series/${series.id}:1:1.json`), { timeout: 30_000 });
+    const streamRes = await request.get(addon(`/stream/series/${series.id}:99:1.json`), { timeout: 30_000 });
     expect(streamRes.ok()).toBeTruthy();
     const streams = (await streamRes.json()).streams ?? [];
-    // An empty list here is exactly the old bug. It is asserted rather than
-    // skipped because the library does have series with episodes.
-    expect(streams.length, `no stream resolved for ${series.id}:1:1 (${series.name})`).toBeGreaterThan(0);
-    expect(streams[0].url).toContain('/videos/');
+    expect(streams.length, `${series.id} answered a request for season 99 with a stream`).toBe(0);
   });
 });
 
