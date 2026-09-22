@@ -272,10 +272,35 @@ EOS
         --max-skipped 2 --skip-cooldown 1 --cooldown 1
     assert_failure 3
     assert_output --partial "the I/O pressure gate refused 2 passes in a row"
+    assert_output --partial "refused before a pass could start"
     [ "$(wc -l < "$PASS_CALLS" | tr -d ' ')" -eq 2 ]
     # And it did not spend the pass budget to say so: six were allowed and the
     # refusal bound stopped it at two.
     refute_output --partial "pass budget reached"
+}
+
+@test "usenet-drain-walk: the refusal note does not call a run that fetched something empty" {
+    seed_outbox 12
+    # One admitted, productive pass, then refusals up to the bound. The streak is
+    # what stops the walk; the run as a whole fetched a release. The note used to
+    # read "No pass ran at all: the I/O pressure gate refused every one", which is
+    # false here -- and it is the first line an operator reads.
+    cat > "$WORK/scripts/usenet-blackhole.sh" <<'EOS'
+#!/bin/bash
+echo "pass $$ invoked: $*" >> "$STUB_PASS_CALLS"
+if [[ "$(wc -l < "$STUB_PASS_CALLS" | tr -d ' ')" -eq 1 ]]; then
+    rm -f "$(ls -1 "$STUB_NZB"/*.nzb 2>/dev/null | head -n 1)" 2>/dev/null || true
+    echo "  submitted 0, fetched 1, outstanding 4 (1 owed local I/O, 3 still at TorBox)"
+    exit 0
+fi
+echo "[pressure-gate] host I/O is stalled (io full avg10=88.00%, limit 20%); skipping this pass"
+EOS
+    chmod +x "$WORK/scripts/usenet-blackhole.sh"
+    run "$RUN" --apply --poll 1 --pass-stall 60 --max-passes 6 --max-barren 4 \
+        --max-skipped 2 --skip-cooldown 1 --cooldown 1
+    assert_output --partial "the I/O pressure gate refused 2 passes in a row"
+    refute_output --partial "No pass ran at all"
+    assert_output --partial "refused before a pass could start"
 }
 
 @test "usenet-drain-walk: --max-skipped must be a positive whole number" {

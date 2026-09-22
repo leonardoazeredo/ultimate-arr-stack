@@ -772,10 +772,11 @@ if [[ "$OUTBOX_END" -ge "$QUEUE_HIGH_WATER" ]]; then
 fi
 if [[ "$STOP_REASON" == *"pressure gate refused"* ]]; then
   echo ""
-  echo "No pass ran at all: the I/O pressure gate refused every one, which means the"
-  echo "pool read as stalled each time it was asked. That is the host protecting"
-  echo "itself, not a stuck drain -- check /proc/pressure/io (full avg10) and run"
-  echo "this again when it is quieter."
+  echo "The last ${MAX_SKIPPED} attempts were refused before a pass could start, so"
+  echo "nothing has been fetched since that streak began. The gate refuses while the"
+  echo "pool reads as stalled, which is the host protecting itself rather than a stuck"
+  echo "drain -- check /proc/pressure/io (full avg10) and run this again when it is"
+  echo "quieter."
 fi
 if [[ "$STOP_REASON" == *"no progress"* ]]; then
   echo ""
