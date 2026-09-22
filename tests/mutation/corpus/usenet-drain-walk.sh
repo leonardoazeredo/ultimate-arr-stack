@@ -69,3 +69,12 @@ mutation usenet-drain-walk-max-skipped-zero-accepted \
   --test "usenet-drain-walk: --max-skipped must be a positive whole number" \
   --why "relaxing the minimum to '-lt 0' accepts --max-skipped 0, a bound reached before the first pass starts: on a host the gate refuses, the walk ends with no pass attempted and only the refusal line to explain it, and the flag the operator set to mean 'never give up quickly' means the opposite. The whole-number and missing-value checks still fire, so the no-argument case is not what catches this" \
   --apply 'sed -i.bak "s@\"\$MAX_SKIPPED\" -lt 1@\"\$MAX_SKIPPED\" -lt 0@" "$F" && rm -f "$F.bak"'
+
+# --- a wait that buys nothing after the walk has decided to stop ------------
+
+mutation usenet-drain-walk-terminal-refusal-still-waits \
+  --file scripts/usenet-drain-walk.sh \
+  --bats tests/usenet-drain-walk.bats \
+  --test "usenet-drain-walk: a host too busy to start a pass stands the walk down on its own reason" \
+  --why "dropping the wait guard means the refusal that takes REFUSED to --max-skipped still logs and sleeps the skip-cooldown, although the loop top stops the walk before another pass could run: at the shipped 300s that is five minutes of silence at the end of the one run an operator is watching, and a walk that has already decided to stop reads as a hang. The test counts the wait lines for exactly two refusals, so the second one is what goes red" \
+  --apply 'sed -i.bak "s@if \[\[ \"\$REFUSED\" -lt \"\$MAX_SKIPPED\" \]\]; then@if true; then@" "$F" && rm -f "$F.bak"'

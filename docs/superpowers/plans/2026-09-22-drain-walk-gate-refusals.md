@@ -727,7 +727,7 @@ Do **not** put backticks or `$` in the `--why` text: this file is sourced by the
 - [ ] **Step 2: Run the harness for this corpus**
 
 Run: `TMPDIR="$PWD/.tmp-bats" /opt/homebrew/bin/bash ./tests/mutation/run-mutations.sh tests/mutation/corpus/usenet-drain-walk.sh`
-Expected: `KILLED usenet-drain-walk-refusal-counted-as-barren (1 test(s))`, and the tail reads `killed 7 / 7   survived 0   errored 0   skipped 0` with no `hit the oracle budget` note. (This step said `killed 3 / 3` when it was written; the final review wave registered the four guards this task left without an entry, so the corpus is seven.) On Linux use `bash` rather than `/opt/homebrew/bin/bash`; the harness needs bash 4+ for `BASHPID`.
+Expected: `KILLED usenet-drain-walk-refusal-counted-as-barren (1 test(s))`, and the tail reads `killed 8 / 8   survived 0   errored 0   skipped 0` with no `hit the oracle budget` note. (This step said `killed 3 / 3` when it was written; the final review wave registered the four guards this task left without an entry and then the wait guard it added, so the corpus is eight.) On Linux use `bash` rather than `/opt/homebrew/bin/bash`; the harness needs bash 4+ for `BASHPID`.
 
 - [ ] **Step 3: If it reports SURVIVED or a budget hit**
 
