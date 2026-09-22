@@ -28,7 +28,6 @@ const SOURCE_PATTERNS = [
 ];
 
 const LANGUAGE_PATTERNS = [
-  { re: /\bmulti\b/i,     lang: 'multi' },
   { re: /\bfrench\b/i,    lang: 'fr'    },
   { re: /\bspanish\b/i,   lang: 'es'    },
   { re: /\bportuguese\b/i,lang: 'pt'    },
@@ -50,6 +49,31 @@ const LANGUAGE_PATTERNS = [
   { re: /\bdubbed\b/i,    lang: 'dubbed'},
 ];
 
+// Tags that assert more than one audio track. They are not language names: a
+// `MULTI`, `DUAL` or scene `DL` release carries several, and the addon's
+// language whitelist exists to drop releases whose audio a viewer cannot use,
+// so these have to satisfy a whitelist of concrete languages rather than be
+// compared against one. Measured on this stack 2026-09-22:
+// `Dark.Matter.Der.Zeitenlaeufer.S02E03.GERMAN.DL.1080P.WEB.H264` is German +
+// English dual audio, and an `en,es,pt` whitelist discarded it -- `DL` was not
+// recognised at all and `GERMAN` was the only language found.
+const MULTI_AUDIO_PATTERNS = [
+  { re: /\bmulti\b/i,                   lang: 'multi' },
+  { re: /\bmulti[\s.-]?audio\b/i,       lang: 'multi' },
+  { re: /\bmulti[\s.-]?lang(?:uage)?\b/i, lang: 'multi' },
+  { re: /\bdual[\s.-]?audio\b/i,        lang: 'multi' },
+  { re: /\bdual\b/i,                    lang: 'multi' },
+  { re: /\bdl\b/i,                      lang: 'multi' },
+];
+
+// The one source tag that collides with a marker above: `WEB-DL` contains `DL`.
+// Matching a bare `\bdl\b` without removing it first would read every WEB-DL
+// release as dual-audio, including genuinely single-language ones -- a worse
+// failure than the one the marker fixes, because the viewer gets a stream in the
+// wrong language and nothing on screen says so. Only the colliding family is
+// stripped: a broader list would start eating words that are real signals.
+const SOURCE_TAG_NOISE = /\bweb[\s.-]?dl\b/gi;
+
 export function parseTitle(title) {
   if (!title) return {};
 
@@ -68,12 +92,21 @@ export function parseTitle(title) {
     if (re.test(title)) { source = s; break; }
   }
 
+  // Language detection runs on the title with the colliding source tag removed,
+  // so `WEB-DL` cannot be read as dual-audio.
+  const langTitle = title.replace(SOURCE_TAG_NOISE, ' ');
+
   const languages = [];
   for (const { re, lang } of LANGUAGE_PATTERNS) {
-    if (re.test(title)) languages.push(lang);
+    if (re.test(langTitle)) languages.push(lang);
   }
-  // Default to English if no language detected
-  if (!languages.length && !/\b(dubbed|multi)\b/i.test(title)) {
+  for (const { re, lang } of MULTI_AUDIO_PATTERNS) {
+    if (re.test(langTitle) && !languages.includes(lang)) languages.push(lang);
+  }
+  // Default to English when nothing was recognised. `dubbed` needs no special
+  // case: it is in LANGUAGE_PATTERNS, so a title carrying it never arrives here
+  // with an empty list.
+  if (!languages.length) {
     languages.push('en');
   }
 

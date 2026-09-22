@@ -171,11 +171,32 @@ NATIVE_MEM_KB="${MUTATE_NATIVE_ADDRESS_SPACE_KB:-262144}"
 # A hardcoded list rather than a live grep: cheap, and a new docker-shelling
 # bats file added later fails loudly (docker exits 2 under the cap) instead
 # of silently, which is a safer default than silently exempting it.
+#
+# `node` is the second tool with this problem, for the same reason and by the
+# same measurement. V8 reserves its address space up front -- the
+# pointer-compression cage and the JIT's code range -- before it runs a single
+# line of the module under test, so a node-driving bats file cannot start under
+# any cap that also bounds a runaway allocator. Observed in CI 2026-09-23, on
+# the first corpus entry that names a node-driven test:
+#
+#     # Fatal process out of memory: Failed to reserve virtual memory for CodeRange
+#     #  1: v8::base::FatalOOM(...)  5: v8::internal::Heap::SetUp(...)
+#     #  6: v8::internal::Isolate::Init(...)  8: v8::Isolate::Initialize(...)
+#
+# The node-driving files below are exempt for that reason and no other, and the
+# exemption is narrow in a way worth stating: the wall-clock bound still applies
+# to them, and run-generated.sh's systematic sweep is a shell-and-Python sweep,
+# so nothing perturbs these modules on its own. Their corpus entries are all
+# constant returns -- inert where it matters -- rather than anything that can
+# loop and allocate. A node file added later that *is* swept would need this
+# revisited rather than copied.
 NATIVE_MEM_EXEMPT=(
     "tests/python-suite.bats"
     "tests/shellcheck.bats"
     "tests/coverage-tool.bats"
     "tests/mutation-framework.bats"
+    "tests/magnetio-language-filter.bats"
+    "tests/magnetio-scrape-budget.bats"
 )
 
 # What bounds an oracle run, resolved once at source time.

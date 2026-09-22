@@ -659,6 +659,74 @@ Two things this does **not** change:
   That is the desktop app's local server on `127.0.0.1:11470`; without it Stremio loses
   torrent streaming and subtitle hashing, but a direct playable URL still plays.
 
+## Magnetio: A Title Shows Far Fewer Streams Than It Should
+
+**Symptom:** a title that certainly has releases comes back with a handful of streams, or
+none at all, and nothing anywhere reports an error. The shape is that the streams you do get
+are the worst ones available. Every container is healthy and the addon's request log fills in
+as normal.
+
+**Cause:** two independent defaults, both of which discard results while looking like they
+work.
+
+The scraper ended a scrape early on a **result count**. Three seconds in, if three records
+had arrived, the scrape returned with whatever it had — and because the fan-out ran at a
+concurrency of 12 against ~22 providers, ten of them were still queued and had not been
+started at all. The providers that respond slowly are the detail-page scrapers, which is also
+where the well-seeded releases live; the fast one is ThePirateBay.
+
+The language whitelist then threw away dual-audio releases. `MULTI`, `DUAL` and the scene's
+`GERMAN.DL` all mean *more than one audio track*, so they carry audio the viewer can use —
+but `MULTI` was collected as a language **code**, which can never equal `en` or `pt`, and a
+bare `DL` was not recognised at all. A whitelist of concrete languages therefore excluded
+them by construction. (`WEB-DL` is the trap in the other direction: it contains the letters
+`DL`, so the source tag has to be stripped before the marker is looked for or every WEB-DL
+release claims a second audio track.)
+
+**Diagnose:** the two log lines that carry the whole story.
+
+```bash
+docker logs magnetio-scraper --since 30m | grep -E 'Early return|Scrape totals'
+docker logs magnetio-addon   --since 30m | grep 'Stream series/<imdb-id>'
+```
+
+`Early return: N results from X/Y providers` with X far below Y is the first defect — the
+scrape gave up while most sources were still pending. `records=N filtered=0` on the addon
+line is the second: the scrape returned something and the filter emptied it.
+
+**Measured 2026-09-22**, Dark Matter (2024) S02E03, `tt19231492:2:3`:
+
+```
+before   Early return: 10 results from 11/17 providers after 3000ms
+         Stream series/tt19231492:2:3: records=10 filtered=0 base=0 final=0
+after    Early return: 70 results from 17/18 providers after 15001ms
+         Stream series/tt19231492:2:3: records=53 filtered=24 base=24 final=10
+```
+
+Before, all ten records were ThePirateBay's 480p and tokenless XviD rips, none of which
+survives a `qualities=4k,1080p` whitelist — so the viewer saw nothing at all. After, the
+same query returns **24 releases at 1080p or better**, from LimeTorrents and TorrentDownloads,
+with 890 / 798 / 767 seeders at the top. Those two providers are exactly the ones that used
+to be starved and discarded.
+
+**Cost, so it is not a surprise later:** a cold scrape now waits ~15s instead of returning a
+wrong answer in 3s. Both caches absorb it — the scraper holds results for
+`CACHE_TTL_STREAMS=86400` and the addon for an hour — so it is paid once per episode per hour,
+not per play.
+
+**Two traps when verifying a change here, both hit while fixing this:**
+
+- **`--force-recreate` alone does not deploy.** Both magnetio services are built from source
+  (`build: context: ./magnetio/...`), so a recreate reuses the previous image and the old
+  behaviour is still there. It is `docker compose -f docker-compose.magnetio.yml up -d --build`.
+  Confirm what actually landed rather than trusting the deploy:
+  `docker exec magnetio-scraper grep -c coverage /app/lib/scrapeBudget.js`.
+- **Redis will serve you the pre-fix answer for an hour.** The scraper caches by
+  title-and-provider-list and the addon caches by title, so a re-query can hit the old result
+  and look like the fix did nothing. Delete this title's keys first
+  (`redis-cli --scan --pattern '*tt19231492*'`), and take the password from
+  `docker exec magnetio-scraper printenv REDIS_URI`.
+
 ## Memory: Unnecessary Swap With Plenty of Free RAM
 
 **Symptom:** `free -h` shows several GB of swap used even though there's plenty of available RAM. System feels slower than expected for the amount of RAM installed.

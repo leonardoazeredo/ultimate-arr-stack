@@ -26,6 +26,7 @@ import * as animetosho       from './animetosho.js';
 import * as nekobt           from './nekobt.js';
 import * as torznab          from './torznab.js';
 import { logger } from '../lib/logger.js';
+import { resolveScrapeBudget, shouldReturnEarly } from '../lib/scrapeBudget.js';
 
 const ALL_PROVIDERS = [
   yts,
@@ -52,16 +53,19 @@ const ALL_PROVIDERS = [
   torznab,
 ];
 
-const limit = pLimit(Math.max(1, parseInt(process.env.SCRAPER_CONCURRENCY ?? '12', 10) || 12));
-const PROVIDER_TIMEOUT_MS = parseInt(process.env.SCRAPER_PROVIDER_TIMEOUT_MS ?? '15000', 10);
-const HARD_TIMEOUT_MS     = parseInt(process.env.SCRAPER_HARD_TIMEOUT_MS     ?? String(PROVIDER_TIMEOUT_MS + 2000), 10);
-const EARLY_RETURN_MS     = parseInt(process.env.SCRAPER_EARLY_RETURN_MS     ?? '3000', 10);
-const MIN_EARLY_RESULTS   = parseInt(process.env.SCRAPER_MIN_EARLY_RESULTS   ?? '3', 10);
+// Sized by ALL_PROVIDERS.length rather than a fixed number. This limiter bounds
+// outbound concurrency across every scrape in flight, so it is deliberately
+// shared; but it also has to be at least as wide as one scrape can be, or the
+// tail of a provider list queues behind a slot it may never get before the hard
+// timeout. At 12 slots and 22 providers, ten waited -- measured, see
+// lib/scrapeBudget.js.
+const budget = resolveScrapeBudget(ALL_PROVIDERS.length);
+const limit = pLimit(budget.concurrency);
 
 /**
  * Scrape all (or a subset of) providers for a given content item.
- * Uses early-return: responds after EARLY_RETURN_MS if enough results
- * are collected, without waiting for slow providers.
+ * Uses early-return: responds once nearly every provider has answered and there
+ * is something to show, without waiting for the last slow one.
  *
  * @param {string}   type        'movie' | 'series' | 'anime'
  * @param {object}   meta        From cinemeta: { name, year, imdbId, season, episode }
@@ -77,12 +81,13 @@ export async function scrapeAll(type, meta, providerIds = null, context = {}) {
   const collected = [];
   let resolved = false;
   let completedCount = 0;
+  const startedAt = Date.now();
 
   return new Promise((resolve) => {
     const finalize = () => {
       if (resolved) return;
       resolved = true;
-      clearTimeout(earlyTimer);
+      clearInterval(earlyTimer);
       clearTimeout(hardTimer);
 
       logger.info(`Scrape totals: ${collected.length} raw, ${completedCount}/${providers.length} providers responded`);
@@ -94,21 +99,27 @@ export async function scrapeAll(type, meta, providerIds = null, context = {}) {
       resolve(matched);
     };
 
-    // Early return: after EARLY_RETURN_MS, return if we have enough results
-    const earlyTimer = setTimeout(() => {
-      if (!resolved && collected.length >= MIN_EARLY_RESULTS) {
-        logger.info(`Early return: ${collected.length} results from ${completedCount}/${providers.length} providers after ${EARLY_RETURN_MS}ms`);
+    // Early return: polled rather than fired once, so a scrape that is not yet
+    // covered at the first window can still end early on a later one instead of
+    // falling through to the hard timeout for no reason.
+    const earlyTimer = setInterval(() => {
+      if (resolved) return;
+      if (shouldReturnEarly(
+        { results: collected.length, completed: completedCount, total: providers.length },
+        budget,
+      )) {
+        logger.info(`Early return: ${collected.length} results from ${completedCount}/${providers.length} providers after ${Date.now() - startedAt}ms`);
         finalize();
       }
-    }, EARLY_RETURN_MS);
+    }, budget.earlyReturnMs);
 
-    // Hard deadline: cut off after HARD_TIMEOUT_MS even if providers are still pending
+    // Hard deadline: cut off after the hard timeout even if providers are still pending
     const hardTimer = setTimeout(() => {
       if (!resolved) {
-        logger.info(`Hard timeout: ${collected.length} results from ${completedCount}/${providers.length} providers after ${HARD_TIMEOUT_MS}ms`);
+        logger.info(`Hard timeout: ${collected.length} results from ${completedCount}/${providers.length} providers after ${budget.hardTimeoutMs}ms`);
         finalize();
       }
-    }, HARD_TIMEOUT_MS);
+    }, budget.hardTimeoutMs);
 
     // Launch all providers in parallel (concurrency-limited)
     const tasks = providers.map(p =>
@@ -118,7 +129,7 @@ export async function scrapeAll(type, meta, providerIds = null, context = {}) {
         try {
           const results = await withTimeout(
             p.scrape({ ...meta, ...context, type }),
-            PROVIDER_TIMEOUT_MS,
+            budget.providerTimeoutMs,
             `${p.name} timed out`
           );
           logger.info(`[${p.name}] ${results.length} results in ${Date.now() - start}ms`);
