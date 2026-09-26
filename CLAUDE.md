@@ -1,5 +1,92 @@
 # Claude Code Instructions
 
+## Commands
+
+Entry points, not `npm`. `npm` is a convenience wrapper, and the two hosts that
+most need to run the suite cannot: pi1 (the deploy host) has no npm, the NAS has
+none whatsoever. See *Tests* below for why each of these exists.
+
+| Task | Command |
+|---|---|
+| Whole bats suite (+ census of skips) | `./tests/run-tests.sh` |
+| One bats file | `./tests/run-tests.sh tests/compose-validation.bats` |
+| Python oracle, whole tree | `./tests/toolkit/pytest.sh` |
+| One Python test file | `./tests/toolkit/pytest.sh tests/python/test_usenet_blackhole.py` |
+| One Python test by name | `./tests/toolkit/pytest.sh -k <name>` |
+| Recorded-defect mutations (after touching a guard) | `./tests/mutation/run-mutations.sh [-k <id-substring>] [corpus.sh ...]` |
+| Generated mutation sweep (discovery, non-blocking) | `./tests/mutation/run-generated.sh [-k <path-substring>]` |
+| Coverage diagnostic | `./tests/toolkit/coverage.sh` |
+| e2e locally | `npm run test:e2e` (on the NAS: the containerised runner, see *Deploying*) |
+| Install the git hooks (once per clone **and** per worktree) | `./setup-hooks.sh` |
+| Sync the current branch to the NAS | `./scripts/sync-nas.sh` |
+
+Read the exit status carefully, because three of these deliberately break the
+usual convention:
+
+- `pytest.sh` and `coverage.sh` exit **77**, never 0, when docker is
+  unavailable. An absent oracle and a passing oracle must not look the same;
+  the caller decides whether 77 is a skip.
+- `run-generated.sh` always exits 0 — equivalent mutants can never be killed,
+  so it reports into `tests/mutation/survivors.tsv` instead of failing.
+- `run-tests.sh` prints an `executed=/skipped=/failed=` census and names the
+  skip reasons. A run that says "ok" hundreds of times while the 57 git-gated
+  tests skipped is not coverage; on a host without git, run it on pi1 too.
+
+## Layout that matters
+
+**Six compose files, one project name.** This is why `--remove-orphans` is
+banned (compose treats the other five files' containers as orphans) and why a
+service is only ever recreated through the file that defines it:
+
+| File | Services |
+|---|---|
+| `docker-compose.arr-stack.yml` | `gluetun` `sabnzbd` `sonarr` `prowlarr` `radarr` `jellyfin` `seerr` `bazarr` `decypharr` `flaresolverr` `vpn-socks5` `stremio-jellyfin` — also defines the `vpn-net`, `arr-core` and `magnetio-net` networks |
+| `docker-compose.traefik.yml` | `traefik` — plus the `traefik-lan` macvlan, which traefik loses if recreated from anywhere else, killing every `.lan` URL |
+| `docker-compose.utilities.yml` | `docker-socket-proxy` `deunhealth` `gluetun-recover` `gluetun-rotator` `uptime-kuma` `homepage` `duc` `usenet-status` `beszel` `beszel-agent` `diun` `configarr` |
+| `docker-compose.magnetio.yml` | `magnetio-scraper` `magnetio-addon` `magnetio-redis` |
+| `docker-compose.tailscale.yml` | `tailscale` |
+| `docker-compose.cloudflared.yml` | `cloudflared` |
+
+**A timer-driven job is a triple, not a script.** Since 2026-09-01 the logic
+lives in a real Python module, not a heredoc:
+
+- `scripts/<job>.sh` — the shell entry point, with its `.service`/`.timer`
+  units beside it in `scripts/`. Two of the live jobs predate the convention
+  and keep their own names: `stremio_library`'s entry point is
+  `scripts/stremio-library-sync.sh`, and `usenet_status`'s is
+  `scripts/usenet-blackhole-status.sh`, whose units are
+  `usenet-status-render.service`/`.timer`. Don't create a dash-ified
+  `scripts/<job>.sh` for either — the logic would end up split across two
+  entry points.
+- `scripts/lib/<job>.py` — the logic. Live ones: `usenet_blackhole`,
+  `queue_cleanup`, `backlog_search`, `indexer_guard`, `stremio_library`,
+  `usenet_status`, `fix_radarr_paths`, `fix_sonarr_folders`.
+- `tests/python/test_<job>.py` — run by `tests/python-suite.bats`, which also
+  fails if any module in `scripts/lib/` has no test file, so a new one cannot
+  arrive untested.
+
+Some operational scripts are still shell-only and covered by bats instead
+(e.g. `scripts/usenet-drain-walk.sh` ↔ `tests/usenet-drain-walk.bats`).
+
+**`scripts/lib/*.sh` is a different thing entirely** — the checks the
+pre-commit hook sources (`check-secrets.sh`, `check-image-versions.sh`,
+`check-env-vars.sh`, `check-doc-links.sh`, `check-yaml-syntax.sh`, …) plus
+`common.sh`. Each has its own `tests/lib-*.bats`.
+
+**Where the authoritative prose lives** — this file is the operating rules, not
+the reference:
+
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — request-to-watch flow, VPN
+  containment, network layout, access levels.
+- [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) — every diagnosed incident,
+  with its probe and recovery.
+- [docs/TORBOX-API.md](docs/TORBOX-API.md) — read before touching any TorBox call.
+- [docs/MAINTENANCE.md](docs/MAINTENANCE.md), [docs/UPGRADING.md](docs/UPGRADING.md) — routine operations and version bumps.
+- [docs/BACKUP.md](docs/BACKUP.md), [docs/RESTORE.md](docs/RESTORE.md) — GFS retention, CI secrets, restore drills.
+- [docs/TEST-HARDENING-LOG.md](docs/TEST-HARDENING-LOG.md), [tests/mutation/README.md](tests/mutation/README.md) — which guards turned out unable to fail, and why.
+- [docs/QUALITY-CONTROL-MAP.md](docs/QUALITY-CONTROL-MAP.md) — what each layer of checking actually covers.
+- [CONTRIBUTING.md](CONTRIBUTING.md) — release flow, hook install, config-template pattern.
+
 ## TorBox Account — the plan is Pro, stop re-deriving it
 
 **Confirmed by the account owner, 2026-09-13: the TorBox subscription is Pro, the
@@ -92,6 +179,8 @@ the whole thing (once upstream ships the fix in a release).
 ## NAS Access
 
 SSH credentials are in `.claude/config.local.md`. Read it before running any NAS commands.
+That file is **untracked** — only `.claude/config.local.md.example` is in the repo, so on a
+fresh checkout it has to be created from the example before any NAS command will work.
 
 ## DNS lives on the router — the NAS is not in that path
 
@@ -147,7 +236,9 @@ and the plan itself at
 
 Docker media stack for Ugreen NAS. Edit NAS files (like `pihole/dnsmasq.d/02-local-dns.conf`) **on the NAS**, not locally.
 
-- **Local dev repo**: `/Users/adamknowles/dev/ultimate-arr-stack/`
+- **Primary host**: **pi1** — always-on, and the machine deployments run from.
+  A Mac checkout (`/Users/leo/Lab/arr-stack`) is a cold spare; both are the same
+  repo, so nothing here is host-specific except which one is reliably awake.
 - **NAS deploy path**: `/volume1/docker/arr-stack/`
 
 ## Tailscale ProtonVPN Exit Node
@@ -174,13 +265,20 @@ this repo, and the open items. Two things there are expensive to rediscover:
 - **Never judge a ProtonVPN path with `ping`.** Proton rate-limits ICMP; a 60%
   "packet loss" reading coexisted with 98 Mbps of real throughput.
 
-## Cross-Stack: Therapy Stack
+## Cross-Stack: Therapy Stack — does not exist here
 
-**Unverified / likely stale on this NAS as of 2026-08-15.** This section describes a `therapy-stack`/Baserow coupling that was checked directly on the live NAS before the arr-core network rename (Phase 2 of the segmentation plan) and found not to exist: no `baserow` container, no `172.20.0.20` binding on the network, no `/volume1/docker/therapy-stack/` directory, and no `traefik/dynamic/therapy.local.yml` file. This may describe a different deployment (the local dev repo path below is also for a different user/machine) rather than this one. Re-verify on the live NAS before relying on any of the following if this setup ever does need to interoperate with a therapy-stack deployment:
+Checked directly on the live NAS 2026-08-15 and **not found**: no `baserow`
+container, no `172.20.0.20` binding, no `/volume1/docker/therapy-stack/`, no
+`traefik/dynamic/therapy.local.yml`. The docs it came from describe some other
+deployment. If a therapy-stack ever does need to interoperate, re-verify on the
+live NAS first rather than trusting anything written about it.
 
-A separate `therapy-stack` would run at `/volume1/docker/therapy-stack/` on its own network (`therapy-net`, 172.21.0.0/24), with Baserow on the `arr-core` network (formerly `arr-stack`) at static IP 172.20.0.20 so Traefik can route to it. Files that would reference it: `pihole/dnsmasq.d/02-local-dns.conf`, `traefik/dynamic/therapy.local.yml`. If it does exist, Baserow's static IP matters for the same reason every other static IP in `docker-compose.arr-stack.yml` is pinned: the `ip_range: 172.20.0.128/25` confines Docker's dynamic allocation to `.128`-`.255`, so a manually-added container needs an explicit IP outside that range or it risks colliding with a dynamically-assigned one (e.g. Gluetun's `.3`) on restart.
-
-Therapy-stack local repo (unverified, different user's machine): `/Users/adamknowles/dev/n8n Therapybot/Git repo/`
+One durable fact from that section, which applies to *any* manually-added
+container on `arr-core`: `ip_range: 172.20.0.128/25` confines Docker's dynamic
+pool to `.128`-`.255`, so such a container needs an explicit static IP **outside**
+that range or it can collide with a dynamically-assigned one (e.g. Gluetun's
+`.3`) on restart. That is why every static IP in
+`docker-compose.arr-stack.yml` is pinned.
 
 ## Deploying to the NAS
 
