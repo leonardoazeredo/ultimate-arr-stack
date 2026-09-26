@@ -3,17 +3,23 @@
 
 Why this exists
 ---------------
-SABnzbd here points at `nntp.torbox.app`. Measured 2026-09-14, that server
-serves articles only up to roughly 90 days old: releases aged 1, 34, 60 and 86
-days resolved 5/5 or 6/6 every time, while 101 and 138 days resolved 0/5 and
-0/6. The group always exists; the articles are gone. That is why SABnzbd
-imported 1 of 92 Sonarr usenet grabs while torrents imported 109 of 202.
+SABnzbd here points at `nntp.torbox.app`, and it failed most backlog grabs on
+missing articles: it imported 1 of 92 Sonarr usenet grabs while torrents
+imported 109 of 202. That was first blamed on a ~90-day retention limit, from
+eight releases measured 2026-09-14 (1/34/60/86 days resolved, 101/138 days
+answered 430) -- correct for those eight, wrongly generalised.
 
-TorBox's *API* has no such limit, because it runs a usenet client against a real
-backbone rather than serving from that cache: the exact 138-day-old NZB SABnzbd
-cannot fetch was submitted to `createusenetdownload` and completed at 836 MB
-across 4 files. So the fix is to stop asking a cache to be a backbone and submit
-NZBs to TorBox instead.
+Re-measured 2026-09-26 over 209 NZBs, from inside the sabnzbd container with its
+own credentials: there is no age cutoff. Releases with every probed segment
+present, by posting age: under 90 days 5/5, 90-364 days 8/21, 365-999 days
+32/110, 1000+ days 18/73; a 1303-day-old release is fully present. What exists
+is per-release article loss that grows with age.
+
+TorBox's API is not immune to that loss either -- 898 of 986 blackhole failures
+since 2026-09-14 are its "aborted, cannot be completed" -- but it did complete
+the exact 138-day-old NZB SABnzbd could not fetch (836 MB across 4 files).
+Whether it completes materially more than the news server is an open question,
+A1 in docs/TORBOX-AUDIT-2026-09-26.md. This client submits NZBs to TorBox's API.
 
 How it works
 ------------

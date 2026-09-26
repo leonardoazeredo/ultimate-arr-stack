@@ -11,6 +11,19 @@ All notable changes to this project will be documented in this file.
 > this fork's own `1.7.x` line, in the `1.7.25`-`1.7.99` band upstream skipped
 > when it jumped straight from `1.7.24` to `1.8.0`.
 
+## [Unreleased]
+
+### Fixed
+- **The "90-day NNTP limit" below was wrong** (2026-09-26): re-measured over
+  209 NZBs from inside the sabnzbd container, `nntp.torbox.app` has no age
+  cutoff — releases with every probed segment present were 5/5 under 90 days,
+  8/21 at 90-364, 32/110 at 365-999 and 18/73 past 1000, and a 1303-day-old
+  release is fully present. The problem is per-release article loss that grows
+  with age, and TorBox's API hits it too (898 of 986 blackhole failures since
+  2026-09-14 are its "aborted, cannot be completed"). The 2026-09-14 entry is
+  left as written; its eight-release measurement was right, its generalisation
+  was not. Code comments corrected to match.
+
 ## [1.7.34] - 2026-09-14
 
 ### Removed
