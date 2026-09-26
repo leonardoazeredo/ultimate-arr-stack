@@ -61,9 +61,10 @@ itself needs no service and no credential of its own. Between the two folders si
 it submits each NZB to TorBox, waits for the download, fetches it, unpacks the RAR volumes a scene
 release is usually posted as, and moves the result into the watch folder.
 
-> **Why a blackhole and not SABnzbd?** SABnzbd's TorBox server (`nntp.torbox.app`) serves articles
-> only up to about 90 days old, and most of what an indexer returns is older: 81 of 85 Sonarr
-> usenet grabs failed on it while the identical releases completed through TorBox's API. The
+> **Why a blackhole and not SABnzbd?** 81 of 85 Sonarr usenet grabs failed on SABnzbd's TorBox
+> server (`nntp.torbox.app`), and releases it could not fetch completed through TorBox's API. It
+> was blamed on a ~90-day retention limit; re-measured 2026-09-26 there is no such limit, only
+> per-release article loss that grows with age, so the comparison is still open. The
 > measurements are in [Usenet: SABnzbd Fails Every
 > Article](TROUBLESHOOTING.md#usenet-sabnzbd-fails-every-article-torboxs-own-downloader-succeeds).
 

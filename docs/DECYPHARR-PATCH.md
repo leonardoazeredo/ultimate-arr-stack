@@ -4,7 +4,7 @@ This stack runs a locally built Decypharr image rather than the upstream one.
 This is the reference for that build — why it exists, how the pipeline works,
 what to do when upstream cuts a new release, and how to confirm it's actually
 live. For the symptom this patch fixes and how to recover a queue already
-wedged by it, see the "TorBox: Every Download Link Returns 403" section of
+wedged by it, see the "TorBox: All Download Links Return 403 (error code 1010)" section of
 [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — that section is scoped to the
 incident; this one is scoped to the build.
 
@@ -14,7 +14,10 @@ Decypharr v2.5's `ErrorCodeToLinkError` (`pkg/manager/link/errors.go`) maps
 any unrecognised provider error code to a **permanent** failure. TorBox
 answers a link-validation request with a bare HTTP `400` when a presigned
 link has expired or rotated — not a malformed request, just a link that needs
-re-fetching. Because `400` isn't one of the codes `ErrorCodeToLinkError`
+re-fetching. That reading is this stack's observation, not TorBox's: the API
+documents `400` only as "the user did something wrong, or an input wasn't
+correct" and says nothing about expired links (`docs/TORBOX-API.md`).
+Because `400` isn't one of the codes `ErrorCodeToLinkError`
 recognises, it fell to the default branch and got classified permanent, with
 two consequences measured directly against the v2.5 source:
 
@@ -105,5 +108,5 @@ into a tagged release:
    than assuming the release notes cover it.
 
 `apply-patch.py` itself will refuse to run against an already-patched tree
-(it checks for `case "400":` and `ErrorCodeToLinkError` already present), so
+(it checks for `case "400":` and `ErrLinkRejected` already present), so
 there's no risk of silently double-applying the fix if step 1 is missed.

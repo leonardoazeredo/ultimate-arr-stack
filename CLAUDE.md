@@ -96,21 +96,32 @@ field, do not treat a non-empty `cooldown_until` as a plan limit, and do not ask
 the owner to confirm their plan again — it has been stated, and it was wrongly
 doubted once already in a way the owner had to correct.
 
-The payload from `GET /v1/api/user/me?settings=false` is *not* a plan
-description. `plan` is an integer, `total_downloaded` is a counter, and
-`cooldown_until` is a rolling rate-limit timestamp — none of them say "Pro".
-Reading them as if they did produced two wrong conclusions in one evening
-("maybe your plan has no usenet", "maybe you are rate-limited by your plan").
+Read `GET /v1/api/user/me?settings=false` by TorBox's documented meanings,
+not by guessing at the numbers. `plan` is an enum and its order is not the
+price order: `0` Free, `1` Essential, **`2` Pro**, `3` Standard. So `plan: 2`
+confirms Pro directly. `cooldown_until` is the Free plan's add-download cooldown
+(`COOLDOWN_LIMIT`), not a rate-limit window, so a value there says nothing about
+Pro. `total_downloaded` is a counter. Guessing at these fields produced two wrong
+conclusions in one evening ("maybe your plan has no usenet", "maybe you are
+rate-limited by your plan"). See `docs/TORBOX-API.md`.
 
-**What a TorBox refusal actually looks like:** a burst of `createtorrent` calls
-plus repeated `requestdl` calls earns an account-wide `403` with
-`error code: 1010` on `/v1/api/torrents/requestdl`. Measured 2026-09-13: it began
-at 01:20 BST after ~100 torrents were queued in an hour, refused *every* request
-for about 90 minutes — new and week-old items, GET and HEAD, both redirect
-modes, video file and .nfo alike — then cleared on its own with no change on our
-side. Already-issued links keep serving throughout (TorBox links live 3 hours),
-so transfers in flight continue while new ones are refused. It is transient, it
-never appears on the dashboard, and it is not a plan restriction.
+**What the 2026-09-13 refusal looked like (cause unproven):** every `requestdl`
+call, `/v1/api/torrents/requestdl` included, answered `403` with a plain-text
+body `error code: 1010`. It began at 01:20 BST, about an hour after ~100 torrents
+were queued. It refused *every* request for about 90 minutes: new and week-old
+items, GET and HEAD, both redirect modes, video file and .nfo alike. Then it
+cleared on its own with no change on our side. Links already issued kept
+serving, so transfers in flight continued while new ones were refused. It never
+appeared on the dashboard, and it is not a plan restriction.
+
+**It was probably not TorBox's API at all.** TorBox documents its rate limits as
+"per API token, no edge rate limiting". Its own 403s are JSON (`NO_AUTH`,
+`BAD_TOKEN`), and its error enum has no `1010`. A bare `error code: 1010` is
+Cloudflare's banned-browser-signature page, and this repo already diagnosed it
+that way for Cinemeta. So the variable may be the caller's client signature
+(Decypharr's Go client, curl's default User-Agent) rather than queue size. Next
+time, capture the response headers and retry once with a browser User-Agent
+before concluding anything. See `docs/TORBOX-AUDIT-2026-09-26.md` (A4).
 
 **"Cleared on its own" describes the refusals, not the queue.** The same absent
 change is why nothing recovered by itself: the items it wedged stayed at 0%
@@ -122,7 +133,7 @@ sit in the same document contradicting each other.
 The sting is downstream: Decypharr maps an unrecognised code to a **permanent**
 error, so it never retries; the arr keeps the item at 0% and, through the cutoff
 rule, refuses every alternative release for that title until `queue-cleanup`
-clears it. See *TorBox: Every Download Link Returns 403* in
+clears it. See *TorBox: All Download Links Return 403 (error code 1010)* in
 `docs/TROUBLESHOOTING.md` for the probe and the recovery.
 
 **Practical rule:** queue in ones and twos, not hundreds. `queue-cleanup.timer`
@@ -140,9 +151,11 @@ picture.
 ### Usenet: the arrs talk to TorBox directly, not through SABnzbd
 
 As of 2026-09-14, Sonarr/Radarr's usenet path is TorBox's API via each arr's
-native `UsenetBlackhole` client, not SABnzbd. SABnzbd's NNTP server only
-serves articles up to ~90 days old (measured: 101-day-old release 0/5,
-138-day 0/6); TorBox's API has no such limit. `scripts/usenet-blackhole.sh`
+native `UsenetBlackhole` client, not SABnzbd. The move was made because
+SABnzbd's NNTP server (`nntp.torbox.app`) looked like it stopped at ~90 days.
+Re-measured 2026-09-26 it has no age cutoff — a 1303-day-old release is fully
+present — but many older releases are missing articles, on the API path too.
+Whether the API completes materially more is open (audit A1). `scripts/usenet-blackhole.sh`
 (a 2-minute timer) submits each grabbed NZB to
 `POST /v1/api/usenet/createusenetdownload`, polls `mylist`, downloads the
 finished file via `requestdl`, and drops it in the arr's watch folder.

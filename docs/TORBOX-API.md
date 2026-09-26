@@ -6,47 +6,344 @@ finished file back over HTTPS. Nothing here joins a swarm or opens a usenet
 connection, so the provider's API is the load-bearing dependency, and getting a
 detail wrong shows up as a stalled queue rather than as an error.
 
-This is the reference for that dependency: where the authoritative docs live,
-what the API offers, what this repo actually calls, and what it is leaving on
-the table.
+This page has two kinds of statement, and keeps them apart:
 
-> **This file described the API as published on 2026-09-14.** The upstream
-> collection is the source of truth, not this page. Re-fetch before trusting a
-> detail that matters:
+- **Documented** — what TorBox itself publishes, each with its source. This is
+  the source of truth. Where the repo and TorBox's docs disagree, the docs win
+  until a measurement says otherwise.
+- **Measured** — what this stack has observed and TorBox does not document. Each
+  is dated. A measured fact is only as good as the method behind it; two of them
+  turned out wrong once re-read against the docs (see
+  [TORBOX-AUDIT-2026-09-26.md](TORBOX-AUDIT-2026-09-26.md)).
+
+> **Documented facts were re-read in full on 2026-09-26** from the API reference
+> and all seven help-center collections. Re-fetch before trusting a detail that
+> matters:
 
 ```bash
-curl -s "https://api-docs.torbox.app/api/collections/29572726/2s9YXo1zX4?environment=29572726-1b0d18ed-d45c-43f1-ad3f-253c7d41f915&segregateAuth=true&versionTag=latest" \
+curl -s "https://documenter.gw.postman.com/api/collections/29572726/2s9YXo1zX4" \
   > /tmp/torbox-collection.json
 ```
 
 That is the Postman collection behind <https://api-docs.torbox.app/>, which is a
-rendered view of it rather than a document with its own URLs. Fetching
-`openapi.json`, `swagger.json` and friends off that host returns 404; the
-collection endpoint above is the only machine-readable form.
+rendered view of it rather than a document with its own URLs. `openapi.json`,
+`swagger.json` and friends return 404 on that host; TorBox also serves a thinner
+FastAPI view at <http://api.torbox.app/docs>. The help center is
+<https://support.torbox.app/>; the collections that matter here are
+[Downloads](https://support.torbox.app/en/collections/10369529-downloads),
+[Usenet](https://support.torbox.app/en/collections/10369623-usenet),
+[Torrents](https://support.torbox.app/en/collections/10367765-torrents),
+[Web Downloads](https://support.torbox.app/en/collections/10369622-web-downloads),
+[Integrations](https://support.torbox.app/en/collections/10369620-integrations)
+and [Technical](https://support.torbox.app/en/collections/18398135-technical).
+
+---
+
+# Part 1 — What TorBox documents
+
+Sources are abbreviated: **API** is the Postman collection above; a help-center
+article is linked by title.
+
+## Base, versioning, response contract
+
+Base `https://api.torbox.app`, version `v1`, every path under `/v1/api/`. Every
+response carries the same envelope (API):
+
+```json
+{ "success": true, "error": null, "detail": "human-readable", "data": {} }
+```
+
+> "Status code `200` always means a success. `403` means authentication error.
+> `500` means something went wrong on TorBox's end. `400` means the user did
+> something wrong, or an input wasn't correct, or expected." — API
+
+`error` is a code from a fixed enum (below). "If the code ends in 'ERROR', the
+error is the server's fault else that error is something that the client
+caused." Dates are UTC, `%Y-%m-%dT%H:%M:%SZ`.
+
+**A response that is not this envelope did not come from TorBox's application.**
+A plain-text body such as `error code: 1010` is the CDN in front of it, not the
+API — see *Measured: the 403 / 1010 refusal* below.
 
 ## Authorization
 
-Two mechanisms, and which one applies depends on the endpoint.
-
 | Mechanism | Used by |
 |---|---|
-| `Authorization: Bearer <key>` header | everything except `requestdl` |
-| `?token=<key>` **query parameter** | `requestdl`, both protocols |
+| `Authorization: Bearer <key>` header | everything except the three below |
+| `?token=<key>` **query parameter** | `requestdl` (torrents, usenet, webdl) and `notifications/rss` |
+| none | `/`, `stats`, `changelogs/*`, `speedtest`, `usenet/provider/connection`, `torrents/torrentinfo`, `torrents/magnettofile`, `user/auth/device/*` |
 
-`requestdl` needs the query parameter and does not accept the header alone. It
-answers `422` with `{"detail":[{"type":"missing","loc":["query","token"]}]}`,
-which is how a watcher that looked correct fetched nothing at all — see
-`docs/TROUBLESHOOTING.md`.
+Measured (2026-09-14): `requestdl` answers `422`
+`{"detail":[{"type":"missing","loc":["query","token"]}]}` when given the header
+alone. The link it returns carries the account token in its own query string
+(`https://tb-cdn.xx/dld/<uuid>?token=<uuid>`), so passing it as a command-line
+argument puts the key in `/proc/<pid>/cmdline` for every user on the box;
+`scripts/lib/usenet_blackhole.py` downloads through a curl config on stdin
+instead. The same rule applies to any new call site.
 
-The link it returns carries the account token in its own query string. Passing
-that URL as a command-line argument puts the key in `/proc/<pid>/cmdline` for
-every user on the box; `scripts/lib/usenet_blackhole.py` downloads through a
-curl config on stdin instead. The same rule applies to any new call site.
+## Rate limits
+
+> "Unless stated below, all endpoints are rate limited to 300/min per API token,
+> no edge rate limiting." — API
+
+| Endpoint | Limit |
+|---|---|
+| everything | 300/min per API token |
+| `POST /usenet/createusenetdownload` | 60/hour per API token |
+| `POST /webdl/createwebdownload` | 60/hour per API token |
+| `POST /torrents/createtorrent` | 60/hour for **uncached** items, and every call also counts against the 300/min |
+
+"Synchronized across all our servers", per key, "subject to change"
+([API Rate Limits](https://support.torbox.app/en/articles/13726368-api-rate-limits)).
+TorBox no longer accepts IP-whitelisting requests "due to rate limiting being
+API token based, rather than IP based" (API).
+
+**Not documented:** the status code or body of a rate-limit refusal, and any
+`Retry-After`. What this stack sees is under *Measured*.
+
+A separate, per-link limit applies to CDN downloads: using the same link from
+more than one app or device at once can earn `429 Too Many Requests`; TorBox
+recommends "Max connections: 4 or less" per link
+([Why Are My Download Links Not Working?](https://support.torbox.app/en/articles/15315517-why-are-my-download-links-not-working)).
+
+## Plans and active slots
+
+`GET /user/me` returns `plan` as an integer. The mapping is documented (API) and
+is not ordered by price:
+
+| `plan` | Plan |
+|---|---|
+| `0` | Free |
+| `1` | Essential ($3) |
+| `2` | **Pro ($10)** — this account |
+| `3` | Standard ($5) |
+
+Pro-gated endpoints refuse with `PLAN_RESTRICTED_FEATURE` and say "Pro (plan: 2)"
+in their own text, so `plan == 2` is a direct check, not an inference.
+
+`cooldown_until` is the timestamp in a `COOLDOWN_LIMIT` refusal ("User is on
+download cooldown. It is recommended user upgrade their account"), the Free
+plan's one-download-per-24h rule. It is not a rate-limit window, and it has no
+meaning on Pro.
+
+Per [Account Restrictions](https://support.torbox.app/en/articles/9836418-account-restrictions):
+
+| Plan | Active slots | Max per download |
+|---|---|---|
+| Free | 1 | 10 GiB |
+| Essential | 3 | 200 GiB |
+| Standard | 5 | 200 GiB |
+| **Pro** | **10** — "10 active torrents, which allows you a total of 10 concurrent downloads" | 500 GiB per the API's `DOWNLOAD_TOO_LARGE` table (the article says 1 TB) |
+
+"Cached items, which are already stored on TorBox servers, do not count toward
+your active slot limit." **The docs do not say whether usenet and web downloads
+draw from the same ten as torrents.** The wording ("a total of 10 concurrent
+downloads", "the maximum slot limit available") leans that way. It is
+measurable: an `ACTIVE_LIMIT` refusal carries
+`data: {"active_limit", "current_active_downloads"}`, and comparing that count
+with the usenet jobs in flight at the same moment settles it. Until then, treat
+the budget as shared — this stack runs Decypharr at 5 and the usenet watcher at
+6, which is 11.
+
+Queued downloads have their own ceiling: "maximum queued downloads limit of
+1000" (`DIFF_ISSUE`, API). The queue is processed "every 3 hours"
+([Why Do Queued Downloads Not Start?](https://support.torbox.app/en/articles/10293822-why-do-queued-downloads-not-start)).
+
+## Downloading a finished item: `requestdl`
+
+Same model for torrents, usenet and webdl; only the id parameter differs
+(`torrent_id` / `usenet_id` / `web_id`).
+
+| Parameter | Meaning |
+|---|---|
+| `token` | API key (query parameter, required) |
+| `*_id` | the item |
+| `file_id` | one file of the item |
+| `zip_link` | the whole item as a zip; "Required if no file_id. Takes precedence over file_id if both given" (SDK docstring) |
+| `user_ip` | pick the CDN closest to that IP |
+| `redirect` | answer `307` to the CDN URL instead of returning it — the permalink form |
+| `append_name` | present in every URL template, described nowhere |
+
+**Link lifetime.** "This endpoint opens the link for 3 hours for downloads. Once
+a download is started, the user has nearly unlimited time to download the file."
+(API; the same paragraph also says "1 hour", an inconsistency in TorBox's text.)
+The help center states 3 hours without qualification. A link is for *starting*
+a transfer; do not store one. The durable form is the permalink:
+
+```
+https://api.torbox.app/v1/api/usenet/requestdl?token=KEY&usenet_id=N&file_id=N&redirect=true
+```
+
+**Zip versus per-file — the difference is large**
+([Why Are Zip Files Slow…](https://support.torbox.app/en/articles/15030073-why-are-zip-files-slow-downloading-to-my-computer),
+[How To Debug Slow Download Speeds](https://support.torbox.app/en/articles/16168587-how-to-debug-slow-download-speeds)):
+
+| | Per-file link | Zip link |
+|---|---|---|
+| Connections | "up to 16 connections per file" | one; "zips cannot be multi-connection" |
+| Served from | the CDN (`*.tb-cdn.*`) | "only … the main storage servers in WNAM and WEUR" |
+| Built | already exists | "generated on the fly", "require a lot of compute", deprioritised under load |
+| Interrupted | resumable (HTTP range) | "forces a restart from the beginning" |
+
+For usenet the per-file route is also the one that uses TorBox's own
+post-processing: with the default `post_processing=-1` the item's `files[]` is
+already the repaired, extracted payload.
+
+## Listing items: `mylist`
+
+`GET /{torrents,usenet,webdl}/mylist` with `bypass_cache`, `id` (returns one
+object instead of a list), `offset` (default 0), `limit` (default 1000).
+
+| Type | Freshness (API) |
+|---|---|
+| usenet, webdl | "updated on its own every 5 seconds for live … downloads" |
+| **torrents** | "only gets updated every **600 seconds**" unless the cache is bypassed |
+
+A poll of torrent state that does not send `bypass_cache=true` can go ten
+minutes without seeing a change.
+
+An empty list is `ITEM_NOT_FOUND` **with `"success": true`** — a documented
+quirk; do not read `success` alone.
+
+Record fields (usenet): `id`, `hash`, `name`, `size`, `download_state`,
+`progress`, `download_speed`, `eta`, `active`, `cached`, `cached_at`,
+`download_present`, `download_finished`, `expires_at`, `server`,
+`files[]` (`id`, `name`, `short_name`, `absolute_path`, `size`, `mimetype`,
+`md5`, `infected`, `zipped`, …), `tags`, `alternative_hashes`, `airlocked`.
+Torrents add `seeds`, `peers`, `ratio`, `availability`, `tracker`, … ; webdl adds
+`error`.
+
+### States
+
+Torrent `download_state` is documented (API): `downloading`, `uploading`,
+`stalled (no seeds)`, `paused`, `completed`, `cached`, `metaDL`,
+`checkingResumeData`, and "all other statuses are basic qBittorrent states". Of
+`completed`: **"Do not use this for download completion status."** Completion is
+`download_finished` (with `download_present` for "the files are on TorBox").
+
+Usenet `download_state` has **no documented enum**. Measured values are listed
+under *Measured*. The same two booleans exist on usenet records and are the
+documented completion signal.
+
+The dashboard's status vocabulary
+([Download Statuses](https://support.torbox.app/en/articles/9928977-download-statuses)):
+Downloading; Stalled (No seeds); Uploading; MetaDL; **Failed** — "server error,
+a missing encryption key, missing par2 files, or anything else"; **Failed
+(Processing)** — failed TorBox's mandatory post-download step, "delete and
+re-add"; **Expired**; **(Reported) Missing**; **Incomplete** — a torrent with no
+progress for 2 days.
+
+## Creating a usenet download
+
+`POST /usenet/createusenetdownload`, multipart (API):
+
+| Field | Meaning |
+|---|---|
+| `file` / `link` | the NZB, or a URL to one ("Cannot be a redirection"); exactly one |
+| `name` | display name |
+| `password` | "used for extracting the RAR at the end" |
+| `post_processing` | see below |
+| `as_queued` | put it straight into the queue |
+| `add_only_if_cached` | refuse with `DOWNLOAD_NOT_CACHED` unless cached |
+
+Returns `data: {hash, usenetdownload_id, auth_id}`. NZB files over 100 MB are
+refused (`TOO_MUCH_DATA`); not an NZB is `BOZO_NZB`.
+
+| `post_processing` | Behaviour (API) |
+|---|---|
+| `-1` | **Default.** "runs repairs, and extractions as well as deletes the source files leaving only the wanted downloaded files" |
+| `0` | none — every file, PAR2 included |
+| `1` | PAR2 verify and repair |
+| `2` | repair and unpack, keeping the RAR/ZIP files |
+| `3` | repair, unpack, delete the archives |
+
+"It is recommended you either don't send this parameter, or keep it at `-1`."
+
+`POST /usenet/controlusenetdownload` takes `{usenet_id, operation, all}`. The
+body comment lists `delete`, `pause`, `resume`; the `INVALID_OPTION` example
+lists only `delete`. `delete` removes the item and its files.
+
+`checkcached` (GET, ~100 hashes a call, or POST with a list) answers from a
+one-hour cache. How TorBox hashes an NZB is described
+([Getting Hashes For Searches](https://support.torbox.app/en/articles/13681109-technical-getting-hashes-for-searches)):
+"NZB files — clean then MD5 the whole NZB", or "MD5 of the first message ID per
+file segment". "Clean" is not defined, which is why no client-side derivation
+has matched (see *Measured*).
+
+## Retention on TorBox
+
+- Files are stored "for at least 30 days", longer if popular, never guaranteed
+  ([How Long Are TorBox Files Stored For?](https://support.torbox.app/en/articles/9961332-how-long-are-torbox-files-stored-for)).
+- "Any downloads not downloaded within 30 days of being cached are removed";
+  WebDAV access does not reset the timer
+  ([Why Is My Download Inactive?](https://support.torbox.app/en/articles/10333785-why-is-my-download-inactive)).
+- NZBs themselves are not stored: an item added by file cannot be re-downloaded
+  from the dashboard ([Re-Download Action](https://support.torbox.app/en/articles/13875800-re-download-action-in-torbox)).
+
+## TorBox's usenet provider (NNTP)
+
+Pro includes a conventional usenet server, separate from the API pipeline:
+downloads through it "do NOT appear on the dashboard and do NOT use the TorBox
+cache" ([TorBox News Server](https://support.torbox.app/en/articles/15531672-torbox-news-server)).
+
+| | Documented |
+|---|---|
+| Host | `nntp.torbox.app:563`, TLS (`GET /usenet/provider/connection`) |
+| Retention | `"retention": 5000` (API); "3900+ days" (article) |
+| Completion | "99.8%" |
+| Connections | 10 per account |
+| Location | EU |
+| Credentials | generated by `GET /usenet/provider/account`, shown once; `POST …/resetpw` regenerates |
+| Clients | "NZBHydra, SABnzbd, NZBGet, NZBDav, Usenet Streamer, Stremio" |
+
+"Older NZBs may sit on cold storage or with partner providers", which is slower
+([Why Are My Usenet Transfers To TorBox Slow?](https://support.torbox.app/en/articles/15300133-why-are-my-usenet-transfers-to-torbox-slow)).
+This stack measured something much shorter than the documented retention; see
+*Measured*.
+
+## Other access paths
+
+- **WebDAV** `https://webdav.torbox.app`, user = email (or `torbox`), password =
+  account password or API key; read-only except delete, which deletes for real;
+  the tree refreshes every 15 minutes
+  ([TorBox WebDAV](https://support.torbox.app/en/articles/14662867-torbox-webdav)).
+- **T3**, S3-compatible, `https://t3.nexus`, Auth ID + API key, read-only,
+  15-minute refresh ([TorBox T3](https://support.torbox.app/en/articles/15531689-torbox-t3)).
+- The one arr guide TorBox publishes is RDTClient in Docker
+  ([How To: Setup RDTClient](https://support.torbox.app/en/articles/10167535-how-to-setup-rdtclient-with-torbox-docker)).
+
+## Error enum
+
+From the API's errors table. Codes ending in `ERROR` are server-side.
+
+| Code | Meaning |
+|---|---|
+| `DATABASE_ERROR` | internal store unavailable |
+| `UNKNOWN_ERROR` | unknown; details in `data` |
+| `NO_AUTH` / `BAD_TOKEN` / `AUTH_ERROR` | missing / invalid / unverifiable credentials |
+| `INVALID_OPTION` / `MISSING_REQUIRED_OPTION` / `TOO_MANY_OPTIONS` | bad input |
+| `REDIRECT_ERROR`, `OAUTH_VERIFICATION_ERROR` | redirect / OAuth failures |
+| `ENDPOINT_NOT_FOUND`, `ITEM_NOT_FOUND` | not found (`ITEM_NOT_FOUND` on `mylist` comes with `success: true`) |
+| `PLAN_RESTRICTED_FEATURE` | higher plan needed |
+| `DUPLICATE_ITEM` | already exists |
+| `TOO_MUCH_DATA` | request over 100 MB |
+| `DOWNLOAD_TOO_LARGE` | over the plan's per-download size |
+| `BOZO_TORRENT`, `BOZO_NZB`, `BOZO_RSS_FEED`, `BOZO_REGEX`, `BOZO_FILE` | malformed input |
+| `NO_SERVERS_AVAILABLE_ERROR` | "should never happen" |
+| `MONTHLY_LIMIT`, `COOLDOWN_LIMIT` | Free-tier limits |
+| `ACTIVE_LIMIT` | "hit their max active download limit" |
+| `DOWNLOAD_SERVER_ERROR` | download-server trouble; "wait some time before trying again" |
+| `DOWNLOAD_NOT_CACHED` | `add_only_if_cached` and it wasn't |
+| `SEARCH_ERROR`, `INVALID_DEVICE`, `DIFF_ISSUE`, `LINK_OFFLINE`, `VENDOR_DISABLED`, `BAD_CONFIRMATION`, `CONFIRMATION_EXPIRED` | as named |
+
+Endpoint examples also use `NOT_OWNER` (409), `NO_CHANGES`, `NAME_TOO_LONG`,
+`NAME_TOO_SHORT`, `INVALID_HASH`, `NOT_CACHED`, `UNSUPPORTED_SITE`,
+`TEMPORARILY_DISABLED`, `INVALID_LINK`, `DEVICE_CODE_NOT_USED`,
+`STREAM_INFO_ERROR`. **There is no `1010`, and no rate-limit code.**
 
 ## The endpoint inventory
 
-65 endpoints under 10 folders. None of this is required reading; it is here so
-that the next person can see what exists without re-fetching the collection.
+65 endpoints under 10 folders.
 
 | Folder | Endpoints |
 |---|---|
@@ -56,323 +353,175 @@ that the next person can see what exists without re-fetching the collection.
 | General | up status, `stats`, `changelogs/rss`, `changelogs/json`, `speedtest` |
 | Notifications | `notifications/rss`, `mylist`, `clear`, `clear/{id}`, `test` |
 | User | `me`, `refreshtoken`, `addreferral`, `getconfirmation`, `auth/device/start`, `auth/device/token`, `referraldata`, `subscriptions`, `transactions`, `transaction/pdf`, `settings/editsettings`, `stats` |
-| RSS Feeds | `addrss`, `controlrss`, `modifyrss`, `getfeeds`, `getfeeditems` |
+| RSS Feeds | `addrss`, `controlrss`, `modifyrss`, `getfeeds`, `getfeeditems` (Pro) |
 | Integrations | `integration/jobs`, `integration/job/{id}` (GET and DELETE), `integration/jobs/{hash}` |
-| Queued | `queued/getqueued`, `queued/controlqueued` |
-| Stream | `stream/createstream`, `stream/getstreamdata` |
+| Queued | `queued/getqueued`, `queued/controlqueued` (`start`, `delete`) |
+| Stream | `stream/createstream`, `stream/getstreamdata` (Pro) |
 
-## What this repo actually calls
+---
 
-Four of the 65, all usenet, all from `scripts/lib/usenet_blackhole.py`.
-Decypharr speaks the torrent half of the API itself and is configured rather
-than coded here.
+# Part 2 — Measured, not documented
+
+Each of these is this stack's observation. Keep them, but do not promote them
+into the documented section without a TorBox source.
+
+**The two refusals `submit()` handles** (2026-09-14):
+
+- `createusenetdownload` over its hourly budget answers
+  `HTTP 429: {"detail":"60 per 1 hour"}`, no `Retry-After`. Not the standard
+  envelope.
+- An 11th concurrent usenet download answers `HTTP 500`
+  `{"success":false,"error":"ACTIVE_LIMIT","detail":"You have reached your active download limit of 10.","data":{"active_limit":10,"current_active_downloads":10}}`.
+  The code is documented; the 500 status is not, and 500 is shared with
+  `DOWNLOAD_SERVER_ERROR`, `UNKNOWN_ERROR` and others, so classify on `error`,
+  never on status.
+
+Over 76 logged passes that day, 37 submissions were accepted and 47 refused,
+22 of them by the hourly cap alone. `submit()` now backs off on both: a `429`
+stops the submission loop and persists `rate_limited_until` (one hour) in the
+state file; `ACTIVE_LIMIT` stops the loop for this pass only, since a slot frees
+by itself.
+
+**Usenet failure is a prefix, not a word.** `download_state` comes back as
+`failed (Aborted, cannot be completed - https://sabnzbd.org/not-complete)`, the
+reason in parentheses. Other values seen: `completed`, `cached`, `processing`,
+`downloading`, `queued`. Both cases of the first letter have been seen.
+
+**`progress` moves while bytes arrive.** `download_state` says `downloading` for
+a job that is downloading nothing, so `--stall-hours` reads `progress`. Its
+scale (0-1 or 0-100) has not been pinned down.
+
+**The default post-processing does not always apply.** On 2026-09-14, 12 of 31
+completed usenet items still delivered RAR volumes — 47 parts each for the
+`TENEIGHTY` releases. The watcher unpacks locally to compensate. Whether TorBox
+declined because the set was damaged is not known.
+
+**`checkcached` cannot be a pre-flight check** (2026-09-17, 327 jobs). No
+client-side derivation of the NZB hash matched a real job's — sixteen were tried:
+MD5 of the raw bytes, the release name (with and without `.nzb`, lowercased), the
+basename, the first/last segment message-id (bare and bracketed), every
+message-id concatenated (document order, sorted, newline-joined), the first and
+all `subject` attributes, the sorted group list, the whitespace-stripped file,
+and the size. TorBox's own description ("clean then MD5") does not define the
+cleaning. And even with the hash, `cached` is written after the bytes arrive: it
+was true for 167 of 167 completed jobs and false for 155 of 155 failed ones, and
+empty for a job still downloading. A gate on it would refuse every new release.
+
+**`nntp.torbox.app` has no ~90-day cutoff** (re-measured 2026-09-26, `STAT`
+and `BODY`, 209 NZBs, SABnzbd's own credentials). Releases up to 1303 days old
+are fully present; what is missing is per-release article loss, whose rate rises
+with age: 5/5 releases under 90 days had every probed segment, 8/21 at 90-364
+days, 32/110 at 365-999, 18/73 at 1000+. `STAT` and `BODY` agreed on all 372
+refused segments, so `STAT` is a valid probe here. The 2026-09-14 "~90 days"
+reading (1/34/60/86-day found, 101/138-day `430`) was eight releases generalised
+into a rule. The API path aborts on missing articles too (898 `aborted, cannot be
+completed` since 2026-09-14); whether it completes materially more than the news
+server is the open question — see the audit, A1.
+
+### The 403 / 1010 refusal
+
+On 2026-09-13 every `requestdl` call answered `403` with a plain-text body
+`error code: 1010`, for about 90 minutes, then cleared with no change on this
+side. Links already issued kept working. `docs/TROUBLESHOOTING.md` records the
+incident and its probe.
+
+Read against the docs, **this was almost certainly not TorBox's API refusing the
+account**: the API's 403s are JSON `NO_AUTH`/`BAD_TOKEN`, its rate limits are
+"per API token, no edge rate limiting", and `1010` appears in no TorBox error.
+`error code: 1010` as a bare body is Cloudflare's "banned browser signature" —
+the same code this repo already diagnosed that way for Cinemeta
+(`scripts/lib/stremio_library.py`, `docs/MAINTENANCE.md`). The likelier variable
+is the *client signature* of the caller (Decypharr's Go client, curl's default
+User-Agent), not the number of torrents queued. Not yet proven either way: the
+next occurrence should capture the response headers (`cf-ray`, `server`) and
+retry once with a browser User-Agent.
+
+---
+
+# Part 3 — How this stack uses it
+
+## What this repo calls
+
+Four endpoints, all usenet, all from `scripts/lib/usenet_blackhole.py`.
+Decypharr speaks the torrent half itself; Magnetio calls the torrent half from
+`magnetio/addon/moch/torbox.js`.
 
 | Call | Where | Notes |
 |---|---|---|
-| `POST /v1/api/usenet/createusenetdownload` | `TorBox.submit_file` | multipart NZB upload |
-| `GET /v1/api/usenet/mylist` | `TorBox.list_usenet` | `bypass_cache=true`, polled every pass |
-| `POST /v1/api/usenet/controlusenetdownload` | `TorBox.delete_usenet` | `operation: "delete"`, frees the slot a stalled or timed-out job still holds |
-| `GET /v1/api/usenet/requestdl` | `TorBox.request_zip_link` | `zip_link=true`, token in the query |
+| `POST /usenet/createusenetdownload` | `TorBox.submit_file` | multipart NZB, `name`, `as_queued=false`; no `post_processing`, no `password` |
+| `GET /usenet/mylist` | `TorBox.list_usenet` | `bypass_cache=true&limit=1000`, one page, polled every pass |
+| `POST /usenet/controlusenetdownload` | `TorBox.delete_usenet` | `delete`, for stalled and timed-out jobs only |
+| `GET /usenet/requestdl` | `TorBox.request_zip_link` | `zip_link=true`, token in the query |
+| `GET /torrents/checkcached`, `POST createtorrent`, `GET mylist?id=`, `GET requestdl?file_id=` | Magnetio | per-file links (`zip_link=false`) |
 
 `scripts/lib/queue_cleanup.py` mentions TorBox only in `DEBRID_CLIENT_PATTERNS`,
 which matches a client *name* in an arr queue record. It makes no API call.
-`docs/TROUBLESHOOTING.md` carries a `requestdl` probe for the 403 case.
 
-## Constraints that shape the design
+## `--max-inflight`
 
-**Ten active download slots, and sixty create calls an hour.** Two independent
-limits, both reachable from one large backlog search.
+An operator-set ceiling on usenet jobs in flight, below TorBox's ten. The
+script's default is `0` (off); the shipped unit
+(`scripts/usenet-blackhole.service`) and `scripts/usenet-drain-walk.sh` run `6`.
+Six sits below ten; it was not measured better. The evidence for wanting a
+ceiling at all is that nine of ten slots were once held by jobs 3-21 h old while
+only 4 of 50 submissions were fetched, and that an uncapped pass on 2026-09-18
+submitted 46 jobs in an hour and left 60 incomplete. If the ten slots are shared
+with torrents (see *Plans and active slots*), 6 plus Decypharr's 5 already
+exceeds them. Reaching the ceiling spends no `createusenetdownload` call, because
+the check runs before the upload.
 
-An 11th concurrent usenet download is refused with `HTTP 500` and
-`{"error":"ACTIVE_LIMIT","detail":"... active download limit of 10 ..."}`.
-Separately, `createusenetdownload` is rate-limited at 60 calls per hour:
-`HTTP 429: {"detail":"60 per 1 hour"}`.
+## Open items
 
-Measured over 76 logged passes on 2026-09-14: **37 submissions accepted and 47
-refused**, with 22 releases held back by the hourly cap alone. More calls were
-refused than accepted.
+The full list, each with its TorBox source and the code it touches, is
+[TORBOX-AUDIT-2026-09-26.md](TORBOX-AUDIT-2026-09-26.md). In short:
 
-`submit()` treats both as ordinary failures, so the NZB stays in the outbox and
-the stack converges rather than losing work. The cost is that every pass
-re-asks, and each re-ask spends the same 60-per-hour budget. The ceiling on
-this path is therefore the provider's two limits, not the link speed — and the
-retry pattern makes the second one worse than it needs to be.
+- **Fetch per file, not per zip.** The single largest change available to the
+  NAS's disk load, and the documented fast path.
+- **Compare completion, API vs. news server, on the same NZBs.** Retention is
+  not the limit (above); if the API does not complete materially more, the API
+  watcher is optional.
+- **Use `download_finished`, delete after fetch, page through `mylist`, and
+  expire jobs TorBox no longer lists.**
+- **Settle whether the ten slots are shared**, from an `ACTIVE_LIMIT` body.
 
-`--max-inflight N` puts an operator-set ceiling below that ten. It lives in two
-places and they do not have the same value:
+Two questions this page used to carry as open are closed. The retry pattern that
+spent the hourly budget it was waiting on is fixed (`submit()` backs off, above).
+`checkcached` as a pre-flight gate is ruled out (above).
 
-- **The script's default is `0`, off.** That is a rollout state, not a
-  recommendation — it is what the flag does when nothing passes it.
-- **The shipped unit's resting state is `6`.** `scripts/usenet-blackhole.service`
-  runs `--apply --report-failures --max-inflight 6`, and that unit is what the
-  two-minute timer executes, so the stack does **not** run uncapped.
-
-6 is chosen to sit below the provider's ten-slot limit, not because it measured
-better. **The comparison this file used to demand — fetch rates at 6 against 10
-over a measured window — has not been run.** The evidence for wanting a ceiling
-is the retained window: nine of the ten slots were held by jobs 3-21h old while
-only 4 of 50 submissions were ever fetched, and on 2026-09-18 an uncapped pass
-submitted 46 jobs in one hour and left 60 incomplete. Neither of those says six
-is the right number. A ceiling set too low trades wasted slots for idle ones,
-and nothing here establishes that 6 is above that point. Reaching the ceiling
-spends no `createusenetdownload` call, because the check runs before the upload.
-
-**Download links open for three hours.** Long enough to start, not long enough
-to store. The docs are explicit that CDN links are not permanent and that
-permalinks are the durable form:
-
-```
-https://api.torbox.app/v1/api/usenet/requestdl?token=KEY&usenet_id=N&file_id=N&redirect=true
-```
-
-**Failure is a prefix, not a word.** `download_state` comes back as
-`failed (Aborted, cannot be completed - https://sabnzbd.org/not-complete)`, with
-the reason in parentheses. Matching `{"failed", "error"}` exactly leaves the
-branch unreachable and reports dead jobs as running; see
-`FAILED_STATES` in `usenet_blackhole.py` for the live incident.
-
-**Progress is a number on every `mylist` record.** `progress` is TorBox's own
-completion figure for the job, and it moves while bytes arrive. The watcher's
-`--stall-hours` rule reads it, because `download_state` says `downloading` for a
-job that is downloading nothing: the value is what separates a large release
-that is still moving from one that has stopped and is holding a slot for no
-reason.
-
-**Post-processing is TorBox's job by default.** `post_processing` defaults to
-`-1`: repair, extract, delete the source, keep only the wanted files.
-
-| Value | Behaviour |
-|---|---|
-| `-1` | Default. Repair, extract, delete source files |
-| `0` | None. Everything, PAR2 included |
-| `1` | Repair |
-| `2` | Repair and unpack, keeping the archives |
-| `3` | Repair, unpack, delete the archives |
-
-## Audit: where this stack is under-using the API
-
-Findings from reading the collection against the code, with the evidence that
-prompted each. Most are unfixed; a section that has since been addressed says
-so, and what changed.
-
-### Post-processing is not requested, only assumed
-
-We omit `post_processing` and rely on the documented default. That default does
-not always take effect: on 2026-09-14, **12 of 31 completed usenet items still
-delivered RAR volumes** — 47 parts each for the `TENEIGHTY` releases — so the
-watcher unpacks them locally with `unrar` to compensate, and a release whose
-RARs are damaged fails with `checksum error` at our end rather than being
-repaired by the provider.
-
-Sending the value explicitly makes the behaviour deterministic instead of
-inferred, and `2` or `3` would let the provider own the unpack step. Worth
-measuring before moving: TorBox may be declining to extract precisely because
-the archive is incomplete, in which case the local step is not the problem.
-
-### Password-protected releases are unhandled
-
-`createusenetdownload` accepts `password` for extracting an encrypted RAR set.
-We never send one, so anything password-protected fails as a permanent error.
-There is no configuration path for it yet.
-
-### Availability is never checked before spending a slot
-
-`checkcached` reports whether TorBox already holds a post. Today we submit and
-find out: 36 of the 40 failures logged on 2026-09-14 were
-`aborted, cannot be completed`, each one having consumed a slot from a pool of
-ten. A pre-flight check would not make bad releases good, but it would stop them
-costing download capacity.
-
-The endpoint takes comma-separated hashes, around 100 per call, and returns in
-under a second per hundred. It cannot serve as that check, for two reasons, both
-measured against the live account on 2026-09-17 with 327 usenet jobs in
-`mylist`.
-
-Given a hash the account already owns, the call works. The `hash` field on a
-`mylist` job is a 32-character MD5-shaped string (for example
-`9acd321c7ddcded56e7f84890291b9c5`), and this returns that release's name, size
-and hash:
-
-```
-GET /v1/api/usenet/checkcached?hash=<hash>&format=object
-```
-
-No derivation tried so far computes that hash from a local NZB before submitting
-it. 16 candidate derivations were tested against 3 NZB files whose release names
-matched a `mylist` entry character for character:
-`the.sopranos.s04e09.1080p.bluray.x264-shortbrehd`,
-`Severance.S01E08.1080p.BluRay.x264-BORDURE` and
-`Foundation.S01E05.1080p.WEB.H264-CAKES-FTP`. Each candidate is the MD5 of one
-input:
-
-1. the raw file bytes
-2. the release name
-3. the release name plus `.nzb`
-4. the file's basename
-5. the first segment message-id, bare
-6. the first segment message-id, wrapped in angle brackets
-7. every segment message-id concatenated in document order, no separator
-8. every segment message-id concatenated in sorted order, no separator
-9. every segment message-id joined with newlines in original document order
-10. the last segment message-id
-11. the first `subject` attribute
-12. all `subject` attributes concatenated
-13. the sorted `<group>` list joined by commas
-14. the lowercased release name
-15. the file with all whitespace stripped
-16. the reported size as a string
-
-None matched: no client-computable derivation was found among the sixteen tried.
-
-Even with the hash, the endpoint cannot predict whether a release will complete,
-because `cached` describes what TorBox already holds rather than what the
-backbone can still retrieve. Queried for `the.sopranos.s04e09...` (hash
-`ce05aede44be4f71859ddc7ae283eca4`) while that job's `download_state` was
-`processing` and it was downloading, `checkcached` answered `{"data":{}}`, the
-identical empty answer it gives for a job that failed
-(`d601c08cc972ebea0535f085996af9bf`). Across all 327 jobs, `cached` is true for
-167 of the 167 that completed and false for 155 of the 155 that failed. The
-remaining five were neither completed nor failed at measurement time, still in
-flight and non-terminal, so they fall outside that comparison entirely; among the
-322 terminal jobs there are no exceptions. A field that matches the outcome
-perfectly in both directions is written after the bytes arrive; it does not
-forecast whether they will.
-
-A pre-flight gate built on `checkcached` would therefore reject every release
-that is merely new, which is every release worth submitting. The abort is a
-TorBox-side fact learned only by submitting. It still costs a submission, and
-what makes it cost once instead of three to five times is the failure reporting
-that went live on 2026-09-17.
-
-This closes the question rather than deferring it. If TorBox ever documents a
-client-derivable identifier, that is the moment to revisit, and it would need a
-test showing the derivation matching a real job's hash.
-
-### Stalled and timed-out jobs are deleted; completed items still accumulate
-
-`controlusenetdownload` takes `{usenet_id, operation}` with `delete`, `pause` or
-`resume`, and `all: true` for the whole account. The watcher now calls it with
-`operation: "delete"` for the two terminal outcomes where the job is still
-ACTIVE at TorBox: `poll()`'s stalled and timeout branches. Dropping a job from
-the state file does not stop it, so without the delete it went on holding one of
-the ten concurrent slots, which is the cost the stall rule exists to stop paying.
-
-The call is best-effort. A TorBox that refuses it (a 500, a job that is already
-gone) is logged as `could not delete from TorBox`, and the job is dropped from
-the state either way, because one un-deletable release must not stop the pass
-classifying everything behind it. A job TorBox itself reports failed is not
-deleted: it has already stopped, so there is no slot to free.
-
-Completed items still accumulate. The watcher downloads what it asked for and
-never deletes it afterwards, so the account's completed list only grows.
-
-### The queue system is unused
-
-`createusenetdownload` accepts `as_queued`, and the `Queued` folder exposes
-`getqueued` and `controlqueued` with `start` and `delete`. That is the API's own
-answer to the ten-slot limit: queue the work and start it as capacity frees,
-instead of submitting blind and absorbing `ACTIVE_LIMIT` refusals. The current
-behaviour converges, so this is an efficiency question rather than a
-correctness one.
-
-### The retry pattern spends the rate limit it is waiting on
-
-Related to the unused queue system below, and worth its own entry because it is
-a defect rather than a missed opportunity.
-
-A submission refused with `429 60 per 1 hour` is retried on the next pass, two
-minutes later. `submit()` iterates every pending NZB, so a release the provider
-has just declined is offered again immediately, and each offer is another call
-against the same hourly budget. With 22 releases held back on 2026-09-14, that
-is 22 calls every two minutes spent asking a question already answered — the
-pass log shows three refusals recurring on pass after pass with nothing
-submitted in between.
-
-Nothing is lost, because the NZBs stay put. What degrades is the rate at which
-the ones that *would* be accepted get their turn.
-
-Backing off after a `429` — remembering when the refusal happened and skipping
-new submissions until the window has passed — would recover most of it. That is
-a change to `submit()` and needs its own tests.
-
-### Whole-release zips where a single file would do
-
-`requestdl` takes `file_id` as well as `zip_link`, so one file can be fetched
-directly. We always ask for the zip, then extract it locally. For a
-single-video release the zip is a second copy of the payload written to the same
-disk before being unpacked — for a 5 GB episode, 5 GB of staging for nothing.
-`append_name` is also available and unused.
+Still unused, and deliberately so for now: `password` (protected releases fail
+locally as permanent), `as_queued` and the Queued endpoints (processed only every
+3 hours), `add_only_if_cached`, `user_ip`, `append_name`.
 
 ## The official SDKs, and why this stack does not use one
 
-TorBox publishes SDKs in six languages, under the
-[TorBox-App](https://github.com/TorBox-App) organisation and linked from
-<https://torbox.app/integrations>:
+TorBox publishes generated, MIT-licensed SDKs under
+[TorBox-App](https://github.com/TorBox-App): `torbox-sdk-py`, `-go`, `-js`,
+`-java`, `-dotnet`, `-php`, all last pushed 2025-04-26. The Python one is on PyPI
+as `TorBox` 0.1.0a1.
 
-| SDK | Language | Last pushed |
-|---|---|---|
-| `torbox-sdk-py` | Python | 2025-04-26 |
-| `torbox-sdk-go` | Go | 2025-04-26 |
-| `torbox-sdk-js` | TypeScript | 2025-04-26 |
-| `torbox-sdk-java` | Java | 2025-04-26 |
-| `torbox-sdk-dotnet` | C# | 2025-04-26 |
-| `torbox-sdk-php` | PHP | 2025-04-26 |
-
-They are generated clients, MIT-licensed, and the Python one is on PyPI as
-`TorBox` at 0.1.0a1, published 2024-11-23.
-
-**It would have caught one of our bugs.** `request_download_link1` builds the
-call with `.add_query("token", token)`, so the requirement that `requestdl`'s
-token travel as a query parameter — the one that cost a failed fetch and a
-rewritten HTTP layer — is encoded in it. That is a real argument for a generated
-client over a hand-rolled one: the vendor's own view of the surface lives in the
-code rather than in prose someone has to read.
-
-**It cannot express what the audit above recommends.** The Python SDK's
-`CreateUsenetDownloadRequest` models two fields:
-
-```python
-self.file = file
-self.link = link
-```
-
-No `name`, no `password`, no `post_processing`, no `as_queued`, no
-`add_only_if_cached` — despite the method's own docstring documenting the
-post-processing values in full. The generator's output has drifted behind the
-collection it was generated from, and the fields it is missing are exactly the
-ones this stack is not using well.
-
-**And the watcher could not install it anyway.** `usenet-blackhole` runs as a
-systemd user unit on the NAS against the system `python3`, with no pip and no
-package manager. The Python SDK pulls `pydantic`, `click`, `requests` and
-`typing-extensions`. Adopting it means containerising the watcher, which is the
-pattern this repo uses for anything with dependencies
-(`tests/toolkit/pytest.sh`, the e2e runner, `alpine/git`). That is worth doing
-on its own merits, but not for a client whose HTTP layer is 93 lines of `curl`
-plus stdlib.
-
-**Decision: keep the hand-rolled client, read the SDKs when auditing.** A
-generated client is worth consulting for a detail the collection buries — the
-`requestdl` token requirement is a good example — but not worth a runtime
-dependency that is a year and a half behind the API and cannot be installed on
-the host that runs it.
-
-The calculation changes if the SDKs catch up. Worth re-checking when
+It would have caught one bug: `request_download_link1` puts `token` in the query,
+the requirement that cost a failed fetch here. But the Python SDK's
+`CreateUsenetDownloadRequest` models only `file` and `link` — no `name`,
+`password`, `post_processing`, `as_queued` or `add_only_if_cached` — and it needs
+`pydantic`, `click` and `requests` on a host with no pip. **Decision: keep the
+hand-rolled client, read the SDKs when auditing.** Revisit when
 `CreateUsenetDownloadRequest` grows a `post_processing` field.
 
 ## What Decypharr covers
 
-The torrent half of the API is exercised by Decypharr's own Go client, not by
-this repo. What this repo controls is its configuration, in the
-`decypharr-config` volume:
+The torrent half is Decypharr's own Go client. This repo controls its
+configuration, in the `decypharr-config` volume (`docs/SETUP.md` has the
+template):
 
 | Setting | Value here | Effect |
 |---|---|---|
 | `debrids[].provider` | `torbox` | which provider it calls |
 | `debrids[].download_uncached` | `true` | TorBox fetches uncached torrents on its own servers |
-| `max_active_downloads` | `5` | its own concurrency ceiling, separate from TorBox's |
-| `download_folder` | `/data/torbox` | where finished files land for the arr to import |
-| `mount.type` | `none` | no mount, so no local torrent engine |
+| `max_active_downloads` | `5` | its own ceiling (live config; not in the template) |
+| `download_folder` | `/data/torbox` | where finished files land for the arr |
+| `mount.type` | `none` | no mount, no local torrent engine |
 
-Two concurrency limits therefore stack: Decypharr will not run more than 5 at
-once, and TorBox will not hold more than 10. Neither is the network.
+The image is patched to treat a bare `400` from TorBox as retryable
+([DECYPHARR-PATCH.md](DECYPHARR-PATCH.md)). What TorBox means by that 400 is not
+documented — the API says only that 400 is "the user did something wrong" — so
+the patch rests on observed behaviour, not on a TorBox statement.
