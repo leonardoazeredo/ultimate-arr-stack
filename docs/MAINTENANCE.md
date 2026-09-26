@@ -632,8 +632,9 @@ Both arrs use their native `UsenetBlackhole` download client for usenet, not
 SABnzbd. The arr writes `<Release.Title>.nzb` into a folder and polls another
 one; `scripts/usenet-blackhole.sh` is what moves a release between them, by
 submitting it to TorBox's API and fetching the finished zip back. The reason is
-in `docs/TROUBLESHOOTING.md` — SABnzbd's NNTP server serves articles only up to
-about 90 days old, and a backlog is mostly older than that. Decypharr still
+in `docs/TROUBLESHOOTING.md` — SABnzbd's NNTP server failed most backlog grabs
+(first blamed on a ~90-day limit; re-measured 2026-09-26, it is article loss
+with no age cutoff). Decypharr still
 handles torrents, and SABnzbd still runs with nothing pointed at it.
 
 ```bash

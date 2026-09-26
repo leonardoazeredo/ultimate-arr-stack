@@ -901,9 +901,10 @@ history is empty, and Sonarr/Radarr history fills with
 `Manually marked as failed`. Torrents through Decypharr keep working, which is
 what makes it look like an indexer or a preference problem.
 
-**Cause: `nntp.torbox.app` serves articles only up to about 90 days old.**
-Measured 2026-09-14 by resolving every article of eight grabbed NZBs against the
-same server, same credentials:
+**Cause, as first diagnosed: `nntp.torbox.app` serves articles only up to about
+90 days old. Re-measured 2026-09-26, that rule is wrong** — see *Re-measured*
+below. The original measurement, 2026-09-14, resolved every article of eight
+grabbed NZBs against the same server, same credentials:
 
 | Release age | Articles resolved |
 | --- | --- |
@@ -916,12 +917,33 @@ The newsgroup always exists (`GROUP` returns `211`) and authentication is fine
 this reads as a configuration problem for so long. The *articles* are gone:
 `STAT <id>` → `430 No such article`.
 
+**Re-measured 2026-09-26: there is no age cutoff.** Every NZB in the blackhole
+outbox (209) was probed from inside the `sabnzbd` container with its own
+credentials — `STAT` on the first, middle and last segment of the largest file,
+and `BODY` on the middle one and on anything `STAT` refused:
+
+| Posting age | NZBs | all 3 segments present | some | none |
+| --- | --- | --- | --- | --- |
+| < 90 days | 5 | 5 | 0 | 0 |
+| 90-364 days | 21 | 8 | 4 | 9 |
+| 365-999 days | 110 | 32 | 26 | 52 |
+| 1000+ days | 73 | 18 | 15 | 40 |
+
+A 1303-day-old release is fully there. What is missing is per-release article
+loss, more common with age but with no cliff at 90 days — the eight releases
+above happened to fall on either side of one. `STAT` is trustworthy: all 372
+segments it refused were refused by `BODY` too. The sample is the backlog the
+arrs failed to find, so it is harder than fresh grabs. The API path hits the same
+loss (below); whether it completes materially more is open —
+`docs/TORBOX-AUDIT-2026-09-26.md`, A1.
+
 The impact is not marginal, because a backlog is mostly old releases. Sonarr's
 usenet grabs: 81 of 85 were older than 90 days, and SABnzbd imported 1 of 91
 while the torrent path imported 109 of 202. Radarr: 42 of 58 older than 90 days,
 8 of 58 imported, and every one of those 8 was 30 days old or newer.
 
-**TorBox's API has no such limit**, which is what separates the two paths.
+**TorBox's API completed releases the news server could not**, which is what
+separated the two paths in the 2026-09-14 test.
 TorBox's usenet is an API that runs a usenet client against a real backbone, not
 an NNTP service you read from: the exact 138-day-old NZB SABnzbd cannot fetch
 was submitted to `POST /v1/api/usenet/createusenetdownload` and completed at
@@ -976,7 +998,9 @@ releases already submitted would otherwise be sent again.
 
 **Not the fix:** waiting. The 403 rate-limit section below describes a transient
 failure that clears on its own; this one was stable across every release tested,
-for every age past roughly 90 days, over the whole measurement window.
+for every age past roughly 90 days, over the whole measurement window. (That age
+pattern did not survive a larger sample — see *Re-measured* above — but the
+missing articles were real, and they do not come back by waiting.)
 
 ## TorBox: All Download Links Return 403 (error code 1010)
 
@@ -994,13 +1018,20 @@ second is the one that wedges the queue. See *Related: the bare 400* below.
 
 **This is not a plan limit, and it is not the indexer.** Confirmed 2026-09-13:
 the account is **Pro** — 10 active slots, usenet included, no add-download
-cool-down. The refusal is a transient, account-wide rate limit on TorBox's
-download-link endpoint.
+cool-down. The refusal is transient and account-wide.
 
-**Cause:** a burst of `createtorrent` calls (a large missing-titles search) plus
-repeated `requestdl` calls earns `403` with `error code: 1010` on
-`/v1/api/torrents/requestdl`. It applies to the whole account regardless of
-which item you ask for, and it clears on its own. Measured that day: it began at
+**Cause: not established.** It was first read as TorBox rate-limiting the
+account after a burst of `createtorrent` calls (a large missing-titles search).
+TorBox's own documentation argues against that. Its limits are "per API token,
+no edge rate limiting". Its 403s are JSON (`NO_AUTH`/`BAD_TOKEN`). No TorBox
+error is `1010`. A bare `error code: 1010` body is Cloudflare's
+banned-browser-signature page, the same diagnosis as the Cinemeta 1010 in
+`docs/MAINTENANCE.md`. So the likelier variable is the caller's client
+signature, not queue size (`docs/TORBOX-AUDIT-2026-09-26.md`, A4). On the next
+occurrence, run the probe below with `-D -` to keep the headers (`server`,
+`cf-ray`), then again with a browser `-A '...'` User-Agent. What was observed:
+`403 error code: 1010` on `/v1/api/torrents/requestdl`, for the whole account
+regardless of which item was asked for, clearing on its own. It began at
 01:20 BST after ~100 torrents were queued within an hour, refused every request
 for about 90 minutes — new and week-old items, GET and HEAD, `redirect` true and
 false, a 15 GB video and its .nfo sibling alike — then started answering `200`
@@ -1017,7 +1048,7 @@ also why every item they wedged stayed wedged, and also why the items that
 `queue-cleanup` then removed were re-grabbed unchanged. See *Fix* below.
 
 **Diagnose:** ask for a link to something TorBox already holds. `200` means
-fine; `403 error code: 1010` means the account is being limited right now.
+fine; `403 error code: 1010` means links are being refused right now (see *Cause*).
 
 ```bash
 TB=$(grep -E '^TORBOX_API_KEY=' .env | cut -d= -f2-)

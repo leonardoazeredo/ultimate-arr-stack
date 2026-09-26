@@ -673,8 +673,9 @@ def test_the_backoff_expires_and_submissions_resume(tmp_path, monkeypatch):
 
 
 def test_a_non_429_failure_does_not_pause_submissions(tmp_path, monkeypatch):
-    # ACTIVE_LIMIT and friends are per-release refusals: the next NZB may well
-    # be accepted, so stopping the pass would lose work for no reason.
+    # A generic TorBoxError (neither a 429 nor ACTIVE_LIMIT, which both stop
+    # the loop) is a per-release refusal: the next NZB may well be accepted,
+    # so stopping the pass would lose work for no reason.
     nzb_dir, watch, state_path = pending_releases(tmp_path, 3)
     api = refusing_torbox(count=1, exc=m.TorBoxError)
     monkeypatch.setattr(m, "TorBox", lambda *a, **k: api)
