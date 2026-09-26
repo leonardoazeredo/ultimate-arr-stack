@@ -149,3 +149,12 @@ mutation backup-safety-restart-no-alert \
   --test "failed service restart is reported" \
   --why "a failed restart produces stderr only, which the 04:00 cron run discards, so the VPN stays down with no signal anywhere" \
   --apply 'sed -i "s@^      notify_failure \"Backup finished but could not restart@      : notify_failure \"Backup finished but could not restart@" "$F"'
+
+# --- scripts/backup-prune.sh: a date it cannot parse is never tiered ---------
+
+mutation prune-unparseable-date-tiered-as-epoch-zero \
+  --file scripts/backup-prune.sh \
+  --bats tests/backup-retention.bats \
+  --test "backup-prune.sh skips an impossible calendar date instead of tiering it" \
+  --why "a date ymd_date refuses becomes epoch 0, so the file is aged ~20,000 days and put in the monthly tier, where it can be deleted by a date it never had. Replays on both hosts; the BSD-only round-trip inside ymd_date is proven on macOS, where deleting it turns this test red, because GNU date -d refuses 20260231 before that branch is reached" \
+  --apply 'perl -pi -e "s/^(\\s*epoch=\\\$\\(ymd_date \"\\\$\\{date_part\\}\" \\+%s)\\)/\$1 || echo 0)/" "$F"'

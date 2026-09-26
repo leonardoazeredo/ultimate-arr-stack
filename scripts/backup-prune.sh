@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 #
 # GFS (Grandfather-Father-Son) tiered retention for arr-stack-backup-*.tar.gz
@@ -24,6 +24,21 @@ set -euo pipefail
 # parse is a file it can never thin - it would accumulate forever while looking
 # like it was being managed. Files with no recognizable date at all are left
 # untouched and reported, never guessed at.
+#
+# Portability: this runs on the NAS (GNU date, bash 5), but the suite also runs
+# on a macOS spare. `env bash` because the script needs bash 4 (declare -A,
+# mapfile) and macOS's /bin/bash is 3.2. ymd_date tries GNU `date -d` first, so
+# on Linux the BSD branch is never reached; on BSD it round-trips the date
+# because `date -j -f` normalises an impossible one (20260231 -> 20260303)
+# where GNU refuses it.
+
+# ymd_date YYYYMMDD +FORMAT
+ymd_date() {
+  local out
+  out=$(date -d "$1" "$2" 2>/dev/null) && [ -n "$out" ] && { echo "$out"; return 0; }
+  [ "$(date -j -f %Y%m%d%H%M%S "${1}000000" +%Y%m%d 2>/dev/null)" = "$1" ] || return 1
+  date -j -f %Y%m%d%H%M%S "${1}000000" "$2"
+}
 
 DIR="${1:?Usage: backup-prune.sh <backup-dir>}"
 [ -d "$DIR" ] || { echo "ERROR: not a directory: $DIR" >&2; exit 1; }
@@ -57,7 +72,7 @@ for f in "${FILES[@]}"; do
   fi
 
   date_part="${ts%%-*}"
-  epoch=$(date -d "${date_part}" +%s 2>/dev/null) || {
+  epoch=$(ymd_date "${date_part}" +%s) || {
     echo "backup-prune: skip (unparseable date): $base"
     continue
   }
@@ -73,14 +88,14 @@ for f in "${FILES[@]}"; do
       keep_day[$key]=1
     fi
   elif [ "$age_days" -le 180 ]; then
-    key=$(date -d "${date_part}" +%G-W%V)
+    key=$(ymd_date "${date_part}" +%G-W%V)
     if [ -n "${keep_week[$key]:-}" ]; then
       rm -f "$f"; echo "backup-prune: pruned (weekly tier, superseded): $base"
     else
       keep_week[$key]=1
     fi
   else
-    key=$(date -d "${date_part}" +%Y-%m)
+    key=$(ymd_date "${date_part}" +%Y-%m)
     if [ -n "${keep_month[$key]:-}" ]; then
       rm -f "$f"; echo "backup-prune: pruned (monthly tier, superseded): $base"
     elif [ "$month_kept" -ge "$MONTHLY_CAP" ]; then

@@ -337,7 +337,7 @@ startup() {
 
 @test "duc: the cron file is world-readable, which cron requires" {
     startup write_cron_file "0 4 * * *" "$DUC_CRON_FILE"
-    run stat -c '%a' "$DUC_CRON_FILE"
+    run file_mode "$DUC_CRON_FILE"
     assert_output "644"
 }
 
@@ -359,24 +359,41 @@ startup() {
     # has to be a socket and not a file, because the loop tests `[ -S ]`.
     #
     # The `sleep` stub is what makes an inverted condition fail instead of hang.
-    # Entered with the socket already up, nothing else ends that loop, so after
-    # 100 calls the stub takes the socket away: the loop leaves, the chmod finds
-    # nothing, and errexit kills the function before nginx. A hang would be
-    # scored by the oracle's time budget rather than by an assertion, and 100 is
-    # far more calls than the real form needs for a bind that takes milliseconds.
+    # It counts only the calls made while the socket is UP: the correct loop
+    # sleeps while the socket is absent and leaves once it appears, so it makes
+    # at most a stray one; the inverted loop sleeps only while it is up. After
+    # 100 such calls the stub takes the socket away: the loop leaves, the chmod
+    # finds nothing, and errexit kills the function before nginx.
+    #
+    # It used to count every call. The stub fcgiwrap is backgrounded and binds
+    # through python3, and on a host under I/O pressure (the NAS, 2026-09-26)
+    # the tight stub loop ran past 100 before python3 had even started: the
+    # socket was removed the moment it appeared and the correct code spun
+    # forever. Calls made while waiting no longer count, so a slow bind is just
+    # a slow test - bounded by the deadline below, which fails it rather than
+    # hanging if the socket never appears at all.
     export DUC_FCGI_SOCKET="$BATS_TEST_TMPDIR/fcgiwrap.socket"
     export SLEEP_COUNT="$BATS_TEST_TMPDIR/sleep-count"
+    export SLEEP_DEADLINE=$(( $(date +%s) + 120 ))
+    export SLEEP_TIMED_OUT="$BATS_TEST_TMPDIR/sleep-timed-out"
     stub_tool fcgiwrap '
         python3 -c "import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])" "$DUC_FCGI_SOCKET"
         echo "fcgiwrap stub: $*"
     '
     stub_tool nginx 'echo "nginx stub"'
     stub_tool sleep '
-        n=$(( $(cat "$SLEEP_COUNT" 2>/dev/null || echo 0) + 1 ))
-        echo "$n" > "$SLEEP_COUNT"
-        [ "$n" -lt 100 ] || rm -f "$DUC_FCGI_SOCKET"
+        if [ -S "$DUC_FCGI_SOCKET" ]; then
+            n=$(( $(cat "$SLEEP_COUNT" 2>/dev/null || echo 0) + 1 ))
+            echo "$n" > "$SLEEP_COUNT"
+            [ "$n" -lt 100 ] || rm -f "$DUC_FCGI_SOCKET"
+        elif [ "$(date +%s)" -gt "$SLEEP_DEADLINE" ]; then
+            : > "$SLEEP_TIMED_OUT"
+            kill "$PPID"
+        fi
     '
     startup start_webserver
+    [ ! -f "$SLEEP_TIMED_OUT" ] \
+        || fail "the fcgiwrap stub never bound the socket within 120s"
     assert_success
     assert_output --partial "Launching webserver"
     assert_stub_called nginx ""

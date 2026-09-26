@@ -94,7 +94,7 @@ setup() {
     local dir="$BATS_TEST_TMPDIR/prune-tier"
     mkdir -p "$dir"
     local d14 d14b
-    d14=$(date -d '14 days ago' +%Y%m%d)
+    d14=$(ago_fmt $((14 * 86400)) +%Y%m%d)
     touch "$dir/arr-stack-backup-${d14}-010000.tar.gz" \
           "$dir/arr-stack-backup-${d14}-230000.tar.gz"
 
@@ -110,7 +110,7 @@ setup() {
     local dir="$BATS_TEST_TMPDIR/prune-recent"
     mkdir -p "$dir"
     local d2
-    d2=$(date -d '2 days ago' +%Y%m%d)
+    d2=$(ago_fmt $((2 * 86400)) +%Y%m%d)
     touch "$dir/arr-stack-backup-${d2}-010000.tar.gz" \
           "$dir/arr-stack-backup-${d2}-230000.tar.gz"
 
@@ -127,7 +127,7 @@ setup() {
     local dir="$BATS_TEST_TMPDIR/prune-legacy"
     mkdir -p "$dir"
     local d40
-    d40=$(date -d '40 days ago' +%Y%m%d)
+    d40=$(ago_fmt $((40 * 86400)) +%Y%m%d)
     touch "$dir/arr-stack-backup-${d40}.tar.gz"
 
     run "$PRUNE_SH" "$dir"
@@ -144,6 +144,20 @@ setup() {
     assert_success
     assert_output --partial 'no recognizable timestamp'
     [ -f "$dir/arr-stack-backup-manual-copy.tar.gz" ]
+}
+
+@test "backup-prune.sh skips an impossible calendar date instead of tiering it" {
+    # GNU `date -d 20260231` refuses; BSD `date -j -f` silently normalises it
+    # to 3 March. ymd_date round-trips the BSD answer so both hosts refuse --
+    # otherwise a Mac would tier, and could delete, a file by a date it never had.
+    local dir="$BATS_TEST_TMPDIR/prune-impossible"
+    mkdir -p "$dir"
+    touch "$dir/arr-stack-backup-20260231-010000.tar.gz"
+
+    run "$PRUNE_SH" "$dir"
+    assert_success
+    assert_output --partial 'unparseable date'
+    [ -f "$dir/arr-stack-backup-20260231-010000.tar.gz" ]
 }
 
 @test "the deploy workflow never rotates the GFS-managed backup directory" {
@@ -697,6 +711,11 @@ load_cleanup() {
     mkdir -p "$bin"
     printf '#!/bin/sh\ncase "$1" in ps) exit 0 ;; *) echo "compose exploded" >&2; exit 7 ;; esac\n' > "$bin/docker"
     chmod +x "$bin/docker"
+
+    # ensure_services_running wraps compose in `timeout`, so without one the
+    # status it reports is 127 from the shell, never docker's 7.
+    command -v timeout >/dev/null 2>&1 \
+        || skip "no timeout binary on this host - arr-backup.sh's bound needs one too"
 
     local script="$BATS_TEST_TMPDIR/fail.sh"
     {

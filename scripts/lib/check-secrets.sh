@@ -119,7 +119,11 @@ check_secrets() {
 
         # Pattern 5: PEM private key blocks
         # No allowlist by design, same reasoning as pattern 3.
-        if echo "$content" | grep -qE '^-----BEGIN (RSA |EC |OPENSSH |DSA |)PRIVATE KEY-----' 2>/dev/null; then
+        # `( ... )?`, never an empty alternative `( ... |)`: GNU grep accepts
+        # the empty branch, BSD grep (macOS) rejects the whole pattern with
+        # "empty (sub)expression" and exit 2 -- which the 2>/dev/null hid, so
+        # on a Mac this pattern could never fire.
+        if echo "$content" | grep -qE '^-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----' 2>/dev/null; then
             echo "    ERROR: Private key block detected in $file"
             errors=$((errors + 1))
         fi

@@ -41,10 +41,25 @@ setup() {
 # The config-reading half reaches the filesystem through exactly one seam.
 fake_root() { get_repo_root() { echo "$FAKE"; }; }
 
+# ssh_to_nas execs `timeout 10 ssh ...`, and `timeout` is GNU coreutils: macOS
+# has none, so there the function returns 127 before ssh (or its stub) is ever
+# reached. Stubbing timeout away would hide exactly that, so these tests skip
+# and say why instead.
+need_timeout() {
+    command -v timeout >/dev/null 2>&1 \
+        || skip "no timeout binary on this host - ssh_to_nas's bound needs one too"
+}
+
 # A real repository, because get_all_tracked_files / get_staged_files call git
 # in the CWD and a git stub that answered them both would be re-implementing
 # the thing under test.
+#
+# The NAS has no host git (it drives this repo through a containerised
+# alpine/git), so there these skip with the same reason the other git-gated
+# tests give - run-tests.sh counts that reason into its census.
 real_repo() {
+    command -v git >/dev/null 2>&1 \
+        || skip "no host git binary (the NAS drives this repo through a containerised alpine/git)"
     REPO="$BATS_TEST_TMPDIR/repo"
     mkdir -p "$REPO"
     cd "$REPO" || return 1
@@ -511,6 +526,7 @@ real_repo() {
 }
 
 @test "common: ssh_to_nas builds the argv the NAS actually needs" {
+    need_timeout
     fake_root
     printf 'SSH: leoleg@mynas.local\n' > "$FAKE/.claude/config.local.md"
     stub_init
@@ -530,6 +546,7 @@ real_repo() {
 }
 
 @test "common: ssh_to_nas uses sshpass only when both the password and sshpass exist" {
+    need_timeout
     fake_root
     printf 'SSH: leoleg@mynas.local\n' > "$FAKE/.claude/config.local.md"
     stub_init
@@ -542,6 +559,7 @@ real_repo() {
 }
 
 @test "common: an unset NAS_SSH_PASS is not an unbound variable" {
+    need_timeout
     # The bare $NAS_SSH_PASS aborted instantly under any caller running set -u.
     # scripts/pre-commit does not, today -- which is exactly how a latent trap
     # stays latent until the first caller that does.
