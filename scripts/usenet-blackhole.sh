@@ -217,7 +217,7 @@ while [[ $# -gt 0 ]]; do
       # until the --report-failures paragraph above went in, 3,40 until
       # --stall-hours did, and 3,46 until --max-inflight did; that test is what
       # notices, so run it after editing the top of this file.
-      sed -n '3,55p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '3,56p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
