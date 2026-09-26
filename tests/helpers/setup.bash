@@ -9,6 +9,46 @@ REPO_ROOT="$(cd "$TEST_DIR/.." && pwd)"
 load "$TEST_DIR/bats-support/load"
 load "$TEST_DIR/bats-assert/load"
 
+# --- GNU/BSD portability for fixtures -----------------------------------------
+#
+# The suite runs on Linux (CI, pi1) and on a macOS cold spare, and a fixture
+# that spells a date or a mode the GNU way fails there before the code under
+# test is reached. Each helper tries the GNU spelling first and checks the
+# SHAPE of what came back before trusting it -- the `stat -f` trap in
+# docs/TEST-HARDENING-LOG.md section 8 is why the ordering alone is not enough.
+
+# epoch_fmt EPOCH +FORMAT -- format a Unix time. GNU `date -d @N`, BSD `date -r N`.
+epoch_fmt() {
+    local out
+    out=$(date -d "@$1" "$2" 2>/dev/null) && [[ -n "$out" ]] && { printf '%s\n' "$out"; return 0; }
+    out=$(date -r "$1" "$2" 2>/dev/null) && [[ -n "$out" ]] && { printf '%s\n' "$out"; return 0; }
+    echo "epoch_fmt: this date(1) can format neither 'date -d @$1' nor 'date -r $1'" >&2
+    return 1
+}
+
+# ago_fmt SECONDS +FORMAT -- the time SECONDS ago, formatted. Arithmetic on the
+# epoch rather than `date -d 'N days ago'`, which BSD date does not parse.
+ago_fmt() { epoch_fmt "$(( $(date +%s) - $1 ))" "$2"; }
+
+# touch_ago SECONDS FILE -- set FILE's mtime to SECONDS ago. `touch -t` is the
+# POSIX spelling both touches accept; `touch -d '25 hours ago'` is GNU-only.
+touch_ago() {
+    local stamp
+    stamp=$(ago_fmt "$1" +%Y%m%d%H%M.%S) || return 1
+    touch -t "$stamp" "$2"
+}
+
+# file_mode FILE -- permission bits in octal, e.g. 644. GNU `stat -c %a`, BSD
+# `stat -f %Lp`. GNU accepts `-f` too (as --file-system) and prints a report,
+# hence the shape check on each answer.
+file_mode() {
+    local m
+    m=$(stat -c %a "$1" 2>/dev/null) && [[ "$m" =~ ^[0-7]+$ ]] && { printf '%s\n' "$m"; return 0; }
+    m=$(stat -f %Lp "$1" 2>/dev/null) && [[ "$m" =~ ^[0-7]+$ ]] && { printf '%s\n' "$m"; return 0; }
+    echo "file_mode: could not read the mode of $1" >&2
+    return 1
+}
+
 # All compose files in the repo
 get_compose_files() {
     local files=()

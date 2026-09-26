@@ -337,7 +337,7 @@ startup() {
 
 @test "duc: the cron file is world-readable, which cron requires" {
     startup write_cron_file "0 4 * * *" "$DUC_CRON_FILE"
-    run stat -c '%a' "$DUC_CRON_FILE"
+    run file_mode "$DUC_CRON_FILE"
     assert_output "644"
 }
 

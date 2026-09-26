@@ -82,7 +82,7 @@ make_throwaway_repo() {
 mutation demo-killed \
   --file "$FX/target.sh" --bats "$FX/fixture.bats" \
   --test "asserts the guarded output" --why "x" \
-  --apply 'sed -i s@yes@nope@ "\$F"'
+  --apply 'perl -pi -e s@yes@nope@ "\$F"'
 CORPUS
     run "$RUNNER" "$FX/corpus.sh"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
@@ -132,7 +132,7 @@ CORPUS
 mutation demo-skipped \
   --file "$FX/target.sh" --bats "$FX/fixture.bats" \
   --test "skips for an environment reason" --why "x" \
-  --apply 'sed -i s@yes@nope@ "\$F"'
+  --apply 'perl -pi -e s@yes@nope@ "\$F"'
 CORPUS
     run "$RUNNER" "$FX/corpus.sh"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
@@ -147,7 +147,7 @@ CORPUS
 mutation demo-survived \
   --file "$FX/target.sh" --bats "$FX/fixture.bats" \
   --test "asserts only the exit status" --why "the test never looks at the output" \
-  --apply 'sed -i s@yes@nope@ "\$F"'
+  --apply 'perl -pi -e s@yes@nope@ "\$F"'
 CORPUS
     run "$RUNNER" "$FX/corpus.sh"
     [[ "$output" == *"SURVIVED demo-survived"* ]] || {
@@ -179,7 +179,7 @@ CORPUS
 mutation demo-badfilter \
   --file "$FX/target.sh" --bats "$FX/fixture.bats" \
   --test "this test name does not exist anywhere" --why "x" \
-  --apply 'sed -i s@yes@nope@ "\$F"'
+  --apply 'perl -pi -e s@yes@nope@ "\$F"'
 CORPUS
     run "$RUNNER" "$FX/corpus.sh"
     [[ "$output" == *"ERROR  demo-badfilter"* && "$output" == *"matched NO tests"* ]] || {
@@ -198,7 +198,7 @@ BROKEN
 mutation demo-already-red \
   --file "$FX/target.sh" --bats "$FX/fixture.bats" \
   --test "asserts the guarded output" --why "x" \
-  --apply 'sed -i s@definitely@surely@ "\$F"'
+  --apply 'perl -pi -e s@definitely@surely@ "\$F"'
 CORPUS
     run "$RUNNER" "$FX/corpus.sh"
     [[ "$output" == *"ERROR  demo-already-red"* && "$output" == *"already failing"* ]] || {
@@ -214,11 +214,11 @@ CORPUS
 mutation demo-a \
   --file "$FX/target.sh" --bats "$FX/fixture.bats" \
   --test "asserts the guarded output" --why "x" \
-  --apply 'sed -i s@yes@nope@ "\$F"'
+  --apply 'perl -pi -e s@yes@nope@ "\$F"'
 mutation demo-b \
   --file "$FX/target.sh" --bats "$FX/fixture.bats" \
   --test "asserts only the exit status" --why "x" \
-  --apply 'sed -i s@no@maybe@ "\$F"'
+  --apply 'perl -pi -e s@no@maybe@ "\$F"'
 CORPUS
     run "$RUNNER" "$FX/corpus.sh"
     local after; after=$(sha256sum < "$FX/target.sh")
@@ -234,11 +234,11 @@ CORPUS
 mutation demo-alpha \
   --file "$FX/target.sh" --bats "$FX/fixture.bats" \
   --test "asserts the guarded output" --why "x" \
-  --apply 'sed -i s@yes@nope@ "\$F"'
+  --apply 'perl -pi -e s@yes@nope@ "\$F"'
 mutation demo-beta \
   --file "$FX/target.sh" --bats "$FX/fixture.bats" \
   --test "asserts the guarded output" --why "x" \
-  --apply 'sed -i s@no@maybe@ "\$F"'
+  --apply 'perl -pi -e s@no@maybe@ "\$F"'
 CORPUS
     run "$RUNNER" -k alpha "$FX/corpus.sh"
     [[ "$output" == *"demo-alpha"* ]] || { echo "$output"; return 1; }
@@ -288,7 +288,7 @@ CORPUS
 mutation demo-unrestorable \
   --file "$FX/target.sh" --bats "$FX/fixture.bats" \
   --test "asserts the guarded output" --why "x" \
-  --apply 'sed -i s@yes@nope@ "\$F"; chmod 444 "\$F"'
+  --apply 'perl -pi -e s@yes@nope@ "\$F"; chmod 444 "\$F"'
 CORPUS
     run "$RUNNER" "$FX/corpus.sh"
     chmod 644 "$FX/target.sh"
@@ -304,7 +304,9 @@ CORPUS
 
     # The message names a path to restore from by hand. It has to still be there.
     local backup_dir
-    backup_dir=$(grep -oE '/tmp/[^ ]*\.orig' <<<"$output" | head -1)
+    # Any absolute path, not just /tmp/: the backup lands under mktemp -d, which
+    # honours $TMPDIR -- /var/folders/... on macOS.
+    backup_dir=$(grep -oE '/[^ ]*\.orig' <<<"$output" | head -1)
     [ -n "$backup_dir" ] || { echo "no backup path was reported: $output"; return 1; }
     [ -f "$backup_dir" ] || {
         echo "the runner deleted the very backup it told the reader to use:"
@@ -326,7 +328,7 @@ CORPUS
 mutation demo-lostbackup \
   --file "$FX/target.sh" --bats "$FX/fixture.bats" \
   --test "asserts the guarded output" --why "x" \
-  --apply 'sed -i s@yes@nope@ "\$F"; find "\${TMPDIR:-/tmp}" -maxdepth 2 -name demo-lostbackup.orig -delete'
+  --apply 'perl -pi -e s@yes@nope@ "\$F"; find "\${TMPDIR:-/tmp}" -maxdepth 2 -name demo-lostbackup.orig -delete'
 CORPUS
     run "$RUNNER" "$FX/corpus.sh"
 
@@ -569,9 +571,13 @@ STUB
 # Fields whose contents are PROSE and are therefore never allowed to be
 # evaluated. --apply is deliberately absent: it is single-quoted shell by
 # design and is the one field that is supposed to contain code.
+#
+# "Not preceded by a backslash" is spelled `(^|[^\\])`, not as a PCRE
+# lookbehind: BSD grep has no -P, and there the scan died on "invalid option"
+# and printed its usage -- which the clean-fixture check then read as a finding.
 scan_corpus_prose() {
     grep -n '^  --\(why\|test\|file\|bats\) ' "$1"/*.sh \
-        | grep -P '(?<!\\)(`|\$\()' || true
+        | grep -E '(^|[^\\])(`|\$\()' || true
 }
 
 @test "no corpus prose field can execute anything when the file is sourced" {
@@ -793,6 +799,14 @@ RUNNER
     # run_tests only echoes its own "<status> <count> <skipped>" triple, never
     # the oracle's stdout, so the fake runner reports through a side-channel
     # file rather than through $output.
+    #
+    # The cap is RLIMIT_AS, and not every kernel will set it: macOS answers
+    # `ulimit -v` with "cannot modify limit: Invalid argument", so run_tests
+    # cannot bound memory there at all. That is a fact about the host, not a
+    # verdict on run_tests -- probed rather than keyed on uname, so the test
+    # runs wherever the limit can actually be set (Linux: CI, pi1).
+    ( ulimit -S -v 786432 ) 2>/dev/null \
+        || skip "this kernel refuses RLIMIT_AS (ulimit -v), e.g. macOS - run_tests cannot cap the oracle's memory here"
     mkdir -p "$FX/fakeroot/tests"
     cat > "$FX/fakeroot/tests/run-tests.sh" <<RUNNER
 #!/bin/bash
@@ -847,7 +861,7 @@ RUNNER
 mutation demo-hangs \
   --file "$FX/target.sh" --bats "$FX/fixture.bats" \
   --test "asserts the guarded output" --why "x" \
-  --apply 'sed -i "1a sleep 300" "\$F"'
+  --apply 'perl -pi -e "s@^if@sleep 300; if@" "\$F"'
 CORPUS
     run env ORACLE_BUDGET_FLOOR=2 "$RUNNER" "$FX/corpus.sh"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }

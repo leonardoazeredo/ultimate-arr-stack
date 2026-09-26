@@ -52,7 +52,7 @@ setup() {
     # permanent, and a stale 'latest' is reported as fact until /tmp is cleared
     # -- silently, since a wrong answer and a right one look identical.
     printf 'some/image:1.0=2.0\n' > "$_IMAGE_CACHE"
-    touch -d '25 hours ago' "$_IMAGE_CACHE"
+    touch_ago $((25 * 3600)) "$_IMAGE_CACHE"
     run _cache_get "some/image:1.0"
     [ "$status" -eq 1 ]
     [ ! -f "$_IMAGE_CACHE" ]
@@ -62,7 +62,7 @@ setup() {
     # The other side of the boundary: over-eager expiry would make every commit
     # re-query 31 registries, which is how a check ends up disabled instead.
     printf 'some/image:1.0=2.0\n' > "$_IMAGE_CACHE"
-    touch -d '23 hours ago' "$_IMAGE_CACHE"
+    touch_ago $((23 * 3600)) "$_IMAGE_CACHE"
     run _cache_get "some/image:1.0"
     [ "$status" -eq 0 ]
     [ "$output" = "2.0" ]
