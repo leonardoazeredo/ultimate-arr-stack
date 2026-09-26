@@ -727,6 +727,43 @@ not per play.
   (`redis-cli --scan --pattern '*tt19231492*'`), and take the password from
   `docker exec magnetio-scraper printenv REDIS_URI`.
 
+### A provider can be dead and still look merely empty
+
+Worth knowing before the next "Magnetio is missing releases" report, because the symptom points
+at the wrong thing. Measured 2026-09-23, asking the scraper for one provider at a time:
+
+```
+1337x             records=0    (Shawshank, Breaking Bad S05E14, Oppenheimer -- every title)
+limetorrents      records=12
+torrentdownloads  records=50
+thepiratebay      records=92
+```
+
+**1337x answers nothing for any title**, and the log says so in the least alarming way possible:
+`[1337x] 0 results in 60ms`, which reads exactly like a site that had no matching releases.
+Querying its configured domains directly shows what is really happening:
+
+```
+https://1337x.to                    HTTP 403
+https://1337x.st                    HTTP 403
+https://1337x.gd                    DNS: ENOTFOUND (domain is gone)
+https://1337x.unblockit.download    HTTP 200, 486 bytes, no table-list rows
+```
+
+`tryDomains` moves on when a domain returns a classified failure, so the two 403s and the dead
+host are handled — and then it stops at the mirror, because **it accepts any `200` as a healthy
+domain**. A 486-byte parking page is a success as far as it is concerned, so `scrape()` parses
+zero rows, returns `[]`, logs no warning, and the provider looks quiet rather than broken.
+
+That is the diagnostic to hold on to: a provider reporting `0 results` in **tens of
+milliseconds** is not searching, it is being handed a stub. A provider that genuinely finds
+nothing still has to fetch a search page and normally takes seconds. Compare it against a
+known-good provider on the same title before concluding the title has no releases.
+
+Whether 1337x is worth repairing is a separate decision — the 403s are the site refusing this
+stack's VPN exit address, so a different exit or different mirrors is the lever, and the mirror
+acceptance above is the reason it went unnoticed.
+
 ## Memory: Unnecessary Swap With Plenty of Free RAM
 
 **Symptom:** `free -h` shows several GB of swap used even though there's plenty of available RAM. System feels slower than expected for the amount of RAM installed.
