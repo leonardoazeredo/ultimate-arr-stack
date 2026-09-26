@@ -146,6 +146,20 @@ setup() {
     [ -f "$dir/arr-stack-backup-manual-copy.tar.gz" ]
 }
 
+@test "backup-prune.sh skips an impossible calendar date instead of tiering it" {
+    # GNU `date -d 20260231` refuses; BSD `date -j -f` silently normalises it
+    # to 3 March. ymd_date round-trips the BSD answer so both hosts refuse --
+    # otherwise a Mac would tier, and could delete, a file by a date it never had.
+    local dir="$BATS_TEST_TMPDIR/prune-impossible"
+    mkdir -p "$dir"
+    touch "$dir/arr-stack-backup-20260231-010000.tar.gz"
+
+    run "$PRUNE_SH" "$dir"
+    assert_success
+    assert_output --partial 'unparseable date'
+    [ -f "$dir/arr-stack-backup-20260231-010000.tar.gz" ]
+}
+
 @test "the deploy workflow never rotates the GFS-managed backup directory" {
     # backup-prune.sh owns retention there. --rotate-days on the same directory
     # recreates the two-policy collision that caused the loss.
