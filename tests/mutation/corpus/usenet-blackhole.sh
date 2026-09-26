@@ -32,7 +32,7 @@ mutation usenet-blackhole-help-prints-its-own-source \
   --bats tests/usenet-blackhole.bats \
   --test "^usenet-blackhole: --help stops at the comment block" \
   --why "the fixed-range sed that prints the header has to stop ON the last comment line; one line further and --help emits the SCRIPT_DIR assignment below it, shell source dressed as documentation. This is a hardcoded range, so it goes stale every time a line is added to the header -- which is exactly what happened when the --report-failures paragraph went in, and the test is what noticed" \
-  --apply 'perl -pi -e "s/\Qsed -n '"'"'3,55p'"'"'\E/sed -n '"'"'3,58p'"'"'/" "$F"'
+  --apply 'perl -pi -e "s/\Qsed -n '"'"'3,56p'"'"'\E/sed -n '"'"'3,59p'"'"'/" "$F"'
 
 # --- staging inside the arr's watch folder ---------------------------------
 

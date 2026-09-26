@@ -3,9 +3,10 @@ Description=Move NZBs between the arrs and TorBox (UsenetBlackhole client)
 Documentation=file:/volume1/docker/arr-stack/scripts/usenet-blackhole.sh
 
 # Both arrs are configured with a UsenetBlackhole download client instead of
-# SABnzbd, because SABnzbd's server (nntp.torbox.app) serves articles only up
-# to about 90 days old -- measured 2026-09-14 -- while TorBox's API fetched the
-# same releases regardless of age. The arr writes an .nzb into its nzbFolder
+# SABnzbd, because SABnzbd (reading nntp.torbox.app) failed most backlog grabs
+# on missing articles. First blamed on a ~90-day limit; re-measured 2026-09-26:
+# no age cutoff, per-release article loss that grows with age. See
+# scripts/lib/usenet_blackhole.py. The arr writes an .nzb into its nzbFolder
 # and polls its watchFolder; this is what moves the file between them.
 
 [Service]

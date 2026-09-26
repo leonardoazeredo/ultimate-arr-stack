@@ -75,7 +75,7 @@ Config (⚙️) → Folders → set **absolute paths**:
 
 > For hardening settings and `.lan` hostname whitelist, see [SABnzbd Advanced Setup](APP-CONFIG-ADVANCED.md#sabnzbd-hardening-trash-recommended).
 >
-> **SABnzbd is not the arrs' usenet client.** `configure-apps.sh` gives Sonarr and Radarr a Blackhole client pointing at `/data/usenet/blackhole/{nzb,complete}`, and a systemd timer carries those NZBs through TorBox's API. SABnzbd's own connection to `nntp.torbox.app` reaches only articles about 90 days old, which is most of what an indexer returns — see [Usenet](TROUBLESHOOTING.md#usenet-sabnzbd-fails-every-article-torboxs-own-downloader-succeeds). The folders above matter only if you point SABnzbd at a provider of your own.
+> **SABnzbd is not the arrs' usenet client.** `configure-apps.sh` gives Sonarr and Radarr a Blackhole client pointing at `/data/usenet/blackhole/{nzb,complete}`, and a systemd timer carries those NZBs through TorBox's API. SABnzbd's own connection to `nntp.torbox.app` failed most backlog grabs on missing articles — not a ~90-day cutoff, as first thought, but per-release article loss that grows with age (re-measured 2026-09-26) — see [Usenet](TROUBLESHOOTING.md#usenet-sabnzbd-fails-every-article-torboxs-own-downloader-succeeds). The folders above matter only if you point SABnzbd at a provider of your own.
 
 ### 3. Prowlarr — Add your indexers
 

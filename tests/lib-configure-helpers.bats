@@ -446,8 +446,9 @@ radarr() {
 
 @test "configure-helpers: the usenet client is the arr's own blackhole" {
     # This used to be a `Sabnzbd` client pointed at 172.20.0.3:8080, which is not
-    # a working usenet path here: SABnzbd reads nntp.torbox.app, which serves
-    # articles only up to about 90 days old, so every backlog grab fails. The
+    # a working usenet path here: SABnzbd reads nntp.torbox.app and failed most
+    # backlog grabs on missing articles (no age cutoff, re-measured 2026-09-26:
+    # per-release article loss that grows with age). The
     # blackhole hands the NZB to usenet-blackhole.timer instead, which submits it
     # to TorBox's API. See docs/TROUBLESHOOTING.md.
     arr_setup

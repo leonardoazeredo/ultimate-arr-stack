@@ -430,6 +430,8 @@ decide whether the walker needs to move at all.
 One separate question belongs here. Older content is where usenet retention runs
 out, and it is also where debrid caches do well, because an old torrent is as
 available as it ever was while an old usenet post is gone after about 90 days.
+(Corrected 2026-09-26: there is no 90-day cutoff; old posts lose articles
+per release, increasingly with age. See CHANGELOG.md.)
 Routing old releases to Decypharr may be the better answer for the tail of the
 backlog. That needs its own diagnosis first, since Decypharr imported nothing
 overnight and nobody has established why.

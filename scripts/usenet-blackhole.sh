@@ -3,12 +3,13 @@ set -euo pipefail
 #
 # Move NZBs between the arrs and TorBox, for the UsenetBlackhole download client.
 #
-# SABnzbd here talks to nntp.torbox.app, which serves articles only up to about
-# 90 days old (measured 2026-09-14: 1/34/60/86-day releases resolved every time,
-# 101/138-day releases resolved none of them). TorBox's API has no such limit --
-# the same 138-day-old NZB completed at 836 MB -- so this submits to the API
-# instead of reading from that cache. See scripts/lib/usenet_blackhole.py for
-# the full evidence and the arr-side contract.
+# SABnzbd here talks to nntp.torbox.app, and it failed most backlog grabs on
+# missing articles. That was first blamed on a ~90-day retention limit;
+# re-measured 2026-09-26 over 209 NZBs there is no age cutoff, only per-release
+# article loss that grows with age. TorBox's API completed a 138-day-old NZB
+# SABnzbd could not fetch, so this submits to the API instead -- whether the API
+# does materially better overall is still open. See scripts/lib/usenet_blackhole.py
+# for the full evidence and the arr-side contract.
 #
 # Usage:
 #   ./scripts/usenet-blackhole.sh                    # dry run (default)
@@ -216,7 +217,7 @@ while [[ $# -gt 0 ]]; do
       # until the --report-failures paragraph above went in, 3,40 until
       # --stall-hours did, and 3,46 until --max-inflight did; that test is what
       # notices, so run it after editing the top of this file.
-      sed -n '3,55p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '3,56p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)

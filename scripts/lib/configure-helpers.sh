@@ -192,11 +192,12 @@ configure_arr_service() {
 
     # --- Download client: the usenet blackhole (if usenet is wanted) ---
     # This used to add a `Sabnzbd` client pointed at 172.20.0.3:8080. It is not a
-    # working usenet path here: SABnzbd reads `nntp.torbox.app`, which serves
-    # articles only up to about 90 days old, so a backlog grab is a guaranteed
-    # failure (measured 2026-09-14 -- see docs/TROUBLESHOOTING.md). The arr's own
+    # working usenet path here: SABnzbd reads `nntp.torbox.app`, and it failed
+    # most backlog grabs on missing articles. First blamed on a ~90-day limit;
+    # re-measured 2026-09-26: no age cutoff, per-release article loss that grows
+    # with age (see scripts/lib/usenet_blackhole.py). The arr's own
     # UsenetBlackhole client plus usenet-blackhole.timer moves releases through
-    # TorBox's API instead, which has no age limit.
+    # TorBox's API instead.
     #
     # Re-running this script is the specific way the old client could come back:
     # it only skips a client it already finds.
