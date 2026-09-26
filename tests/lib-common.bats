@@ -53,7 +53,13 @@ need_timeout() {
 # A real repository, because get_all_tracked_files / get_staged_files call git
 # in the CWD and a git stub that answered them both would be re-implementing
 # the thing under test.
+#
+# The NAS has no host git (it drives this repo through a containerised
+# alpine/git), so there these skip with the same reason the other git-gated
+# tests give - run-tests.sh counts that reason into its census.
 real_repo() {
+    command -v git >/dev/null 2>&1 \
+        || skip "no host git binary (the NAS drives this repo through a containerised alpine/git)"
     REPO="$BATS_TEST_TMPDIR/repo"
     mkdir -p "$REPO"
     cd "$REPO" || return 1
